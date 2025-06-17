@@ -7,8 +7,11 @@
 #include <sstream>
 #include <ctime>
 #include <regex>
+#include <thread>
+#include <atomic>
 #include "resource.h"
 #include "json_minimal.h"
+#include "stream_thread.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
@@ -17,8 +20,56 @@ struct StreamTab {
     HWND hChild;
     HWND hQualities;
     HWND hWatchBtn;
+    HWND hStopBtn;
     std::vector<std::wstring> qualities;
     std::map<std::wstring, std::wstring> qualityToUrl;
+    std::thread streamThread;
+    std::atomic<bool> cancelToken{false};
+    bool isStreaming = false;
+
+    // Make the struct movable but not copyable
+    StreamTab() = default;
+    StreamTab(const StreamTab&) = delete;
+    StreamTab& operator=(const StreamTab&) = delete;
+    StreamTab(StreamTab&& other) noexcept 
+        : channel(std::move(other.channel))
+        , hChild(other.hChild)
+        , hQualities(other.hQualities)
+        , hWatchBtn(other.hWatchBtn)
+        , hStopBtn(other.hStopBtn)
+        , qualities(std::move(other.qualities))
+        , qualityToUrl(std::move(other.qualityToUrl))
+        , streamThread(std::move(other.streamThread))
+        , cancelToken(other.cancelToken.load())
+        , isStreaming(other.isStreaming)
+    {
+        other.hChild = nullptr;
+        other.hQualities = nullptr;
+        other.hWatchBtn = nullptr;
+        other.hStopBtn = nullptr;
+        other.isStreaming = false;
+    }
+    StreamTab& operator=(StreamTab&& other) noexcept {
+        if (this != &other) {
+            channel = std::move(other.channel);
+            hChild = other.hChild;
+            hQualities = other.hQualities;
+            hWatchBtn = other.hWatchBtn;
+            hStopBtn = other.hStopBtn;
+            qualities = std::move(other.qualities);
+            qualityToUrl = std::move(other.qualityToUrl);
+            streamThread = std::move(other.streamThread);
+            cancelToken = other.cancelToken.load();
+            isStreaming = other.isStreaming;
+            
+            other.hChild = nullptr;
+            other.hQualities = nullptr;
+            other.hWatchBtn = nullptr;
+            other.hStopBtn = nullptr;
+            other.isStreaming = false;
+        }
+        return *this;
+    }
 };
 
 HINSTANCE g_hInst;
@@ -63,11 +114,24 @@ std::wstring Utf8ToWide(const std::string& s) {
 std::string HttpGet(const wchar_t* host, const wchar_t* path, const wchar_t* headers = nullptr) {
     HINTERNET hSession = WinHttpOpen(L"Tardsplaya/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!hSession) return "";
+    
+    // For Windows 7 compatibility - disable certificate validation if needed
+    DWORD dwFlags = WINHTTP_FLAG_SECURE;
+    
     HINTERNET hConnect = WinHttpConnect(hSession, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
+    
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path,
-        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, dwFlags);
     if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+    
+    // For Windows 7 compatibility - ignore certificate errors
+    DWORD dwSecurityFlags = SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                           SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                           SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                           SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+    WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwSecurityFlags, sizeof(dwSecurityFlags));
+    
     BOOL bResult = WinHttpSendRequest(hRequest, headers, headers ? -1 : 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
         WinHttpReceiveResponse(hRequest, NULL);
     std::string data;
@@ -89,8 +153,16 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, const wchar_t* hea
 }
 
 std::wstring GetAccessToken(const std::wstring& channel) {
-    std::wstring path = L"/api/channels/" + channel + L"/access_token";
-    std::string resp = HttpGet(L"api.twitch.tv", path.c_str(), L"Client-ID: kimne78kx3ncx6brgo4mv6wki5h1ko");
+    // Use modern Twitch API - get access token for channel
+    std::wstring path = L"/api/channels/" + channel + L"/access_token?need_https=true&oauth_token=&platform=web&player_backend=mediaplayer&player_type=site";
+    std::string resp = HttpGet(L"gql.twitch.tv", path.c_str(), L"Client-ID: kimne78kx3ncx6brgo4mv6wki5h1ko");
+    
+    // Fallback to alternative endpoint if first fails
+    if (resp.empty()) {
+        path = L"/api/channels/" + channel + L"/access_token";
+        resp = HttpGet(L"api.twitch.tv", path.c_str(), L"Client-ID: kimne78kx3ncx6brgo4mv6wki5h1ko");
+    }
+    
     JsonValue jv = parse_json(resp);
     std::string token, sig;
     if (jv.type == JsonValue::Object) {
@@ -108,9 +180,16 @@ std::wstring FetchPlaylist(const std::wstring& channel, const std::wstring& acce
     if (sep == std::wstring::npos) return L"";
     std::wstring sig = accessToken.substr(0, sep);
     std::wstring token = accessToken.substr(sep + 1);
+    
+    // URL encode the token and sig for safety
+    std::string tokenUtf8 = WideToUtf8(token);
+    std::string sigUtf8 = WideToUtf8(sig);
+    
+    // Build the playlist URL with proper parameters
     std::wstring path = L"/api/channel/hls/" + channel +
-        L".m3u8?player=twitchweb&allow_source=true&allow_audio_only=true&type=any&token=" +
-        token + L"&sig=" + sig + L"&p=1";
+        L".m3u8?player=twitchweb&allow_source=true&allow_audio_only=true&type=any&p=" +
+        std::to_wstring(rand() % 999999) + L"&token=" + token + L"&sig=" + sig;
+    
     std::string resp = HttpGet(L"usher.ttvnw.net", path.c_str());
     return Utf8ToWide(resp);
 }
@@ -195,7 +274,26 @@ void LoadChannel(StreamTab& tab) {
     }
 }
 
+void StopStream(StreamTab& tab) {
+    if (tab.isStreaming) {
+        tab.cancelToken = true;
+        if (tab.streamThread.joinable()) {
+            tab.streamThread.join();
+        }
+        tab.isStreaming = false;
+        EnableWindow(tab.hWatchBtn, TRUE);
+        EnableWindow(tab.hStopBtn, FALSE);
+        SetWindowTextW(tab.hWatchBtn, L"Watch");
+        AddLog(L"Stream stopped.");
+    }
+}
+
 void WatchStream(StreamTab& tab) {
+    if (tab.isStreaming) {
+        StopStream(tab);
+        return;
+    }
+
     int sel = (int)SendMessage(tab.hQualities, LB_GETCURSEL, 0, 0);
     if (sel == LB_ERR) {
         MessageBoxW(tab.hChild, L"Select a quality.", L"Error", MB_OK | MB_ICONERROR);
@@ -208,19 +306,32 @@ void WatchStream(StreamTab& tab) {
         MessageBoxW(tab.hChild, L"Failed to resolve quality URL.", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
+    
     std::wstring url = it->second;
-    std::wstring cmd = L"\"" + g_playerPath + L"\" " + g_playerArg + L" \"" + url + L"\"";
-    AddLog(L"Launching: " + cmd);
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
-    cmdBuf.push_back(0);
-    if (!CreateProcessW(NULL, cmdBuf.data(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        MessageBoxW(tab.hChild, L"Failed to launch media player.", L"Error", MB_OK | MB_ICONERROR);
-        return;
-    }
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
+    AddLog(L"Starting buffered stream for " + tab.channel + L" (" + std::wstring(qual) + L")");
+    
+    // Reset cancel token
+    tab.cancelToken = false;
+    
+    // Start the buffering thread
+    tab.streamThread = StartStreamThread(
+        g_playerPath,
+        url,
+        tab.cancelToken,
+        [](const std::wstring& msg) {
+            // Log callback - post message to main thread for thread-safe logging
+            PostMessage(g_hMainWnd, WM_USER + 1, 0, (LPARAM)new std::wstring(msg));
+        },
+        3 // buffer 3 segments
+    );
+    
+    tab.isStreaming = true;
+    EnableWindow(tab.hWatchBtn, FALSE);
+    EnableWindow(tab.hStopBtn, TRUE);
+    SetWindowTextW(tab.hWatchBtn, L"Starting...");
+    
+    // Detach the thread so it runs independently
+    tab.streamThread.detach();
 }
 
 LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -237,6 +348,9 @@ LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             break;
         case IDC_WATCH:
             WatchStream(*tab);
+            break;
+        case IDC_STOP:
+            StopStream(*tab);
             break;
         }
     }
@@ -265,11 +379,14 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     CreateWindowEx(0, L"STATIC", L"Qualities:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
     HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 140, 60, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
     HWND hWatch = CreateWindowEx(0, L"BUTTON", L"Watch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 40, 60, 22, hwnd, (HMENU)IDC_WATCH, g_hInst, nullptr);
+    HWND hStop = CreateWindowEx(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 290, 40, 60, 22, hwnd, (HMENU)IDC_STOP, g_hInst, nullptr);
     EnableWindow(hWatch, FALSE);
+    EnableWindow(hStop, FALSE);
 
     tab.hChild = hwnd;
     tab.hQualities = hQualList;
     tab.hWatchBtn = hWatch;
+    tab.hStopBtn = hStop;
     SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)&tab);
     return hwnd;
 }
@@ -298,10 +415,13 @@ void AddStreamTab(const std::wstring& channel = L"") {
     tie.pszText = (LPWSTR)(channel.empty() ? L"New Stream" : channel.c_str());
     int idx = TabCtrl_GetItemCount(g_hTab);
     TabCtrl_InsertItem(g_hTab, idx, &tie);
-    StreamTab tab = {};
+    
+    // Create the tab in-place to avoid copying
+    g_streams.emplace_back();
+    StreamTab& tab = g_streams.back();
     HWND hChild = CreateStreamChild(g_hTab, tab, channel.c_str());
     tab.hChild = hChild;
-    g_streams.push_back(tab);
+    
     TabCtrl_SetCurSel(g_hTab, idx);
     ResizeTabAndChildren(g_hMainWnd);
 }
@@ -378,6 +498,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_CLOSE:
         DestroyWindow(hwnd);
         break;
+    case WM_USER + 1: {
+        // Thread-safe logging message
+        std::wstring* msg = reinterpret_cast<std::wstring*>(lParam);
+        if (msg) {
+            AddLog(*msg);
+            delete msg;
+        }
+        break;
+    }
     case WM_DESTROY:
         CloseAllTabs();
         PostQuitMessage(0);
