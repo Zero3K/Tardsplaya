@@ -21,4 +21,5 @@
 #define IDC_LOAD        1101
 #define IDC_QUALITIES   1102
 #define IDC_WATCH       1103
-#define IDC_LOG_LIST    1104
+#define IDC_STOP        1104
+#define IDC_LOG_LIST    1105
