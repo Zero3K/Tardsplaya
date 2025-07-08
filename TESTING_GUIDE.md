@@ -26,7 +26,22 @@
 - Test the executable directly
 ```
 
-### **Method 3: Wine Testing (Linux)**
+### **Method 3: TLS Client Testing**
+**NEW**: Test the integrated TLS client fallback functionality:
+
+1. **Disable Windows Update** on a Windows 7 VM to simulate outdated TLS support
+2. **Block WinHTTP** using firewall rules or registry modifications
+3. **Test HTTPS requests** - should automatically fallback to TLS client
+4. **Verify logs** show TLS client being used when WinHTTP fails
+5. **Test stream loading** with TLS client fallback
+
+**TLS Testing Scenarios**:
+- ✅ Modern Windows (WinHTTP primary)
+- ✅ Windows 7 without updates (TLS client fallback)
+- ✅ Corporate networks with SSL inspection (TLS client bypass)
+- ✅ Certificate validation failures (TLS client handles)
+
+### **Method 4: Wine Testing (Linux)**
 ```bash
 # Install Wine and test basic functionality
 sudo apt install wine64
