@@ -139,12 +139,15 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
         L"Content-Type: application/json\r\n";
 
     // Use TLS client to make the GraphQL POST request
+    AddLog(L"Making GraphQL POST request to gql.twitch.tv for channel: " + channel);
     std::string response = TLSClientHTTP::HttpPost(L"gql.twitch.tv", L"/gql", gqlBody, headers);
     
     if (response.empty()) {
+        AddLog(L"GraphQL POST request failed - no response received");
         return L""; // Request failed
     }
     
+    AddLog(L"GraphQL response received, parsing JSON...");
     // Try to parse the JSON response
     try {
         JsonValue root = parse_json(response);
@@ -157,15 +160,25 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
                     std::string token = token_obj["value"].as_str();
                     
                     if (!sig.empty() && !token.empty()) {
+                        AddLog(L"Successfully extracted token and signature from GraphQL response");
                         // Convert to wide strings and return in format expected by existing code
                         std::wstring wsig(sig.begin(), sig.end());
                         std::wstring wtoken(token.begin(), token.end());
                         return wsig + L"|" + wtoken;
+                    } else {
+                        AddLog(L"GraphQL response missing signature or token value");
                     }
+                } else {
+                    AddLog(L"GraphQL response missing streamPlaybackAccessToken object");
                 }
+            } else {
+                AddLog(L"GraphQL response missing data object");
             }
+        } else {
+            AddLog(L"GraphQL response is not a valid JSON object");
         }
     } catch (...) {
+        AddLog(L"Exception occurred while parsing GraphQL JSON response");
         // JSON parsing failed, fall back to legacy API
     }
     

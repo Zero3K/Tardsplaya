@@ -183,27 +183,46 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, const wchar_t* hea
 
 std::wstring GetAccessToken(const std::wstring& channel) {
     // First try the modern GraphQL API approach
+    AddLog(L"Trying modern GraphQL API...");
     std::wstring modernToken = GetModernAccessToken(channel);
     if (!modernToken.empty()) {
+        AddLog(L"Modern GraphQL API succeeded");
         return modernToken;
     }
+    AddLog(L"Modern GraphQL API failed, trying legacy API...");
     
     // Fallback to legacy API approach
     std::wstring path = L"/api/channels/" + channel + L"/access_token?need_https=true&oauth_token=&platform=web&player_backend=mediaplayer&player_type=site";
+    AddLog(L"Trying gql.twitch.tv endpoint...");
     std::string resp = HttpGet(L"gql.twitch.tv", path.c_str(), L"Client-ID: kimne78kx3ncx6brgo4mv6wki5h1ko");
     
     // Fallback to alternative endpoint if first fails
     if (resp.empty()) {
+        AddLog(L"gql.twitch.tv failed, trying api.twitch.tv endpoint...");
         path = L"/api/channels/" + channel + L"/access_token";
         resp = HttpGet(L"api.twitch.tv", path.c_str(), L"Client-ID: kimne78kx3ncx6brgo4mv6wki5h1ko");
     }
     
+    if (resp.empty()) {
+        AddLog(L"All HTTP requests failed - no response received");
+        return L"";
+    }
+    
+    AddLog(L"Parsing JSON response...");
     JsonValue jv = parse_json(resp);
     std::string token, sig;
     if (jv.type == JsonValue::Object) {
         token = jv["token"].as_str();
         sig = jv["sig"].as_str();
+        if (!token.empty() && !sig.empty()) {
+            AddLog(L"Successfully parsed token and signature from legacy API");
+        } else {
+            AddLog(L"JSON response missing token or signature fields");
+        }
+    } else {
+        AddLog(L"JSON parsing failed - invalid response format");
     }
+    
     if (token.empty() || sig.empty()) return L"";
     std::wstring wsig = Utf8ToWide(sig);
     std::wstring wtoken = Utf8ToWide(token);

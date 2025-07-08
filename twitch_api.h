@@ -3,6 +3,9 @@
 #include <vector>
 #include <map>
 
+// Forward declaration for debug logging function
+void AddLog(const std::wstring& msg);
+
 // Output: qualities - list of available qualities (e.g. "1080p (source)", "720p", etc.)
 // Output: playlist_url - the best playlist URL (for the selected quality)
 // Output: log - (optional) log lines for debugging
