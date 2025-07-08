@@ -39,18 +39,6 @@
     <ClCompile Include="urlencode.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="tlsclient\chacha20.c">
-      <Filter>TLSClient</Filter>
-    </ClCompile>
-    <ClCompile Include="tlsclient\ecc.c">
-      <Filter>TLSClient</Filter>
-    </ClCompile>
-    <ClCompile Include="tlsclient\gcm.c">
-      <Filter>TLSClient</Filter>
-    </ClCompile>
-    <ClCompile Include="tlsclient\sha2.c">
-      <Filter>TLSClient</Filter>
-    </ClCompile>
     <ClCompile Include="tlsclient\tlsclient.cpp">
       <Filter>TLSClient</Filter>
     </ClCompile>

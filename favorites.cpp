@@ -1,6 +1,8 @@
 #include "favorites.h"
 #include <fstream>
 #include <sstream>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 
 // Helper function to convert UTF-8 to wide string (local version)

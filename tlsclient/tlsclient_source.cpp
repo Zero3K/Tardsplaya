@@ -1,5 +1,17 @@
 ﻿#pragma once
 
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
+// Include winsock2.h before windows.h to avoid macro redefinition warnings
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
 #include <stdint.h>
 #include <fstream>
 #include "chacha20.c"

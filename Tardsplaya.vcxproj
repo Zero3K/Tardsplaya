@@ -110,10 +110,6 @@
     <ClCompile Include="stream_pipe.cpp" />
     <ClCompile Include="stream_thread.cpp" />
     <ClCompile Include="Tardsplaya.cpp" />
-    <ClCompile Include="tlsclient\chacha20.c" />
-    <ClCompile Include="tlsclient\ecc.c" />
-    <ClCompile Include="tlsclient\gcm.c" />
-    <ClCompile Include="tlsclient\sha2.c" />
     <ClCompile Include="tlsclient\tlsclient.cpp" />
     <ClCompile Include="tlsclient\tlsclient_source.cpp" />
     <ClCompile Include="twitch_api.cpp" />
