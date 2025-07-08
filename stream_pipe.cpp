@@ -100,11 +100,54 @@ static bool ProcessStillRunning(HANDLE hProcess) {
     return false;
 }
 
+// Structure for finding windows by process ID
+struct FindWindowData {
+    DWORD processId;
+    HWND hwnd;
+};
+
+// Callback function to find window by process ID
+static BOOL CALLBACK FindWindowByProcessId(HWND hwnd, LPARAM lParam) {
+    FindWindowData* data = reinterpret_cast<FindWindowData*>(lParam);
+    DWORD processId;
+    GetWindowThreadProcessId(hwnd, &processId);
+    
+    if (processId == data->processId && IsWindowVisible(hwnd)) {
+        // Check if this is a main window (has a title bar and is not a child window)
+        LONG style = GetWindowLong(hwnd, GWL_STYLE);
+        if ((style & WS_CAPTION) && GetParent(hwnd) == NULL) {
+            data->hwnd = hwnd;
+            return FALSE; // Stop enumeration
+        }
+    }
+    return TRUE; // Continue enumeration
+}
+
+// Function to set the title of the player window
+static void SetPlayerWindowTitle(DWORD processId, const std::wstring& title) {
+    if (title.empty()) return;
+    
+    // Try multiple times as the player window might take time to appear
+    for (int attempts = 0; attempts < 10; ++attempts) {
+        FindWindowData data = { processId, NULL };
+        EnumWindows(FindWindowByProcessId, reinterpret_cast<LPARAM>(&data));
+        
+        if (data.hwnd) {
+            SetWindowTextW(data.hwnd, title.c_str());
+            return;
+        }
+        
+        // Wait before trying again
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+}
+
 bool BufferAndPipeStreamToPlayer(
     const std::wstring& player_path,
     const std::wstring& playlist_url,
     std::atomic<bool>& cancel_token,
-    int buffer_segments
+    int buffer_segments,
+    const std::wstring& channel_name
 ) {
     // 1. Download the master playlist and pick the first media playlist (or use playlist_url directly if it's media)
     std::string master;
@@ -143,6 +186,13 @@ bool BufferAndPipeStreamToPlayer(
     );
     CloseHandle(hRead);
     if (!ok) { CloseHandle(hWrite); return false; }
+
+    // Set the player window title to the channel name (in a separate thread to avoid blocking)
+    if (!channel_name.empty()) {
+        std::thread([processId = pi.dwProcessId, title = channel_name]() {
+            SetPlayerWindowTitle(processId, title);
+        }).detach();
+    }
 
     // 4. Download media playlist and buffer segments
     std::set<std::wstring> downloaded;

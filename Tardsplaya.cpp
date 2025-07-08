@@ -716,7 +716,8 @@ void WatchStream(StreamTab& tab) {
             // Log callback - post message to main thread for thread-safe logging
             PostMessage(g_hMainWnd, WM_USER + 1, 0, (LPARAM)new std::wstring(msg));
         },
-        3 // buffer 3 segments
+        3, // buffer 3 segments
+        tab.channel // channel name for player window title
     );
     
     tab.isStreaming = true;
