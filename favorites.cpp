@@ -34,7 +34,7 @@ std::vector<std::wstring> LoadFavoritesFromFile(const wchar_t* filename) {
 
     // Read the entire file
     file.seekg(0, std::ios::end);
-    size_t size = file.tellg();
+    size_t size = static_cast<size_t>(file.tellg());
     file.seekg(0, std::ios::beg);
     
     if (size == 0) return favs;

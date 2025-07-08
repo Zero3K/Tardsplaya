@@ -742,12 +742,12 @@ public:
 			get_hash((char*)hash);
 		}
 		
-		_private_tls_hkdf_expand_label(data13.hs_secret, hash_len, data13.prk, hash_len, client_key, strlen(client_key), hash, hash_len);
+		_private_tls_hkdf_expand_label(data13.hs_secret, hash_len, data13.prk, hash_len, client_key, (unsigned char)strlen(client_key), hash, hash_len);
 		
 		_private_tls_hkdf_expand_label(local_keybuffer, key_len, data13.hs_secret, hash_len, "key", 3, NULL, 0);
 		_private_tls_hkdf_expand_label(local_ivbuffer, encoder->iv_len(true), data13.hs_secret, hash_len, "iv", 2, NULL, 0);
 
-		_private_tls_hkdf_expand_label(data13.secret, hash_len, data13.prk, hash_len, server_key, strlen(server_key), hash, hash_len);
+		_private_tls_hkdf_expand_label(data13.secret, hash_len, data13.prk, hash_len, server_key, (unsigned char)strlen(server_key), hash, hash_len);
 		
 		_private_tls_hkdf_expand_label(remote_keybuffer, key_len, data13.secret, hash_len, "key", 3, NULL, 0);
 		_private_tls_hkdf_expand_label(remote_ivbuffer, encoder->iv_len(true), data13.secret, hash_len, "iv", 2, NULL, 0);
@@ -1337,7 +1337,7 @@ class tls_client
 					}
 					else if (level == 2) { // fatal alert
 						err_msg.set_size(256);
-						sprintf(err_msg.buf, "tls fatal alert: level=0x%x code=0x%x", level, code);
+						sprintf_s(err_msg.buf, err_msg.capacity, "tls fatal alert: level=0x%x code=0x%x", level, code);
 						return err_msg.buf;
 					}
 					else {
@@ -1480,10 +1480,17 @@ public:
 		
 		if(ip == 0)
 		{
-			hostent *h = gethostbyname(host);
-			if(!h || h->h_length <= 0)
+			addrinfo hints = {0};
+			addrinfo* result = nullptr;
+			hints.ai_family = AF_INET;
+			hints.ai_socktype = SOCK_STREAM;
+			
+			if (getaddrinfo(host, nullptr, &hints, &result) != 0 || !result)
 				return set_err("hostÃ»ÓÐ¶ÔÓ¦µÄip", -1);
-			ip = *(DWORD*)h->h_addr_list[0];
+			
+			sockaddr_in* addr_in = (sockaddr_in*)result->ai_addr;
+			ip = addr_in->sin_addr.S_un.S_addr;
+			freeaddrinfo(result);
 		}
 		s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 		if(s == INVALID_SOCKET)

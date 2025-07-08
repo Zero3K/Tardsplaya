@@ -10,14 +10,8 @@
 
 static bool g_tlsInitialized = false;
 
-// Helper function to convert wide string to UTF-8
-std::string WideToUtf8(const std::wstring& wide) {
-    if (wide.empty()) return std::string();
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wide[0], (int)wide.size(), NULL, 0, NULL, NULL);
-    std::string strTo(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, &wide[0], (int)wide.size(), &strTo[0], size_needed, NULL, NULL);
-    return strTo;
-}
+// Forward declaration - WideToUtf8 is defined in Tardsplaya.cpp
+extern std::string WideToUtf8(const std::wstring& wide);
 
 TLSClient::TLSClient() {
     lastError = "";
