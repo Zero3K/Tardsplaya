@@ -132,7 +132,7 @@ void AddFavorite() {
     GetDlgItemText(g_streams[activeTab].hChild, IDC_CHANNEL, channel, 128);
     
     if (wcslen(channel) == 0) {
-        MessageBoxW(g_hMainWnd, L"Enter a channel name first.", L"Add Favorite", MB_OK | MB_ICONINFO);
+        MessageBoxW(g_hMainWnd, L"Enter a channel name first.", L"Add Favorite", MB_OK);
         return;
     }
     
@@ -140,7 +140,7 @@ void AddFavorite() {
     // Check if already in favorites
     for (const auto& fav : g_favorites) {
         if (fav == channelStr) {
-            MessageBoxW(g_hMainWnd, L"Channel is already in favorites.", L"Add Favorite", MB_OK | MB_ICONINFO);
+            MessageBoxW(g_hMainWnd, L"Channel is already in favorites.", L"Add Favorite", MB_OK);
             return;
         }
     }
@@ -153,27 +153,26 @@ void AddFavorite() {
 void DeleteFavorite() {
     int sel = (int)SendMessage(g_hFavoritesList, LB_GETCURSEL, 0, 0);
     if (sel == LB_ERR) {
-        MessageBoxW(g_hMainWnd, L"Select a favorite to delete.", L"Delete Favorite", MB_OK | MB_ICONINFO);
+        MessageBoxW(g_hMainWnd, L"Select a favorite to delete.", L"Delete Favorite", MB_OK);
         return;
     }
     
-    if (MessageBoxW(g_hMainWnd, L"Are you sure you want to delete this favorite?", L"Delete Favorite", MB_YESNO | MB_ICONQUESTION) == IDYES) {
-        g_favorites.erase(g_favorites.begin() + sel);
-        RefreshFavoritesList();
-        SaveFavorites();
-    }
+    g_favorites.erase(g_favorites.begin() + sel);
+    RefreshFavoritesList();
+    SaveFavorites();
 }
 
 void EditFavorite() {
     int sel = (int)SendMessage(g_hFavoritesList, LB_GETCURSEL, 0, 0);
     if (sel == LB_ERR) {
-        MessageBoxW(g_hMainWnd, L"Select a favorite to edit.", L"Edit Favorite", MB_OK | MB_ICONINFO);
+        MessageBoxW(g_hMainWnd, L"Select a favorite to edit.", L"Edit Favorite", MB_OK);
         return;
     }
     
     // Simple edit dialog - for now just show the current name
     std::wstring currentName = g_favorites[sel];
-    MessageBoxW(g_hMainWnd, (L"Current favorite: " + currentName).c_str(), L"Edit Favorite", MB_OK | MB_ICONINFO);
+    std::wstring message = L"Current favorite: " + currentName;
+    MessageBoxW(g_hMainWnd, message.c_str(), L"Edit Favorite", MB_OK);
 }
 
 void OnFavoriteDoubleClick() {
@@ -188,7 +187,7 @@ void OnFavoriteDoubleClick() {
 }
 
 void CheckVersion() {
-    MessageBoxW(g_hMainWnd, L"Tardsplaya Version 1.0\nTwitch Stream Player", L"Version", MB_OK | MB_ICONINFO);
+    MessageBoxW(g_hMainWnd, L"Tardsplaya Version 1.0\nTwitch Stream Player", L"Version", MB_OK);
 }
 
 void UpdateStatusBar(const std::wstring& text) {
