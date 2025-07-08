@@ -392,6 +392,10 @@ std::wstring GetAccessToken(const std::wstring& channel) {
     AddLog(L"Trying modern GraphQL API...");
     std::wstring modernToken = GetModernAccessToken(channel);
     if (!modernToken.empty()) {
+        if (modernToken == L"OFFLINE") {
+            AddLog(L"Channel is offline or does not exist - skipping legacy API attempts");
+            return L""; // Don't try legacy API for offline channels
+        }
         AddLog(L"Modern GraphQL API succeeded");
         return modernToken;
     }
@@ -623,8 +627,8 @@ void LoadChannel(StreamTab& tab) {
     AddLog(L"Requesting Twitch access token...");
     std::wstring token = GetAccessToken(channel);
     if (token.empty()) {
-        MessageBoxW(tab.hChild, L"Failed to get Twitch access token.", L"Error", MB_OK | MB_ICONERROR);
-        AddLog(L"Failed to get Twitch access token.");
+        MessageBoxW(tab.hChild, L"Failed to get access token. The channel may be offline, does not exist, or has been renamed.", L"Channel Error", MB_OK | MB_ICONERROR);
+        AddLog(L"Failed to get Twitch access token - channel may be offline or not exist.");
         return;
     }
     AddLog(L"Fetching playlist...");
