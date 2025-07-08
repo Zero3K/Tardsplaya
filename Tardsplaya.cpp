@@ -499,17 +499,20 @@ LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         return 0;
     }
     if (msg == WM_COMMAND) {
-        StreamTab* tab = reinterpret_cast<StreamTab*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-        if (!tab) return 0;
+        // Get tab index instead of pointer to avoid vector reallocation issues
+        int tabIndex = (int)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+        if (tabIndex < 0 || tabIndex >= (int)g_streams.size()) return 0;
+        StreamTab& tab = g_streams[tabIndex];
+        
         switch (LOWORD(wParam)) {
         case IDC_LOAD:
-            LoadChannel(*tab);
+            LoadChannel(tab);
             break;
         case IDC_WATCH:
-            WatchStream(*tab);
+            WatchStream(tab);
             break;
         case IDC_STOP:
-            StopStream(*tab);
+            StopStream(tab);
             break;
         }
     }
@@ -527,7 +530,7 @@ ATOM RegisterStreamChildClass() {
 }
 
 HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"") {
-    RECT rc = { 0, 0, 480, 120 };
+    RECT rc = { 0, 0, 480, 140 };
     HWND hwnd = CreateWindowEx(0, L"StreamChildWin", NULL,
         WS_CHILD | WS_VISIBLE,
         rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
@@ -536,9 +539,9 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", channel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 70, 10, 140, 22, hwnd, (HMENU)IDC_CHANNEL, g_hInst, nullptr);
     HWND hLoad = CreateWindowEx(0, L"BUTTON", L"1. Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 10, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
     CreateWindowEx(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
-    HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 140, 60, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
-    HWND hWatch = CreateWindowEx(0, L"BUTTON", L"2. Watch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 40, 60, 22, hwnd, (HMENU)IDC_WATCH, g_hInst, nullptr);
-    HWND hStop = CreateWindowEx(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 290, 40, 60, 22, hwnd, (HMENU)IDC_STOP, g_hInst, nullptr);
+    HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, 80, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
+    HWND hWatch = CreateWindowEx(0, L"BUTTON", L"2. Watch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 40, 60, 22, hwnd, (HMENU)IDC_WATCH, g_hInst, nullptr);
+    HWND hStop = CreateWindowEx(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 70, 60, 22, hwnd, (HMENU)IDC_STOP, g_hInst, nullptr);
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
 
@@ -546,7 +549,8 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     tab.hQualities = hQualList;
     tab.hWatchBtn = hWatch;
     tab.hStopBtn = hStop;
-    SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)&tab);
+    // Store index instead of pointer to avoid vector reallocation issues
+    // We'll set this properly in AddStreamTab after the tab is added to vector
     return hwnd;
 }
 
@@ -609,7 +613,9 @@ void AddStreamTab(const std::wstring& channel = L"") {
     g_streams.emplace_back();
     StreamTab& tab = g_streams.back();
     HWND hChild = CreateStreamChild(g_hTab, tab, channel.c_str());
-    tab.hChild = hChild;
+    
+    // Store the index instead of pointer to avoid vector reallocation issues
+    SetWindowLongPtr(hChild, GWLP_USERDATA, (LONG_PTR)idx);
     
     TabCtrl_SetCurSel(g_hTab, idx);
     ResizeTabAndChildren(g_hMainWnd);
@@ -628,6 +634,12 @@ void CloseActiveTab() {
     DestroyWindow(g_streams[cur].hChild);
     g_streams.erase(g_streams.begin() + cur);
     TabCtrl_DeleteItem(g_hTab, cur);
+    
+    // Update indices stored in remaining tabs
+    for (int i = cur; i < (int)g_streams.size(); ++i) {
+        SetWindowLongPtr(g_streams[i].hChild, GWLP_USERDATA, (LONG_PTR)i);
+    }
+    
     if (!g_streams.empty()) {
         int newIdx = cur < (int)g_streams.size() ? cur : (int)g_streams.size() - 1;
         SwitchToTab(newIdx);
@@ -636,7 +648,9 @@ void CloseActiveTab() {
 }
 
 void CloseAllTabs() {
-    for (auto& s : g_streams) DestroyWindow(s.hChild);
+    for (auto& s : g_streams) {
+        if (s.hChild) DestroyWindow(s.hChild);
+    }
     g_streams.clear();
     while (TabCtrl_GetItemCount(g_hTab) > 0)
         TabCtrl_DeleteItem(g_hTab, 0);
