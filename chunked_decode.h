@@ -35,7 +35,7 @@ inline std::string decode_chunked_body(const std::string& chunked_data) {
         pos = size_end + 2;
         
         // Check if we have enough data for the chunk
-        if (pos + chunk_size + 2 > chunked_data.size()) break;
+        if (pos + chunk_size > chunked_data.size()) break;
         
         // Extract chunk data
         result.append(chunked_data.substr(pos, chunk_size));
