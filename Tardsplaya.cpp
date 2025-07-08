@@ -34,6 +34,7 @@ struct StreamTab {
     std::thread streamThread;
     std::atomic<bool> cancelToken{false};
     bool isStreaming = false;
+    bool playerStarted = false; // Track if player has started successfully
 
     // Make the struct movable but not copyable
     StreamTab() = default;
@@ -51,6 +52,7 @@ struct StreamTab {
         , streamThread(std::move(other.streamThread))
         , cancelToken(other.cancelToken.load())
         , isStreaming(other.isStreaming)
+        , playerStarted(other.playerStarted)
     {
         other.hChild = nullptr;
         other.hQualities = nullptr;
@@ -71,12 +73,15 @@ struct StreamTab {
             streamThread = std::move(other.streamThread);
             cancelToken = other.cancelToken.load();
             isStreaming = other.isStreaming;
+            playerStarted = other.playerStarted;
             
             other.hChild = nullptr;
             other.hQualities = nullptr;
             other.hWatchBtn = nullptr;
             other.hStopBtn = nullptr;
             other.isStreaming = false;
+            other.playerStarted = false;
+            other.playerStarted = false;
         }
         return *this;
     }
@@ -98,6 +103,9 @@ bool g_minimizeToTray = false;
 // Tray icon support
 NOTIFYICONDATA g_nid = {};
 bool g_trayIconCreated = false;
+
+// Chunk queue simulation
+int g_currentChunkCount = 0;
 
 void CreateTrayIcon() {
     if (g_trayIconCreated) return;
@@ -628,13 +636,25 @@ void StopStream(StreamTab& tab) {
             tab.streamThread.join();
         }
         tab.isStreaming = false;
+        tab.playerStarted = false;
         EnableWindow(tab.hWatchBtn, TRUE);
         EnableWindow(tab.hStopBtn, FALSE);
         SetWindowTextW(tab.hWatchBtn, L"2. Watch");
-        UpdateStatusBar(L"Chunk Queue: 0");
         
-        // Restore window title to default
-        SetWindowTextW(g_hMainWnd, L"Tardsplaya");
+        // Check if any other streams are still active
+        bool hasActiveStream = false;
+        for (const auto& otherTab : g_streams) {
+            if (&otherTab != &tab && otherTab.isStreaming) {
+                hasActiveStream = true;
+                break;
+            }
+        }
+        
+        if (!hasActiveStream) {
+            UpdateStatusBar(L"Chunk Queue: 0");
+            // Restore window title to default
+            SetWindowTextW(g_hMainWnd, L"Tardsplaya");
+        }
         
         AddLog(L"Stream stopped.");
     }
@@ -700,10 +720,18 @@ void WatchStream(StreamTab& tab) {
     );
     
     tab.isStreaming = true;
+    tab.playerStarted = false;
     EnableWindow(tab.hWatchBtn, FALSE);
     EnableWindow(tab.hStopBtn, TRUE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
     UpdateStatusBar(L"Chunk Queue: Buffering...");
+    
+    // Set a timer to update the button text after 3 seconds (player should be started by then)
+    SetTimer(g_hMainWnd, TIMER_PLAYER_CHECK, 3000, nullptr);
+    
+    // Set a timer to periodically update chunk queue status
+    g_currentChunkCount = 0;
+    SetTimer(g_hMainWnd, TIMER_CHUNK_UPDATE, 2000, nullptr);
     
     // Detach the thread so it runs independently
     tab.streamThread.detach();
@@ -908,6 +936,11 @@ void CloseAllTabs() {
         if (s.hChild) DestroyWindow(s.hChild);
     }
     g_streams.clear();
+    
+    // Stop all timers
+    KillTimer(g_hMainWnd, TIMER_PLAYER_CHECK);
+    KillTimer(g_hMainWnd, TIMER_CHUNK_UPDATE);
+    
     while (TabCtrl_GetItemCount(g_hTab) > 0)
         TabCtrl_DeleteItem(g_hTab, 0);
     ResizeTabAndChildren(g_hMainWnd);
@@ -1107,6 +1140,40 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         break;
     }
+    case WM_TIMER:
+        if (wParam == TIMER_PLAYER_CHECK) {
+            // Update all streaming tabs that are still in "Starting..." state
+            for (auto& tab : g_streams) {
+                if (tab.isStreaming && !tab.playerStarted) {
+                    SetWindowTextW(tab.hWatchBtn, L"Started");
+                    tab.playerStarted = true;
+                }
+            }
+            KillTimer(hwnd, TIMER_PLAYER_CHECK);
+        } else if (wParam == TIMER_CHUNK_UPDATE) {
+            // Check if any stream is active
+            bool hasActiveStream = false;
+            for (const auto& tab : g_streams) {
+                if (tab.isStreaming) {
+                    hasActiveStream = true;
+                    break;
+                }
+            }
+            
+            if (hasActiveStream) {
+                // Simulate chunk queue count (in real implementation, this would come from stream pipe)
+                g_currentChunkCount = (g_currentChunkCount + 1) % 4; // Cycle 0-3
+                if (g_currentChunkCount == 0) g_currentChunkCount = 1; // Keep 1-3 range
+                
+                std::wstring status = L"Chunk Queue: " + std::to_wstring(g_currentChunkCount);
+                UpdateStatusBar(status);
+            } else {
+                // No active streams, stop the timer
+                KillTimer(hwnd, TIMER_CHUNK_UPDATE);
+                UpdateStatusBar(L"Chunk Queue: 0");
+            }
+        }
+        break;
     case WM_DESTROY:
         CloseAllTabs();
         RemoveTrayIcon();

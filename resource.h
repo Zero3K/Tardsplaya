@@ -41,3 +41,5 @@
 #define WM_TRAYICON             (WM_USER + 100)
 #define WM_PLAYER_STATE         (WM_USER + 101)
 #define ID_TRAYICON             2000
+#define TIMER_PLAYER_CHECK      3000
+#define TIMER_CHUNK_UPDATE      3001
