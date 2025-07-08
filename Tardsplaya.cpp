@@ -455,13 +455,16 @@ std::wstring FetchPlaylist(const std::wstring& channel, const std::wstring& acce
 
 std::map<std::wstring, std::wstring> ParsePlaylist(const std::wstring& m3u8) {
     // First try the improved M3U8 parser
-    std::string m3u8Utf8 = WideToUtf8(m3u8);
-    std::map<std::wstring, std::wstring> modernResult = ParseM3U8Playlist(m3u8Utf8);
+    std::vector<PlaylistQuality> modernResult = ParseM3U8MasterPlaylist(m3u8);
     if (!modernResult.empty()) {
-        return modernResult;
+        std::map<std::wstring, std::wstring> qualityMap;
+        for (const auto& quality : modernResult) {
+            qualityMap[quality.name] = quality.url;
+        }
+        return qualityMap;
     }
     
-    // Fallback to original parser
+    // Fallback to original parser for backwards compatibility
     std::map<std::wstring, std::wstring> result;
     std::wistringstream iss(m3u8);
     std::wstring line, quality, url;
@@ -471,17 +474,33 @@ std::map<std::wstring, std::wstring> ParsePlaylist(const std::wstring& m3u8) {
             std::wregex rgx(L"VIDEO=\"([^\"]+)\"");
             if (std::regex_search(line, m, rgx))
                 quality = m[1];
-            else
-                quality = L"unknown";
+            else {
+                // Try to extract resolution or other quality indicators
+                std::wregex resRgx(L"RESOLUTION=([0-9]+x[0-9]+)");
+                if (std::regex_search(line, m, resRgx)) {
+                    quality = m[1];
+                } else {
+                    quality = L"unknown";
+                }
+            }
             std::getline(iss, url);
-            result[quality] = url;
+            if (!url.empty() && url[0] != L'#') {
+                result[quality] = url;
+            }
         }
     }
+    
+    // If no stream-inf found, try to find any stream URLs for non-chunked streams
     if (result.empty() && m3u8.find(L"#EXTM3U") == 0) {
         std::wistringstream iss2(m3u8);
         while (std::getline(iss2, url)) {
-            if (!url.empty() && url[0] != L'#')
+            if (!url.empty() && url[0] != L'#' &&
+                (url.find(L".m3u8") != std::wstring::npos || 
+                 url.find(L".ts") != std::wstring::npos ||
+                 url.find(L"http") == 0)) {
                 result[L"source"] = url;
+                break;
+            }
         }
     }
     return result;
@@ -610,8 +629,8 @@ void LoadChannel(StreamTab& tab) {
     AddLog(L"Fetching playlist...");
     std::wstring m3u8 = FetchPlaylist(channel, token);
     if (m3u8.empty()) {
-        MessageBoxW(tab.hChild, L"Failed to get playlist (stream may be offline).", L"Error", MB_OK | MB_ICONERROR);
-        AddLog(L"Failed to get playlist.");
+        MessageBoxW(tab.hChild, L"Failed to get playlist. The channel may be offline, no longer exist, or have been renamed.", L"Channel Error", MB_OK | MB_ICONERROR);
+        AddLog(L"Failed to get playlist - channel may be offline or not exist.");
         return;
     }
     AddLog(L"Parsing qualities...");
@@ -621,7 +640,8 @@ void LoadChannel(StreamTab& tab) {
         tab.qualities.push_back(pair.first);
     RefreshQualities(tab);
     if (tab.qualities.empty()) {
-        MessageBoxW(tab.hChild, L"No qualities found.", L"Error", MB_OK | MB_ICONERROR);
+        MessageBoxW(tab.hChild, L"No stream qualities found. The stream may use unsupported encoding or be unavailable.", L"Stream Error", MB_OK | MB_ICONERROR);
+        AddLog(L"No qualities found - stream may use unsupported encoding.");
         EnableWindow(tab.hWatchBtn, FALSE);
     }
     else {
@@ -792,19 +812,19 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", channel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 70, 10, 200, 22, hwnd, (HMENU)IDC_CHANNEL, g_hInst, nullptr);
     SendMessage(hEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
-    HWND hLoad = CreateWindowEx(0, L"BUTTON", L"1. Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 10, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
-    SendMessage(hLoad, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-    
     HWND hQualityLabel = CreateWindowEx(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
     SendMessage(hQualityLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
     HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, 120, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
     SendMessage(hQualList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
-    HWND hWatch = CreateWindowEx(0, L"BUTTON", L"2. Watch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 40, 60, 22, hwnd, (HMENU)IDC_WATCH, g_hInst, nullptr);
+    HWND hLoad = CreateWindowEx(0, L"BUTTON", L"1. Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 40, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
+    SendMessage(hLoad, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
+    HWND hWatch = CreateWindowEx(0, L"BUTTON", L"2. Watch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 70, 60, 22, hwnd, (HMENU)IDC_WATCH, g_hInst, nullptr);
     SendMessage(hWatch, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
-    HWND hStop = CreateWindowEx(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 110, 60, 22, hwnd, (HMENU)IDC_STOP, g_hInst, nullptr);
+    HWND hStop = CreateWindowEx(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 100, 60, 22, hwnd, (HMENU)IDC_STOP, g_hInst, nullptr);
     SendMessage(hStop, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
@@ -1230,7 +1250,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     RegisterClass(&wc);
     HWND hwnd = CreateWindowEx(0, L"TardsplayaMainWin", L"Tardsplaya",
-        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,
         nullptr, nullptr, hInstance, nullptr);
     g_hMainWnd = hwnd;
     ShowWindow(hwnd, nCmdShow);
