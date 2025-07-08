@@ -1136,7 +1136,29 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         std::wstring* msg = reinterpret_cast<std::wstring*>(lParam);
         if (msg) {
             AddLog(*msg);
+            
+            // Check if this message indicates the player exited normally (user closed it)
+            if (*msg == L"Player exited normally.") {
+                // Find the streaming tab and stop it
+                for (size_t i = 0; i < g_streams.size(); ++i) {
+                    if (g_streams[i].isStreaming) {
+                        // Post a message to stop this stream using the index
+                        PostMessage(hwnd, WM_USER + 2, (WPARAM)i, 0);
+                        break; // Assume only one stream can be "exiting" at a time
+                    }
+                }
+            }
+            
             delete msg;
+        }
+        break;
+    }
+    case WM_USER + 2: {
+        // Auto-stop stream when player exits
+        size_t tabIndex = (size_t)wParam;
+        if (tabIndex < g_streams.size() && g_streams[tabIndex].isStreaming) {
+            StopStream(g_streams[tabIndex]);
+            AddLog(L"Stream stopped automatically (player closed).");
         }
         break;
     }
