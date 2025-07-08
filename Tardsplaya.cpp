@@ -14,6 +14,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include "resource.h"
 #include "json_minimal.h"
 #include "stream_thread.h"
@@ -644,16 +645,21 @@ void LoadChannel(StreamTab& tab) {
         MessageBoxW(tab.hChild, L"Enter a channel name.", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
-    tab.channel = channel;
+    
+    // Convert channel name to lowercase for API calls
+    std::wstring channelName = channel;
+    std::transform(channelName.begin(), channelName.end(), channelName.begin(), ::towlower);
+    
+    tab.channel = channelName; // Store the lowercase version
     AddLog(L"Requesting Twitch access token...");
-    std::wstring token = GetAccessToken(channel);
+    std::wstring token = GetAccessToken(channelName);
     if (token.empty()) {
         MessageBoxW(tab.hChild, L"Failed to get access token. The channel may be offline, does not exist, or has been renamed.", L"Channel Error", MB_OK | MB_ICONERROR);
         AddLog(L"Failed to get Twitch access token - channel may be offline or not exist.");
         return;
     }
     AddLog(L"Fetching playlist...");
-    std::wstring m3u8 = FetchPlaylist(channel, token);
+    std::wstring m3u8 = FetchPlaylist(channelName, token);
     if (m3u8.empty()) {
         MessageBoxW(tab.hChild, L"Failed to get playlist. The channel may be offline, no longer exist, or have been renamed.", L"Channel Error", MB_OK | MB_ICONERROR);
         AddLog(L"Failed to get playlist - channel may be offline or not exist.");
@@ -1171,6 +1177,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case IDC_FAVORITES_LIST:
             if (HIWORD(wParam) == LBN_DBLCLK) {
                 OnFavoriteDoubleClick();
+            } else if (HIWORD(wParam) == LBN_SELCHANGE) {
+                OnFavoriteDoubleClick(); // Use same logic for single-click
             }
             break;
         }
