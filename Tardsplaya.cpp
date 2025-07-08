@@ -301,14 +301,32 @@ void OnFavoriteDoubleClick() {
     
     HWND hChannelEdit = GetDlgItem(g_streams[activeTab].hChild, IDC_CHANNEL);
     if (hChannelEdit) {
-        // Set focus first to ensure proper text setting
-        SetFocus(hChannelEdit);
+        // Get the favorite text
+        std::wstring favoriteText = g_favorites[sel];
+        
         // Clear the existing text first
         SetWindowTextW(hChannelEdit, L"");
-        // Set the new text
-        SetWindowTextW(hChannelEdit, g_favorites[sel].c_str());
-        // Force the control to update
+        
+        // Set focus to ensure the control is active
+        SetFocus(hChannelEdit);
+        
+        // Use SendMessage to set text more reliably
+        SendMessageW(hChannelEdit, WM_SETTEXT, 0, (LPARAM)favoriteText.c_str());
+        
+        // Force the control to process the message
         UpdateWindow(hChannelEdit);
+        
+        // Verify the text was set correctly
+        wchar_t verify[128];
+        GetWindowTextW(hChannelEdit, verify, 128);
+        
+        // If verification failed, try alternative method
+        if (wcscmp(verify, favoriteText.c_str()) != 0) {
+            // Alternative: simulate typing the text
+            SendMessageW(hChannelEdit, EM_SETSEL, 0, -1); // Select all text
+            SendMessageW(hChannelEdit, EM_REPLACESEL, TRUE, (LPARAM)favoriteText.c_str());
+        }
+        
         // Send a change notification to trigger any dependent logic
         SendMessage(GetParent(hChannelEdit), WM_COMMAND, MAKEWPARAM(IDC_CHANNEL, EN_CHANGE), (LPARAM)hChannelEdit);
     }
@@ -652,10 +670,21 @@ void InitLogList(HWND hList) {
 
 void LoadChannel(StreamTab& tab) {
     wchar_t channel[128];
-    GetDlgItemText(tab.hChild, IDC_CHANNEL, channel, 128);
+    int result = GetDlgItemText(tab.hChild, IDC_CHANNEL, channel, 128);
+    
+    // Add debugging info
+    std::wstring debugMsg = L"Retrieved channel name: '" + std::wstring(channel) + L"' (length: " + std::to_wstring(wcslen(channel)) + L", GetDlgItemText result: " + std::to_wstring(result) + L")";
+    AddLog(debugMsg);
+    
     if (wcslen(channel) == 0) {
         MessageBoxW(tab.hChild, L"Enter a channel name.", L"Error", MB_OK | MB_ICONERROR);
         return;
+    }
+    
+    // Check for any unusual characters or whitespace
+    std::wstring channelStr = channel;
+    if (channelStr.find_first_not_of(L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::wstring::npos) {
+        AddLog(L"Warning: Channel name contains unusual characters");
     }
     
     // Convert channel name to lowercase for API calls
@@ -663,7 +692,7 @@ void LoadChannel(StreamTab& tab) {
     std::transform(channelNameLower.begin(), channelNameLower.end(), channelNameLower.begin(), ::towlower);
     
     tab.channel = channel; // Store the original version for display
-    AddLog(L"Requesting Twitch access token...");
+    AddLog(L"Requesting Twitch access token for: " + channelNameLower);
     std::wstring token = GetAccessToken(channelNameLower);
     if (token.empty()) {
         MessageBoxW(tab.hChild, L"Failed to get access token. The channel may be offline, does not exist, or has been renamed.", L"Channel Error", MB_OK | MB_ICONERROR);
