@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <string>
 #include <vector>
 #include <map>
@@ -87,6 +88,7 @@ std::wstring g_playerPath = L"mpv.exe";
 std::wstring g_playerArg = L"-";
 bool g_enableLogging = true;
 bool g_logAutoScroll = true;
+bool g_minimizeToTray = false;
 
 void AddLog(const std::wstring& msg) {
     if (!g_enableLogging) return;
@@ -657,6 +659,67 @@ void CloseAllTabs() {
     ResizeTabAndChildren(g_hMainWnd);
 }
 
+// Settings dialog procedure
+INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_INITDIALOG:
+        // Initialize dialog controls with current settings
+        SetDlgItemTextW(hDlg, IDC_PLAYERPATH, g_playerPath.c_str());
+        SetDlgItemTextW(hDlg, IDC_PLAYERARGS, g_playerArg.c_str());
+        CheckDlgButton(hDlg, IDC_MINIMIZETOTRAY, g_minimizeToTray ? BST_CHECKED : BST_UNCHECKED);
+        return TRUE;
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_BROWSE_PLAYER: {
+            OPENFILENAMEW ofn = { sizeof(ofn) };
+            wchar_t szFile[MAX_PATH] = { 0 };
+            
+            GetDlgItemTextW(hDlg, IDC_PLAYERPATH, szFile, MAX_PATH);
+            
+            ofn.hwndOwner = hDlg;
+            ofn.lpstrFile = szFile;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrFilter = L"Executable Files\0*.exe\0All Files\0*.*\0";
+            ofn.nFilterIndex = 1;
+            ofn.lpstrFileTitle = nullptr;
+            ofn.nMaxFileTitle = 0;
+            ofn.lpstrInitialDir = nullptr;
+            ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+            
+            if (GetOpenFileNameW(&ofn)) {
+                SetDlgItemTextW(hDlg, IDC_PLAYERPATH, szFile);
+            }
+            return TRUE;
+        }
+        case IDOK: {
+            // Save settings
+            wchar_t buffer[MAX_PATH];
+            
+            GetDlgItemTextW(hDlg, IDC_PLAYERPATH, buffer, MAX_PATH);
+            g_playerPath = buffer;
+            
+            GetDlgItemTextW(hDlg, IDC_PLAYERARGS, buffer, MAX_PATH);
+            g_playerArg = buffer;
+            
+            g_minimizeToTray = IsDlgButtonChecked(hDlg, IDC_MINIMIZETOTRAY) == BST_CHECKED;
+            
+            EndDialog(hDlg, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(hDlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+void ShowSettingsDialog() {
+    DialogBox(g_hInst, MAKEINTRESOURCE(IDD_SETTINGS), g_hMainWnd, SettingsDlgProc);
+}
+
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
@@ -720,6 +783,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             break;
         case IDM_EXIT:
             PostMessage(hwnd, WM_CLOSE, 0, 0);
+            break;
+        case IDM_SETTINGS:
+            ShowSettingsDialog();
             break;
         case IDC_FAVORITES_ADD:
             AddFavorite();

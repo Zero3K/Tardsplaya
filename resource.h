@@ -9,6 +9,10 @@
 #define IDM_SETTINGS        206
 #define IDM_ABOUT           207
 
+#define IDD_SETTINGS        300
+
+#define IDC_STATIC          -1
+
 #define IDC_TAB             1000
 #define IDC_CHANNEL         1200
 #define IDC_QUALITY         1201
@@ -18,6 +22,7 @@
 #define IDC_PLAYERPATH      1300
 #define IDC_PLAYERARGS      1301
 #define IDC_MINIMIZETOTRAY  1302
+#define IDC_BROWSE_PLAYER   1303
 #define IDC_LOAD        1101
 #define IDC_QUALITIES   1102
 #define IDC_WATCH       1103
