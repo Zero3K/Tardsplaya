@@ -18,6 +18,16 @@
 #include "tlsclient/tlsclient.h"
 #include "json_minimal.h"
 
+// Forward declaration - AddLog is defined in Tardsplaya.cpp
+extern void AddLog(const std::wstring& msg);
+
+// Helper: Get HTTP body (skip headers)
+std::string get_http_body(const std::string& resp) {
+    auto pos = resp.find("\r\n\r\n");
+    if (pos == std::string::npos) return "";
+    return resp.substr(pos + 4);
+}
+
 // Helper: HTTP GET request (using WinHTTP, wide string version)
 bool HttpGetText(const std::wstring& url, std::string& out) {
     URL_COMPONENTS uc = { sizeof(uc) };
@@ -140,17 +150,35 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
 
     // Use TLS client to make the GraphQL POST request
     AddLog(L"Making GraphQL POST request to gql.twitch.tv for channel: " + channel);
-    std::string response = TLSClientHTTP::HttpPost(L"gql.twitch.tv", L"/gql", gqlBody, headers);
     
-    if (response.empty()) {
-        AddLog(L"GraphQL POST request failed - no response received");
+    TLSClient client;
+    std::string response;
+    std::wstring url = L"https://gql.twitch.tv/gql";
+    bool success = client.HttpPostW(url, gqlBody, response, headers);
+    
+    if (!success || response.empty()) {
+        std::string error = client.GetLastError();
+        std::wstring werror(error.begin(), error.end());
+        AddLog(L"GraphQL POST request failed - " + werror);
         return L""; // Request failed
+    }
+    
+    AddLog(L"GraphQL request completed, checking response...");
+    
+    // Log response details for debugging
+    std::string body = get_http_body(response);
+    if (body.empty()) {
+        AddLog(L"Response received but body is empty after parsing");
+        // Log the raw response for debugging
+        std::wstring rawResponse(response.begin(), response.end());
+        AddLog(L"Raw response: " + rawResponse.substr(0, 500)); // First 500 chars
+        return L"";
     }
     
     AddLog(L"GraphQL response received, parsing JSON...");
     // Try to parse the JSON response
     try {
-        JsonValue root = parse_json(response);
+        JsonValue root = parse_json(body);
         if (root.type == JsonValue::Object) {
             JsonValue data = root["data"];
             if (data.type == JsonValue::Object) {

@@ -219,32 +219,58 @@ bool TLSClient::HttpPost(const std::string& url, const std::string& postData, st
     }
     
     const wchar_t* requestHeaders = wHeaders.empty() ? NULL : wHeaders.c_str();
-    BOOL bResult = WinHttpSendRequest(hRequest, requestHeaders, requestHeaders ? -1 : 0, 
-        (LPVOID)postData.c_str(), postData.length(), postData.length(), 0) && WinHttpReceiveResponse(hRequest, NULL);
+    BOOL bSendResult = WinHttpSendRequest(hRequest, requestHeaders, requestHeaders ? -1 : 0, 
+        (LPVOID)postData.c_str(), postData.length(), postData.length(), 0);
     
-    if (bResult) {
-        DWORD dwSize = 0;
-        do {
-            DWORD dwDownloaded = 0;
-            WinHttpQueryDataAvailable(hRequest, &dwSize);
-            if (!dwSize) break;
-            
-            size_t prevSize = response.size();
-            response.resize(prevSize + dwSize);
-            WinHttpReadData(hRequest, &response[prevSize], dwSize, &dwDownloaded);
-            if (dwDownloaded < dwSize) {
-                response.resize(prevSize + dwDownloaded);
-            }
-        } while (dwSize > 0);
-    } else {
-        lastError = "Failed to send request or receive response";
+    if (!bSendResult) {
+        DWORD error = GetLastError();
+        lastError = "Failed to send request, error code: " + std::to_string(error);
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
     }
+    
+    BOOL bReceiveResult = WinHttpReceiveResponse(hRequest, NULL);
+    if (!bReceiveResult) {
+        DWORD error = GetLastError();
+        lastError = "Failed to receive response, error code: " + std::to_string(error);
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+    
+    // Get response headers and status code for debugging
+    DWORD dwStatusCode = 0;
+    DWORD dwSize = sizeof(dwStatusCode);
+    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, 
+        NULL, &dwStatusCode, &dwSize, NULL);
+    
+    // Read response body
+    dwSize = 0;
+    do {
+        DWORD dwDownloaded = 0;
+        WinHttpQueryDataAvailable(hRequest, &dwSize);
+        if (!dwSize) break;
+        
+        size_t prevSize = response.size();
+        response.resize(prevSize + dwSize);
+        WinHttpReadData(hRequest, &response[prevSize], dwSize, &dwDownloaded);
+        if (dwDownloaded < dwSize) {
+            response.resize(prevSize + dwDownloaded);
+        }
+    } while (dwSize > 0);
+    
+    // Include status code in response for debugging
+    std::string statusInfo = "HTTP/" + std::to_string(dwStatusCode) + "\r\n\r\n";
+    response = statusInfo + response;
     
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
     
-    return bResult != FALSE;
+    return true;
 }
 
 bool TLSClient::HttpPostW(const std::wstring& url, const std::string& postData, std::string& response, const std::wstring& headers) {
