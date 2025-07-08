@@ -11,6 +11,7 @@
 #include <winhttp.h>
 #include <atomic>
 #include <iostream>
+#include <algorithm>
 #include "tlsclient/tlsclient.h"
 
 // Utility: HTTP GET (returns as binary), with error retries
@@ -78,13 +79,50 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     return base.substr(0, pos + 1) + rel;
 }
 
-// Parse media segment URLs from m3u8 playlist
+// Parse media segment URLs from m3u8 playlist, filtering out segments with unwanted messages
 static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
     std::vector<std::wstring> segs;
     std::istringstream ss(playlist);
     std::string line;
+    std::string last_metadata;
+    bool skip_next_segment = false;
+    
     while (std::getline(ss, line)) {
-        if (line.empty() || line[0] == '#') continue;
+        if (line.empty()) continue;
+        
+        if (line[0] == '#') {
+            // Store metadata for analysis
+            last_metadata = line;
+            
+            // Check if this metadata indicates a message we want to filter
+            std::string line_lower = line;
+            std::transform(line_lower.begin(), line_lower.end(), line_lower.begin(), ::tolower);
+            
+            if (line_lower.find("preparing stream") != std::string::npos ||
+                line_lower.find("commercial break") != std::string::npos) {
+                skip_next_segment = true;
+            }
+            continue;
+        }
+        
+        // This is a segment URL
+        if (skip_next_segment) {
+            // Skip this segment as it contains filtered content
+            skip_next_segment = false;
+            continue;
+        }
+        
+        // Check if the segment URL itself contains filtered terms
+        std::string line_lower = line;
+        std::transform(line_lower.begin(), line_lower.end(), line_lower.begin(), ::tolower);
+        
+        if (line_lower.find("preparing") != std::string::npos ||
+            line_lower.find("commercial") != std::string::npos ||
+            line_lower.find("break") != std::string::npos) {
+            // Skip segments with these terms in the URL
+            continue;
+        }
+        
         // Should be a .ts or .aac segment
         std::wstring wline(line.begin(), line.end());
         segs.push_back(wline);
