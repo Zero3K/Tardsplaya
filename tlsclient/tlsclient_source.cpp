@@ -1,7 +1,5 @@
 ﻿#pragma once
 
-#include <WinSock2.h>
-#include <windows.h>
 #include <stdint.h>
 #include <fstream>
 #include "chacha20.c"

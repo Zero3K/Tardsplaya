@@ -1,12 +1,9 @@
 #include "tlsclient.h"
 #include <sstream>
 #include <algorithm>
-
-// We'll implement this step by step to ensure it works
-#define NOMINMAX
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <winhttp.h>
+
+#define NOMINMAX
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "winhttp.lib")

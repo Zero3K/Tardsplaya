@@ -7,6 +7,9 @@
 #define _UNICODE
 #endif
 
+// Include winsock2.h before windows.h to avoid macro redefinition warnings
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <string>
 

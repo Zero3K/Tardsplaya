@@ -1,4 +1,9 @@
 #pragma once
+
+// Include winsock2.h before windows.h to avoid macro redefinition warnings
+#ifndef _WINSOCK2API_
+#include <winsock2.h>
+#endif
 #include <windows.h>
 
 class CLockData
