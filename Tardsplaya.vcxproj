@@ -110,16 +110,21 @@
     <ClCompile Include="stream_pipe.cpp" />
     <ClCompile Include="stream_thread.cpp" />
     <ClCompile Include="Tardsplaya.cpp" />
+    <ClCompile Include="tlsclient\tlsclient.cpp" />
+    <ClCompile Include="tlsclient\tlsclient_source.cpp" />
     <ClCompile Include="twitch_api.cpp" />
     <ClCompile Include="urlencode.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="favorites.h" />
     <ClInclude Include="json_minimal.h" />
+    <ClInclude Include="tlsclient\lock.h" />
     <ClInclude Include="playlist_parser.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="stream_pipe.h" />
     <ClInclude Include="stream_thread.h" />
+    <ClInclude Include="tlsclient\tls.h" />
+    <ClInclude Include="tlsclient\tlsclient.h" />
     <ClInclude Include="twitch_api.h" />
     <ClInclude Include="urlencode.h" />
   </ItemGroup>

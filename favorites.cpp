@@ -1,6 +1,8 @@
 #include "favorites.h"
 #include <fstream>
 #include <sstream>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 
 // Helper function to convert UTF-8 to wide string (local version)
@@ -32,7 +34,7 @@ std::vector<std::wstring> LoadFavoritesFromFile(const wchar_t* filename) {
 
     // Read the entire file
     file.seekg(0, std::ios::end);
-    size_t size = file.tellg();
+    size_t size = static_cast<size_t>(file.tellg());
     file.seekg(0, std::ios::beg);
     
     if (size == 0) return favs;

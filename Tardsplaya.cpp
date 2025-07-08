@@ -1,3 +1,5 @@
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
 #include <commctrl.h>
@@ -12,6 +14,7 @@
 #include "resource.h"
 #include "json_minimal.h"
 #include "stream_thread.h"
+#include "tlsclient/tlsclient.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
@@ -113,17 +116,35 @@ std::wstring Utf8ToWide(const std::string& s) {
 
 std::string HttpGet(const wchar_t* host, const wchar_t* path, const wchar_t* headers = nullptr) {
     HINTERNET hSession = WinHttpOpen(L"Tardsplaya/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
-    if (!hSession) return "";
+    if (!hSession) {
+        // Fallback to TLS client if WinHTTP fails to initialize
+        std::string result = TLSClientHTTP::HttpGet(host, path, headers ? headers : L"");
+        if (!result.empty()) return result;
+        return "";
+    }
     
     // For Windows 7 compatibility - disable certificate validation if needed
     DWORD dwFlags = WINHTTP_FLAG_SECURE;
     
     HINTERNET hConnect = WinHttpConnect(hSession, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
+    if (!hConnect) { 
+        WinHttpCloseHandle(hSession); 
+        // Fallback to TLS client
+        std::string result = TLSClientHTTP::HttpGet(host, path, headers ? headers : L"");
+        if (!result.empty()) return result;
+        return ""; 
+    }
     
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", path,
         NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, dwFlags);
-    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return ""; }
+    if (!hRequest) { 
+        WinHttpCloseHandle(hConnect); 
+        WinHttpCloseHandle(hSession); 
+        // Fallback to TLS client
+        std::string result = TLSClientHTTP::HttpGet(host, path, headers ? headers : L"");
+        if (!result.empty()) return result;
+        return ""; 
+    }
     
     // For Windows 7 compatibility - ignore certificate errors
     DWORD dwSecurityFlags = SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
@@ -149,6 +170,13 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, const wchar_t* hea
     WinHttpCloseHandle(hRequest);
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
+    
+    // If WinHTTP didn't return data, try TLS client as fallback
+    if (data.empty()) {
+        std::string result = TLSClientHTTP::HttpGet(host, path, headers ? headers : L"");
+        if (!result.empty()) return result;
+    }
+    
     return data;
 }
 
@@ -519,6 +547,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hInst = hInstance;
+    
+    // Initialize TLS client system for fallback support
+    TLSClientHTTP::Initialize();
+    
     WNDCLASS wc = { 0 };
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = hInstance;

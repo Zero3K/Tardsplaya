@@ -1,4 +1,45 @@
-# Tardsplaya - Twitch Stream Buffer
+# Tardsplaya
+
+A Twitch stream player for Windows with enhanced TLS support.
+
+## Features
+
+- Multi-tab stream viewing
+- Quality selection
+- Windows 7+ compatibility
+- **Enhanced TLS Client Support** - Custom TLS implementation for better compatibility with older Windows versions
+
+## TLS Client Integration
+
+This version includes an integrated TLS client from the [tlsclient](https://github.com/zero3k/tlsclient) repository, providing:
+
+- **TLS 1.2/1.3 Support**: Modern encryption standards
+- **Windows 7 Compatibility**: Better HTTPS support on older Windows versions
+- **Fallback Mechanism**: Automatically switches to TLS client when WinHTTP fails
+- **Certificate Bypass**: Designed for compatibility without strict certificate validation
+
+### Technical Details
+
+The TLS client integration includes:
+
+- `tlsclient.h/cpp` - Main TLS client wrapper
+- Crypto components: `chacha20.c`, `ecc.c`, `gcm.c`, `sha2.c`
+- TLS protocol implementation: `tls.h`, `tlsclient_source.cpp`
+- Thread-safe locking: `lock.h`
+
+The integration works as a fallback system:
+1. Primary: WinHTTP (standard Windows HTTP library)
+2. Fallback: Custom TLS client (when WinHTTP fails or on older systems)
+
+## Building
+
+Requires Visual Studio 2015 or later. The project includes all necessary TLS client components and will compile them automatically.
+
+## Compatibility
+
+- Windows 7 SP1 and later
+- Enhanced TLS support for older Windows versions
+- Automatically handles TLS compatibility issues - Twitch Stream Buffer
 
 A C++ application that buffers Twitch streams to media players like MPC-HC, MPC-BE, VLC, and MPV.
 

@@ -1,4 +1,6 @@
 #include "stream_pipe.h"
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -9,6 +11,7 @@
 #include <winhttp.h>
 #include <atomic>
 #include <iostream>
+#include "tlsclient/tlsclient.h"
 
 // Utility: HTTP GET (returns as binary), with error retries
 static bool HttpGetBinary(const std::wstring& url, std::vector<char>& out, int max_attempts = 3, std::atomic<bool>* cancel_token = nullptr) {

@@ -1,4 +1,6 @@
 #include "urlencode.h"
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <wininet.h>
 #pragma comment(lib, "wininet.lib")
