@@ -11,7 +11,6 @@
 #include <winhttp.h>
 #include <atomic>
 #include <iostream>
-#include <algorithm>
 #include "tlsclient/tlsclient.h"
 
 // Utility: HTTP GET (returns as binary), with error retries
@@ -79,27 +78,28 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     return base.substr(0, pos + 1) + rel;
 }
 
-// Parse media segment URLs from m3u8 playlist, filtering out segments with unwanted messages
+// Parse media segment URLs from m3u8 playlist, filtering out ad segments
 static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
     std::vector<std::wstring> segs;
     std::istringstream ss(playlist);
     std::string line;
-    std::string last_metadata;
     bool skip_next_segment = false;
     
     while (std::getline(ss, line)) {
         if (line.empty()) continue;
         
         if (line[0] == '#') {
-            // Store metadata for analysis
-            last_metadata = line;
-            
-            // Check if this metadata indicates a message we want to filter
-            std::string line_lower = line;
-            std::transform(line_lower.begin(), line_lower.end(), line_lower.begin(), ::tolower);
-            
-            if (line_lower.find("preparing stream") != std::string::npos ||
-                line_lower.find("commercial break") != std::string::npos) {
+            // Check for ad markers - based on TwitchAdSolutions approach
+            // Look for "stitched" identifier which marks ad segments
+            if (line.find("stitched") != std::string::npos ||
+                line.find("STITCHED") != std::string::npos) {
+                skip_next_segment = true;
+            }
+            // Also check for explicit ad-related markers
+            else if (line.find("EXT-X-DATERANGE") != std::string::npos && 
+                     (line.find("stitched-ad-") != std::string::npos ||
+                      line.find("MIDROLL") != std::string::npos ||
+                      line.find("midroll") != std::string::npos)) {
                 skip_next_segment = true;
             }
             continue;
@@ -107,19 +107,8 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         
         // This is a segment URL
         if (skip_next_segment) {
-            // Skip this segment as it contains filtered content
+            // Skip this segment as it contains ad content
             skip_next_segment = false;
-            continue;
-        }
-        
-        // Check if the segment URL itself contains filtered terms
-        std::string line_lower = line;
-        std::transform(line_lower.begin(), line_lower.end(), line_lower.begin(), ::tolower);
-        
-        if (line_lower.find("preparing") != std::string::npos ||
-            line_lower.find("commercial") != std::string::npos ||
-            line_lower.find("break") != std::string::npos) {
-            // Skip segments with these terms in the URL
             continue;
         }
         
