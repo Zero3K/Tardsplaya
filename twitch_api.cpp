@@ -13,6 +13,7 @@
 #include <algorithm>
 #include "twitch_api.h"
 #include "urlencode.h"
+#include "tlsclient.h"
 
 // Helper: HTTP GET request (using WinHTTP, wide string version)
 bool HttpGetText(const std::wstring& url, std::string& out) {
@@ -20,17 +21,33 @@ bool HttpGetText(const std::wstring& url, std::string& out) {
     wchar_t host[256] = L"", path[2048] = L"";
     uc.lpszHostName = host; uc.dwHostNameLength = 255;
     uc.lpszUrlPath = path; uc.dwUrlPathLength = 2047;
-    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) return false;
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) {
+        // Try TLS client as fallback if URL parsing fails
+        return TLSClientHTTP::HttpGetText(url, out);
+    }
 
     HINTERNET hSession = WinHttpOpen(L"Tardsplaya/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, 0, 0, 0);
-    if (!hSession) return false;
+    if (!hSession) {
+        // Try TLS client as fallback
+        return TLSClientHTTP::HttpGetText(url, out);
+    }
     HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
-    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+    if (!hConnect) { 
+        WinHttpCloseHandle(hSession); 
+        // Try TLS client as fallback
+        return TLSClientHTTP::HttpGetText(url, out);
+    }
     HINTERNET hRequest = WinHttpOpenRequest(
         hConnect, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
         (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0);
     BOOL res = WinHttpSendRequest(hRequest, 0, 0, 0, 0, 0, 0) && WinHttpReceiveResponse(hRequest, 0);
-    if (!res) { WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+    if (!res) { 
+        WinHttpCloseHandle(hRequest); 
+        WinHttpCloseHandle(hConnect); 
+        WinHttpCloseHandle(hSession); 
+        // Try TLS client as fallback
+        return TLSClientHTTP::HttpGetText(url, out);
+    }
 
     DWORD dwSize = 0;
     std::vector<char> data;

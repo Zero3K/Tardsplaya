@@ -9,6 +9,7 @@
 #include <winhttp.h>
 #include <atomic>
 #include <iostream>
+#include "tlsclient.h"
 
 // Utility: HTTP GET (returns as binary), with error retries
 static bool HttpGetBinary(const std::wstring& url, std::vector<char>& out, int max_attempts = 3, std::atomic<bool>* cancel_token = nullptr) {
