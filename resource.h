@@ -36,3 +36,7 @@
 #define IDC_FAVORITES_EDIT      1109
 #define IDC_CHECK_VERSION       1110
 #define IDC_STATUS_BAR          1111
+
+// Tray icon support
+#define WM_TRAYICON             (WM_USER + 100)
+#define ID_TRAYICON             2000

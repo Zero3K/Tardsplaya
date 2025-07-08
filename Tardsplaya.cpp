@@ -4,6 +4,7 @@
 #include <winhttp.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <string>
 #include <vector>
 #include <map>
@@ -29,6 +30,7 @@ struct StreamTab {
     HWND hStopBtn;
     std::vector<std::wstring> qualities;
     std::map<std::wstring, std::wstring> qualityToUrl;
+    std::map<std::wstring, std::wstring> standardToOriginalQuality;
     std::thread streamThread;
     std::atomic<bool> cancelToken{false};
     bool isStreaming = false;
@@ -45,6 +47,7 @@ struct StreamTab {
         , hStopBtn(other.hStopBtn)
         , qualities(std::move(other.qualities))
         , qualityToUrl(std::move(other.qualityToUrl))
+        , standardToOriginalQuality(std::move(other.standardToOriginalQuality))
         , streamThread(std::move(other.streamThread))
         , cancelToken(other.cancelToken.load())
         , isStreaming(other.isStreaming)
@@ -64,6 +67,7 @@ struct StreamTab {
             hStopBtn = other.hStopBtn;
             qualities = std::move(other.qualities);
             qualityToUrl = std::move(other.qualityToUrl);
+            standardToOriginalQuality = std::move(other.standardToOriginalQuality);
             streamThread = std::move(other.streamThread);
             cancelToken = other.cancelToken.load();
             isStreaming = other.isStreaming;
@@ -81,6 +85,7 @@ struct StreamTab {
 HINSTANCE g_hInst;
 HWND g_hMainWnd, g_hTab, g_hLogList, g_hStatusBar;
 HWND g_hFavoritesList, g_hFavoritesAdd, g_hFavoritesDelete, g_hFavoritesEdit, g_hCheckVersion;
+HFONT g_hFont = nullptr; // Tahoma font for UI controls
 std::vector<StreamTab> g_streams;
 std::vector<std::wstring> g_favorites;
 
@@ -89,6 +94,38 @@ std::wstring g_playerArg = L"-";
 bool g_enableLogging = true;
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
+
+// Tray icon support
+NOTIFYICONDATA g_nid = {};
+bool g_trayIconCreated = false;
+
+void CreateTrayIcon() {
+    if (g_trayIconCreated) return;
+    
+    g_nid.cbSize = sizeof(NOTIFYICONDATA);
+    g_nid.hWnd = g_hMainWnd;
+    g_nid.uID = ID_TRAYICON;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = LoadIcon(g_hInst, IDI_APPLICATION);
+    wcscpy_s(g_nid.szTip, L"Tardsplaya");
+    
+    Shell_NotifyIcon(NIM_ADD, &g_nid);
+    g_trayIconCreated = true;
+}
+
+void RemoveTrayIcon() {
+    if (!g_trayIconCreated) return;
+    
+    Shell_NotifyIcon(NIM_DELETE, &g_nid);
+    g_trayIconCreated = false;
+}
+
+void ShowFromTray() {
+    ShowWindow(g_hMainWnd, SW_RESTORE);
+    SetForegroundWindow(g_hMainWnd);
+    RemoveTrayIcon();
+}
 
 void AddLog(const std::wstring& msg) {
     if (!g_enableLogging) return;
@@ -177,6 +214,21 @@ void EditFavorite() {
     MessageBoxW(g_hMainWnd, message.c_str(), L"Edit Favorite", MB_OK);
 }
 
+void UpdateAddFavoriteButtonState() {
+    // Get current channel name from active tab
+    int activeTab = TabCtrl_GetCurSel(g_hTab);
+    if (activeTab < 0 || activeTab >= (int)g_streams.size()) {
+        EnableWindow(g_hFavoritesAdd, FALSE);
+        return;
+    }
+    
+    wchar_t channel[128];
+    GetDlgItemText(g_streams[activeTab].hChild, IDC_CHANNEL, channel, 128);
+    
+    // Enable/disable Add button based on whether channel text is empty
+    EnableWindow(g_hFavoritesAdd, wcslen(channel) > 0);
+}
+
 void OnFavoriteDoubleClick() {
     int sel = (int)SendMessage(g_hFavoritesList, LB_GETCURSEL, 0, 0);
     if (sel == LB_ERR) return;
@@ -186,6 +238,7 @@ void OnFavoriteDoubleClick() {
     if (activeTab < 0 || activeTab >= (int)g_streams.size()) return;
     
     SetDlgItemText(g_streams[activeTab].hChild, IDC_CHANNEL, g_favorites[sel].c_str());
+    UpdateAddFavoriteButtonState();
 }
 
 void CheckVersion() {
@@ -379,9 +432,97 @@ std::map<std::wstring, std::wstring> ParsePlaylist(const std::wstring& m3u8) {
     return result;
 }
 
+std::wstring StandardizeQualityName(const std::wstring& originalName) {
+    // Map common quality patterns to Streamlink format
+    std::wstring lower = originalName;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+    
+    if (lower.find(L"audio") != std::wstring::npos || lower == L"unknown") {
+        return L"audio_only";
+    }
+    if (lower.find(L"1080p60") != std::wstring::npos || lower.find(L"1080p_60") != std::wstring::npos) {
+        return L"1080p60";
+    }
+    if (lower.find(L"720p60") != std::wstring::npos || lower.find(L"720p_60") != std::wstring::npos) {
+        return L"720p60";
+    }
+    if (lower.find(L"720p") != std::wstring::npos) {
+        return L"720p";
+    }
+    if (lower.find(L"480p") != std::wstring::npos) {
+        return L"480p";
+    }
+    if (lower.find(L"360p") != std::wstring::npos) {
+        return L"360p";
+    }
+    if (lower.find(L"160p") != std::wstring::npos) {
+        return L"160p";
+    }
+    
+    // Try to extract resolution from string patterns like "1080p60", "720p", etc.
+    std::wregex resPattern(L"(\\d+)p(?:(\\d+))?");
+    std::wsmatch match;
+    if (std::regex_search(originalName, match, resPattern)) {
+        std::wstring res = match[1].str() + L"p";
+        if (match[2].matched) {
+            res += match[2].str();
+        }
+        return res;
+    }
+    
+    // Default fallback
+    return originalName.empty() ? L"audio_only" : originalName;
+}
+
+std::vector<std::wstring> SortQualities(const std::vector<std::wstring>& qualities) {
+    // Define Streamlink quality order (highest to lowest)
+    std::vector<std::wstring> order = {
+        L"1080p60", L"720p60", L"720p", L"480p", L"360p", L"160p", L"audio_only"
+    };
+    
+    std::vector<std::wstring> sorted;
+    
+    // Add qualities in the defined order if they exist
+    for (const auto& preferredQuality : order) {
+        for (const auto& quality : qualities) {
+            if (StandardizeQualityName(quality) == preferredQuality) {
+                sorted.push_back(preferredQuality);
+                break;
+            }
+        }
+    }
+    
+    // Add any remaining qualities that didn't match the standard format
+    for (const auto& quality : qualities) {
+        std::wstring standardized = StandardizeQualityName(quality);
+        bool alreadyAdded = false;
+        for (const auto& added : sorted) {
+            if (added == standardized) {
+                alreadyAdded = true;
+                break;
+            }
+        }
+        if (!alreadyAdded) {
+            sorted.push_back(standardized);
+        }
+    }
+    
+    return sorted;
+}
+
 void RefreshQualities(StreamTab& tab) {
     SendMessage(tab.hQualities, LB_RESETCONTENT, 0, 0);
-    for (const auto& q : tab.qualities)
+    tab.standardToOriginalQuality.clear();
+    
+    // Sort qualities in Streamlink format and build mapping
+    std::vector<std::wstring> sortedQualities = SortQualities(tab.qualities);
+    
+    for (const auto& originalQuality : tab.qualities) {
+        std::wstring standardized = StandardizeQualityName(originalQuality);
+        tab.standardToOriginalQuality[standardized] = originalQuality;
+    }
+    
+    for (const auto& q : sortedQualities)
         SendMessage(tab.hQualities, LB_ADDSTRING, 0, (LPARAM)q.c_str());
 }
 
@@ -461,14 +602,25 @@ void WatchStream(StreamTab& tab) {
     }
     wchar_t qual[64];
     SendMessage(tab.hQualities, LB_GETTEXT, sel, (LPARAM)qual);
-    auto it = tab.qualityToUrl.find(qual);
+    
+    // Find the original quality name from the standardized name
+    std::wstring standardQuality = qual;
+    std::wstring originalQuality;
+    auto mappingIt = tab.standardToOriginalQuality.find(standardQuality);
+    if (mappingIt != tab.standardToOriginalQuality.end()) {
+        originalQuality = mappingIt->second;
+    } else {
+        originalQuality = standardQuality; // fallback
+    }
+    
+    auto it = tab.qualityToUrl.find(originalQuality);
     if (it == tab.qualityToUrl.end()) {
         MessageBoxW(tab.hChild, L"Failed to resolve quality URL.", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
     
     std::wstring url = it->second;
-    AddLog(L"Starting buffered stream for " + tab.channel + L" (" + std::wstring(qual) + L")");
+    AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L")");
     
     // Reset cancel token
     tab.cancelToken = false;
@@ -516,6 +668,11 @@ LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         case IDC_STOP:
             StopStream(tab);
             break;
+        case IDC_CHANNEL:
+            if (HIWORD(wParam) == EN_CHANGE) {
+                UpdateAddFavoriteButtonState();
+            }
+            break;
         }
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -537,13 +694,27 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
         WS_CHILD | WS_VISIBLE,
         rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
         hParent, nullptr, g_hInst, nullptr);
-    CreateWindowEx(0, L"STATIC", L"Channel:", WS_CHILD | WS_VISIBLE, 10, 10, 55, 18, hwnd, nullptr, g_hInst, nullptr);
+    
+    HWND hChannelLabel = CreateWindowEx(0, L"STATIC", L"Channel:", WS_CHILD | WS_VISIBLE, 10, 10, 55, 18, hwnd, nullptr, g_hInst, nullptr);
+    SendMessage(hChannelLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
     HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", channel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 70, 10, 140, 22, hwnd, (HMENU)IDC_CHANNEL, g_hInst, nullptr);
+    SendMessage(hEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
     HWND hLoad = CreateWindowEx(0, L"BUTTON", L"1. Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 10, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
-    CreateWindowEx(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
+    SendMessage(hLoad, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
+    HWND hQualityLabel = CreateWindowEx(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
+    SendMessage(hQualityLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
     HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, 120, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
+    SendMessage(hQualList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
     HWND hWatch = CreateWindowEx(0, L"BUTTON", L"2. Watch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 40, 60, 22, hwnd, (HMENU)IDC_WATCH, g_hInst, nullptr);
+    SendMessage(hWatch, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
     HWND hStop = CreateWindowEx(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 110, 60, 22, hwnd, (HMENU)IDC_STOP, g_hInst, nullptr);
+    SendMessage(hStop, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
 
@@ -607,7 +778,19 @@ void ResizeTabAndChildren(HWND hwnd) {
 void AddStreamTab(const std::wstring& channel = L"") {
     TCITEM tie = { 0 };
     tie.mask = TCIF_TEXT;
-    tie.pszText = (LPWSTR)(channel.empty() ? L"New Stream" : channel.c_str());
+    
+    std::wstring tabName;
+    if (channel.empty()) {
+        // Generate numbered tab name: TP Stream 01, TP Stream 02, etc.
+        int tabCount = TabCtrl_GetItemCount(g_hTab) + 1;
+        wchar_t buffer[32];
+        swprintf_s(buffer, L"TP Stream %02d", tabCount);
+        tabName = buffer;
+    } else {
+        tabName = channel;
+    }
+    
+    tie.pszText = (LPWSTR)tabName.c_str();
     int idx = TabCtrl_GetItemCount(g_hTab);
     TabCtrl_InsertItem(g_hTab, idx, &tie);
     
@@ -621,6 +804,7 @@ void AddStreamTab(const std::wstring& channel = L"") {
     
     TabCtrl_SetCurSel(g_hTab, idx);
     ResizeTabAndChildren(g_hMainWnd);
+    UpdateAddFavoriteButtonState();
 }
 
 void SwitchToTab(int idx) {
@@ -628,6 +812,7 @@ void SwitchToTab(int idx) {
     TabCtrl_SetCurSel(g_hTab, idx);
     ResizeTabAndChildren(g_hMainWnd);
     SetFocus(g_streams[idx].hChild);
+    UpdateAddFavoriteButtonState();
 }
 
 void CloseActiveTab() {
@@ -729,45 +914,77 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         HMENU hMenu = LoadMenu(g_hInst, MAKEINTRESOURCE(IDR_MYMENU));
         SetMenu(hwnd, hMenu);
         
+        // Create Tahoma font to match original design (Font.Height = -11)
+        g_hFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Tahoma");
+        
         // Create favorites panel on the left
-        CreateWindowEx(0, L"STATIC", L"Favorites:", WS_CHILD | WS_VISIBLE, 10, 10, 80, 18, hwnd, nullptr, g_hInst, nullptr);
+        HWND hFavLabel = CreateWindowEx(0, L"STATIC", L"Favorites:", WS_CHILD | WS_VISIBLE, 10, 10, 80, 18, hwnd, nullptr, g_hInst, nullptr);
+        SendMessage(hFavLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        
         g_hFavoritesList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 10, 30, 180, 300, hwnd, (HMENU)IDC_FAVORITES_LIST, g_hInst, nullptr);
+        SendMessage(g_hFavoritesList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         
         // Favorites management buttons
         g_hFavoritesAdd = CreateWindowEx(0, L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 340, 40, 25, hwnd, (HMENU)IDC_FAVORITES_ADD, g_hInst, nullptr);
+        SendMessage(g_hFavoritesAdd, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        
         g_hFavoritesDelete = CreateWindowEx(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 55, 340, 50, 25, hwnd, (HMENU)IDC_FAVORITES_DELETE, g_hInst, nullptr);
+        SendMessage(g_hFavoritesDelete, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        
         g_hFavoritesEdit = CreateWindowEx(0, L"BUTTON", L"Edit", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 110, 340, 40, 25, hwnd, (HMENU)IDC_FAVORITES_EDIT, g_hInst, nullptr);
+        SendMessage(g_hFavoritesEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        
         g_hCheckVersion = CreateWindowEx(0, L"BUTTON", L"Check Version", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 370, 100, 25, hwnd, (HMENU)IDC_CHECK_VERSION, g_hInst, nullptr);
+        SendMessage(g_hCheckVersion, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         
         // Create stream tab control (main area)
         g_hTab = CreateWindowEx(0, WC_TABCONTROL, L"", WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE, 200, 10, 500, 300, hwnd, (HMENU)IDC_TAB, g_hInst, nullptr);
+        SendMessage(g_hTab, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         
         // Create log list (at bottom)
         g_hLogList = CreateWindowEx(WS_EX_CLIENTEDGE, WC_LISTVIEW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL, 200, 320, 500, 120, hwnd, (HMENU)IDC_LOG_LIST, g_hInst, nullptr);
+        SendMessage(g_hLogList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         InitLogList(g_hLogList);
         
         // Create status bar
         g_hStatusBar = CreateWindowEx(0, L"msctls_statusbar32", L"Chunk Queue: 0", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS_BAR, g_hInst, nullptr);
+        SendMessage(g_hStatusBar, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         
         // Load favorites
         LoadFavorites();
         
         AddStreamTab();
         ResizeTabAndChildren(hwnd);
+        UpdateAddFavoriteButtonState();
         break;
     }
     case WM_SIZE:
-        ResizeTabAndChildren(hwnd);
+        if (wParam == SIZE_MINIMIZED && g_minimizeToTray) {
+            ShowWindow(hwnd, SW_HIDE);
+            CreateTrayIcon();
+        } else {
+            ResizeTabAndChildren(hwnd);
+        }
+        break;
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xFFF0) == SC_MINIMIZE && g_minimizeToTray) {
+            ShowWindow(hwnd, SW_HIDE);
+            CreateTrayIcon();
+            return 0; // Prevent default minimize behavior
+        }
+        return DefWindowProc(hwnd, msg, wParam, lParam);
+    case WM_TRAYICON:
+        if (wParam == ID_TRAYICON && lParam == WM_LBUTTONDBLCLK) {
+            ShowFromTray();
+        }
         break;
     case WM_NOTIFY:
         if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hTab &&
             reinterpret_cast<LPNMHDR>(lParam)->code == TCN_SELCHANGE) {
             int sel = TabCtrl_GetCurSel(g_hTab);
             SwitchToTab(sel);
-        }
-        else if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hFavoritesList &&
-                 reinterpret_cast<LPNMHDR>(lParam)->code == NM_DBLCLK) {
-            OnFavoriteDoubleClick();
         }
         break;
     case WM_COMMAND:
@@ -820,6 +1037,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
     case WM_DESTROY:
         CloseAllTabs();
+        RemoveTrayIcon();
+        if (g_hFont) {
+            DeleteObject(g_hFont);
+            g_hFont = nullptr;
+        }
         PostQuitMessage(0);
         break;
     default:
