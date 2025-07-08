@@ -19,6 +19,7 @@
 #include "tlsclient/tlsclient.h"
 #include "twitch_api.h"
 #include "favorites.h"
+#include "playlist_parser.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
