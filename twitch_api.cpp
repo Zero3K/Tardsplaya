@@ -16,6 +16,7 @@
 #include "twitch_api.h"
 #include "urlencode.h"
 #include "tlsclient/tlsclient.h"
+#include "json_minimal.h"
 
 // Helper: HTTP GET request (using WinHTTP, wide string version)
 bool HttpGetText(const std::wstring& url, std::string& out) {

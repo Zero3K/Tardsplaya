@@ -15,6 +15,7 @@
 #include "json_minimal.h"
 #include "stream_thread.h"
 #include "tlsclient/tlsclient.h"
+#include "twitch_api.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
