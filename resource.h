@@ -39,4 +39,5 @@
 
 // Tray icon support
 #define WM_TRAYICON             (WM_USER + 100)
+#define WM_PLAYER_STATE         (WM_USER + 101)
 #define ID_TRAYICON             2000

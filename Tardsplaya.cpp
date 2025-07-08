@@ -127,6 +127,53 @@ void ShowFromTray() {
     RemoveTrayIcon();
 }
 
+// Settings INI file functions
+void LoadSettings() {
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wstring iniPath = exePath;
+    size_t lastSlash = iniPath.find_last_of(L'\\');
+    if (lastSlash != std::wstring::npos) {
+        iniPath = iniPath.substr(0, lastSlash + 1) + L"Tardsplaya.ini";
+    } else {
+        iniPath = L"Tardsplaya.ini";
+    }
+
+    wchar_t buffer[MAX_PATH];
+    
+    // Load player path
+    GetPrivateProfileStringW(L"Settings", L"PlayerPath", L"mpv.exe", buffer, MAX_PATH, iniPath.c_str());
+    g_playerPath = buffer;
+    
+    // Load player arguments
+    GetPrivateProfileStringW(L"Settings", L"PlayerArgs", L"-", buffer, MAX_PATH, iniPath.c_str());
+    g_playerArg = buffer;
+    
+    // Load minimize to tray setting
+    g_minimizeToTray = GetPrivateProfileIntW(L"Settings", L"MinimizeToTray", 0, iniPath.c_str()) != 0;
+}
+
+void SaveSettings() {
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wstring iniPath = exePath;
+    size_t lastSlash = iniPath.find_last_of(L'\\');
+    if (lastSlash != std::wstring::npos) {
+        iniPath = iniPath.substr(0, lastSlash + 1) + L"Tardsplaya.ini";
+    } else {
+        iniPath = L"Tardsplaya.ini";
+    }
+
+    // Save player path
+    WritePrivateProfileStringW(L"Settings", L"PlayerPath", g_playerPath.c_str(), iniPath.c_str());
+    
+    // Save player arguments
+    WritePrivateProfileStringW(L"Settings", L"PlayerArgs", g_playerArg.c_str(), iniPath.c_str());
+    
+    // Save minimize to tray setting
+    WritePrivateProfileStringW(L"Settings", L"MinimizeToTray", g_minimizeToTray ? L"1" : L"0", iniPath.c_str());
+}
+
 void AddLog(const std::wstring& msg) {
     if (!g_enableLogging) return;
     LVITEM item = { 0 };
@@ -585,6 +632,10 @@ void StopStream(StreamTab& tab) {
         EnableWindow(tab.hStopBtn, FALSE);
         SetWindowTextW(tab.hWatchBtn, L"2. Watch");
         UpdateStatusBar(L"Chunk Queue: 0");
+        
+        // Restore window title to default
+        SetWindowTextW(g_hMainWnd, L"Tardsplaya");
+        
         AddLog(L"Stream stopped.");
     }
 }
@@ -592,6 +643,13 @@ void StopStream(StreamTab& tab) {
 void WatchStream(StreamTab& tab) {
     if (tab.isStreaming) {
         StopStream(tab);
+        return;
+    }
+
+    // Check if player path exists
+    DWORD dwAttrib = GetFileAttributesW(g_playerPath.c_str());
+    if (dwAttrib == INVALID_FILE_ATTRIBUTES || (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
+        MessageBoxW(tab.hChild, L"Media player not found. Please check the player path in Settings.", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
 
@@ -621,6 +679,10 @@ void WatchStream(StreamTab& tab) {
     
     std::wstring url = it->second;
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L")");
+    
+    // Update window title to show channel name
+    std::wstring title = L"Tardsplaya - " + tab.channel;
+    SetWindowTextW(g_hMainWnd, title.c_str());
     
     // Reset cancel token
     tab.cancelToken = false;
@@ -698,7 +760,7 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     HWND hChannelLabel = CreateWindowEx(0, L"STATIC", L"Channel:", WS_CHILD | WS_VISIBLE, 10, 10, 55, 18, hwnd, nullptr, g_hInst, nullptr);
     SendMessage(hChannelLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
-    HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", channel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 70, 10, 140, 22, hwnd, (HMENU)IDC_CHANNEL, g_hInst, nullptr);
+    HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", channel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 70, 10, 200, 22, hwnd, (HMENU)IDC_CHANNEL, g_hInst, nullptr);
     SendMessage(hEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
     HWND hLoad = CreateWindowEx(0, L"BUTTON", L"1. Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 10, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
@@ -835,7 +897,14 @@ void CloseActiveTab() {
 }
 
 void CloseAllTabs() {
+    // Stop all streams before closing tabs
     for (auto& s : g_streams) {
+        if (s.isStreaming) {
+            s.cancelToken = true;
+            if (s.streamThread.joinable()) {
+                s.streamThread.join();
+            }
+        }
         if (s.hChild) DestroyWindow(s.hChild);
     }
     g_streams.clear();
@@ -889,6 +958,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             
             g_minimizeToTray = IsDlgButtonChecked(hDlg, IDC_MINIMIZETOTRAY) == BST_CHECKED;
             
+            // Save settings to INI file
+            SaveSettings();
+            
             EndDialog(hDlg, IDOK);
             return TRUE;
         }
@@ -936,7 +1008,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         g_hFavoritesEdit = CreateWindowEx(0, L"BUTTON", L"Edit", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 110, 340, 40, 25, hwnd, (HMENU)IDC_FAVORITES_EDIT, g_hInst, nullptr);
         SendMessage(g_hFavoritesEdit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         
-        g_hCheckVersion = CreateWindowEx(0, L"BUTTON", L"Check Version", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 370, 100, 25, hwnd, (HMENU)IDC_CHECK_VERSION, g_hInst, nullptr);
+        g_hCheckVersion = CreateWindowEx(0, L"BUTTON", L"About", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 370, 100, 25, hwnd, (HMENU)IDC_CHECK_VERSION, g_hInst, nullptr);
         SendMessage(g_hCheckVersion, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         
         // Create stream tab control (main area)
@@ -1052,6 +1124,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hInst = hInstance;
+    
+    // Load settings from INI file
+    LoadSettings();
     
     // Initialize TLS client system for fallback support
     TLSClientHTTP::Initialize();
