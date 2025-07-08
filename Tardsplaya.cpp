@@ -530,7 +530,7 @@ ATOM RegisterStreamChildClass() {
 }
 
 HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"") {
-    RECT rc = { 0, 0, 480, 140 };
+    RECT rc = { 0, 0, 480, 180 };
     HWND hwnd = CreateWindowEx(0, L"StreamChildWin", NULL,
         WS_CHILD | WS_VISIBLE,
         rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
@@ -539,9 +539,9 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", channel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 70, 10, 140, 22, hwnd, (HMENU)IDC_CHANNEL, g_hInst, nullptr);
     HWND hLoad = CreateWindowEx(0, L"BUTTON", L"1. Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 10, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
     CreateWindowEx(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
-    HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, 80, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
+    HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, 120, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
     HWND hWatch = CreateWindowEx(0, L"BUTTON", L"2. Watch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 40, 60, 22, hwnd, (HMENU)IDC_WATCH, g_hInst, nullptr);
-    HWND hStop = CreateWindowEx(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 70, 60, 22, hwnd, (HMENU)IDC_STOP, g_hInst, nullptr);
+    HWND hStop = CreateWindowEx(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 110, 60, 22, hwnd, (HMENU)IDC_STOP, g_hInst, nullptr);
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
 
