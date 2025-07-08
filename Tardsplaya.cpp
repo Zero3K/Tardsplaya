@@ -681,17 +681,35 @@ void LoadChannel(StreamTab& tab) {
         return;
     }
     
-    // Check for any unusual characters or whitespace
+    // Clean the channel name to remove any non-printable characters
     std::wstring channelStr = channel;
-    if (channelStr.find_first_not_of(L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::wstring::npos) {
-        AddLog(L"Warning: Channel name contains unusual characters");
+    std::wstring cleanedChannel;
+    for (wchar_t c : channelStr) {
+        // Only include printable ASCII characters, letters, digits, underscore
+        if ((c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') || c == L'_') {
+            cleanedChannel += c;
+        }
+    }
+    
+    // If we removed characters, log it and use the cleaned version
+    if (cleanedChannel.length() != channelStr.length()) {
+        AddLog(L"Cleaned channel name from '" + channelStr + L"' to '" + cleanedChannel + L"'");
+        channelStr = cleanedChannel;
+        
+        // Update the text box with the cleaned name
+        SetDlgItemTextW(tab.hChild, IDC_CHANNEL, cleanedChannel.c_str());
+    }
+    
+    if (channelStr.empty()) {
+        MessageBoxW(tab.hChild, L"Enter a valid channel name.", L"Error", MB_OK | MB_ICONERROR);
+        return;
     }
     
     // Convert channel name to lowercase for API calls
-    std::wstring channelNameLower = channel;
+    std::wstring channelNameLower = channelStr;
     std::transform(channelNameLower.begin(), channelNameLower.end(), channelNameLower.begin(), ::towlower);
     
-    tab.channel = channel; // Store the original version for display
+    tab.channel = channelStr; // Store the cleaned version for display
     AddLog(L"Requesting Twitch access token for: " + channelNameLower);
     std::wstring token = GetAccessToken(channelNameLower);
     if (token.empty()) {
