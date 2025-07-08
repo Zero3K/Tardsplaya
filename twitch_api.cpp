@@ -124,18 +124,13 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
         WideCharToMultiByte(CP_UTF8, 0, channel.c_str(), -1, &channelUtf8[0], len, nullptr, nullptr);
     }
     
-    // Build the GraphQL request body - following the TLS client example
+    // Try a simpler approach first - just get the PlaybackAccessToken
     std::string gqlBody = 
-        "["
-        "{\"operationName\":\"PlaybackAccessToken\","
+        "{"
+        "\"operationName\":\"PlaybackAccessToken\","
         "\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712\"}},"
         "\"variables\":{\"isLive\":true,\"login\":\"" + channelUtf8 + "\",\"isVod\":false,\"vodID\":\"\",\"playerType\":\"embed\"}"
-        "},"
-        "{\"operationName\":\"AdRequestHandling\","
-        "\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"61a5ecca6da3d924efa9dbde811e051b8a10cb6bd0fe22c372c2f4401f3e88d1\"}},"
-        "\"variables\":{\"isLive\":true,\"login\":\"" + channelUtf8 + "\",\"isVOD\":false,\"vodID\":\"\",\"isCollection\":false,\"collectionID\":\"\"}"
-        "}"
-        "]";
+        "}";
 
     // Build headers
     std::wstring headers = 
@@ -150,24 +145,31 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
         return L""; // Request failed
     }
     
-    // Parse the JSON response using the existing json_minimal.h
-    JsonValue root = parse_json(response);
-    if (root.type != JsonValue::Array || root.size() < 1) {
-        return L""; // Invalid response format
+    // Try to parse the JSON response
+    try {
+        JsonValue root = parse_json(response);
+        if (root.type == JsonValue::Object) {
+            JsonValue data = root["data"];
+            if (data.type == JsonValue::Object) {
+                JsonValue token_obj = data["streamPlaybackAccessToken"];
+                if (token_obj.type == JsonValue::Object) {
+                    std::string sig = token_obj["signature"].as_str();
+                    std::string token = token_obj["value"].as_str();
+                    
+                    if (!sig.empty() && !token.empty()) {
+                        // Convert to wide strings and return in format expected by existing code
+                        std::wstring wsig(sig.begin(), sig.end());
+                        std::wstring wtoken(token.begin(), token.end());
+                        return wsig + L"|" + wtoken;
+                    }
+                }
+            }
+        }
+    } catch (...) {
+        // JSON parsing failed, fall back to legacy API
     }
     
-    // Extract signature and token from the first response
-    std::string sig = root[0]["data"]["streamPlaybackAccessToken"]["signature"].as_str();
-    std::string token = root[0]["data"]["streamPlaybackAccessToken"]["value"].as_str();
-    
-    if (sig.empty() || token.empty()) {
-        return L""; // Missing signature or token
-    }
-    
-    // Convert to wide strings and return in format expected by existing code
-    std::wstring wsig(sig.begin(), sig.end());
-    std::wstring wtoken(token.begin(), token.end());
-    return wsig + L"|" + wtoken;
+    return L""; // Failed to get token from GraphQL API
 }
 
 // Parse M3U8 playlist using improved logic from TLS client example
