@@ -1337,7 +1337,7 @@ class tls_client
 					}
 					else if (level == 2) { // fatal alert
 						err_msg.set_size(256);
-						sprintf_s(err_msg.buf, err_msg.capacity, "tls fatal alert: level=0x%x code=0x%x", level, code);
+						sprintf_s(err_msg.buf, err_msg.buf_len, "tls fatal alert: level=0x%x code=0x%x", level, code);
 						return err_msg.buf;
 					}
 					else {
