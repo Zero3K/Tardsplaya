@@ -191,6 +191,12 @@ void CheckVersion() {
     MessageBoxW(g_hMainWnd, L"Tardsplaya Version 1.0\nTwitch Stream Player", L"Version", MB_OK | MB_ICONINFO);
 }
 
+void UpdateStatusBar(const std::wstring& text) {
+    if (g_hStatusBar) {
+        SetWindowTextW(g_hStatusBar, text.c_str());
+    }
+}
+
 std::string WideToUtf8(const std::wstring& w) {
     int sz = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
     std::string out(sz - 1, 0);
@@ -436,6 +442,7 @@ void StopStream(StreamTab& tab) {
         EnableWindow(tab.hWatchBtn, TRUE);
         EnableWindow(tab.hStopBtn, FALSE);
         SetWindowTextW(tab.hWatchBtn, L"2. Watch");
+        UpdateStatusBar(L"Chunk Queue: 0");
         AddLog(L"Stream stopped.");
     }
 }
@@ -481,6 +488,7 @@ void WatchStream(StreamTab& tab) {
     EnableWindow(tab.hWatchBtn, FALSE);
     EnableWindow(tab.hStopBtn, TRUE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
+    UpdateStatusBar(L"Chunk Queue: Buffering...");
     
     // Detach the thread so it runs independently
     tab.streamThread.detach();
