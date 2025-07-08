@@ -223,7 +223,7 @@ bool TLSClient::HttpPost(const std::string& url, const std::string& postData, st
         (LPVOID)postData.c_str(), postData.length(), postData.length(), 0);
     
     if (!bSendResult) {
-        DWORD error = GetLastError();
+        DWORD error = ::GetLastError();
         lastError = "Failed to send request, error code: " + std::to_string(error);
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
@@ -233,7 +233,7 @@ bool TLSClient::HttpPost(const std::string& url, const std::string& postData, st
     
     BOOL bReceiveResult = WinHttpReceiveResponse(hRequest, NULL);
     if (!bReceiveResult) {
-        DWORD error = GetLastError();
+        DWORD error = ::GetLastError();
         lastError = "Failed to receive response, error code: " + std::to_string(error);
         WinHttpCloseHandle(hRequest);
         WinHttpCloseHandle(hConnect);
