@@ -13,7 +13,7 @@
 #include <algorithm>
 #include "twitch_api.h"
 #include "urlencode.h"
-#include "tlsclient.h"
+#include "tlsclient/tlsclient.h"
 
 // Helper: HTTP GET request (using WinHTTP, wide string version)
 bool HttpGetText(const std::wstring& url, std::string& out) {
