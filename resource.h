@@ -23,3 +23,12 @@
 #define IDC_WATCH       1103
 #define IDC_STOP        1104
 #define IDC_LOG_LIST    1105
+
+// Favorites panel controls
+#define IDC_FAVORITES_LIST      1106
+#define IDC_FAVORITES_ADD       1107
+#define IDC_FAVORITES_DELETE    1108
+#define IDC_FAVORITES_EDIT      1109
+#define IDC_CHECK_VERSION       1110
+#define IDC_MAIN_TAB            1111
+#define IDC_STATUS_BAR          1112

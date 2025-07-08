@@ -16,6 +16,7 @@
 #include "stream_thread.h"
 #include "tlsclient/tlsclient.h"
 #include "twitch_api.h"
+#include "favorites.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
@@ -77,8 +78,10 @@ struct StreamTab {
 };
 
 HINSTANCE g_hInst;
-HWND g_hMainWnd, g_hTab, g_hLogList;
+HWND g_hMainWnd, g_hTab, g_hLogList, g_hMainTab, g_hStatusBar;
+HWND g_hFavoritesList, g_hFavoritesAdd, g_hFavoritesDelete, g_hFavoritesEdit, g_hCheckVersion;
 std::vector<StreamTab> g_streams;
+std::vector<std::wstring> g_favorites;
 
 std::wstring g_playerPath = L"mpv.exe";
 std::wstring g_playerArg = L"-";
@@ -99,6 +102,93 @@ void AddLog(const std::wstring& msg) {
     ListView_InsertItem(g_hLogList, &item);
     ListView_SetItemText(g_hLogList, item.iItem, 1, const_cast<LPWSTR>(msg.c_str()));
     if (g_logAutoScroll) ListView_EnsureVisible(g_hLogList, item.iItem, FALSE);
+}
+
+void LoadFavorites() {
+    g_favorites = LoadFavoritesFromFile(L"favorites.txt");
+    SendMessage(g_hFavoritesList, LB_RESETCONTENT, 0, 0);
+    for (const auto& fav : g_favorites) {
+        SendMessage(g_hFavoritesList, LB_ADDSTRING, 0, (LPARAM)fav.c_str());
+    }
+}
+
+void SaveFavorites() {
+    SaveFavoritesToFile(L"favorites.txt", g_favorites);
+}
+
+void RefreshFavoritesList() {
+    SendMessage(g_hFavoritesList, LB_RESETCONTENT, 0, 0);
+    for (const auto& fav : g_favorites) {
+        SendMessage(g_hFavoritesList, LB_ADDSTRING, 0, (LPARAM)fav.c_str());
+    }
+}
+
+void AddFavorite() {
+    // Get current channel name from active tab
+    int activeTab = TabCtrl_GetCurSel(g_hTab);
+    if (activeTab < 0 || activeTab >= (int)g_streams.size()) return;
+    
+    wchar_t channel[128];
+    GetDlgItemText(g_streams[activeTab].hChild, IDC_CHANNEL, channel, 128);
+    
+    if (wcslen(channel) == 0) {
+        MessageBoxW(g_hMainWnd, L"Enter a channel name first.", L"Add Favorite", MB_OK | MB_ICONINFO);
+        return;
+    }
+    
+    std::wstring channelStr = channel;
+    // Check if already in favorites
+    for (const auto& fav : g_favorites) {
+        if (fav == channelStr) {
+            MessageBoxW(g_hMainWnd, L"Channel is already in favorites.", L"Add Favorite", MB_OK | MB_ICONINFO);
+            return;
+        }
+    }
+    
+    g_favorites.push_back(channelStr);
+    RefreshFavoritesList();
+    SaveFavorites();
+}
+
+void DeleteFavorite() {
+    int sel = (int)SendMessage(g_hFavoritesList, LB_GETCURSEL, 0, 0);
+    if (sel == LB_ERR) {
+        MessageBoxW(g_hMainWnd, L"Select a favorite to delete.", L"Delete Favorite", MB_OK | MB_ICONINFO);
+        return;
+    }
+    
+    if (MessageBoxW(g_hMainWnd, L"Are you sure you want to delete this favorite?", L"Delete Favorite", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        g_favorites.erase(g_favorites.begin() + sel);
+        RefreshFavoritesList();
+        SaveFavorites();
+    }
+}
+
+void EditFavorite() {
+    int sel = (int)SendMessage(g_hFavoritesList, LB_GETCURSEL, 0, 0);
+    if (sel == LB_ERR) {
+        MessageBoxW(g_hMainWnd, L"Select a favorite to edit.", L"Edit Favorite", MB_OK | MB_ICONINFO);
+        return;
+    }
+    
+    // Simple edit dialog - for now just show the current name
+    std::wstring currentName = g_favorites[sel];
+    MessageBoxW(g_hMainWnd, (L"Current favorite: " + currentName).c_str(), L"Edit Favorite", MB_OK | MB_ICONINFO);
+}
+
+void OnFavoriteDoubleClick() {
+    int sel = (int)SendMessage(g_hFavoritesList, LB_GETCURSEL, 0, 0);
+    if (sel == LB_ERR) return;
+    
+    // Load the favorite into the current tab
+    int activeTab = TabCtrl_GetCurSel(g_hTab);
+    if (activeTab < 0 || activeTab >= (int)g_streams.size()) return;
+    
+    SetDlgItemText(g_streams[activeTab].hChild, IDC_CHANNEL, g_favorites[sel].c_str());
+}
+
+void CheckVersion() {
+    MessageBoxW(g_hMainWnd, L"Tardsplaya Version 1.0\nTwitch Stream Player", L"Version", MB_OK | MB_ICONINFO);
 }
 
 std::string WideToUtf8(const std::wstring& w) {
@@ -345,7 +435,7 @@ void StopStream(StreamTab& tab) {
         tab.isStreaming = false;
         EnableWindow(tab.hWatchBtn, TRUE);
         EnableWindow(tab.hStopBtn, FALSE);
-        SetWindowTextW(tab.hWatchBtn, L"Watch");
+        SetWindowTextW(tab.hWatchBtn, L"2. Watch");
         AddLog(L"Stream stopped.");
     }
 }
@@ -437,10 +527,10 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
         hParent, nullptr, g_hInst, nullptr);
     CreateWindowEx(0, L"STATIC", L"Channel:", WS_CHILD | WS_VISIBLE, 10, 10, 55, 18, hwnd, nullptr, g_hInst, nullptr);
     HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", channel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 70, 10, 140, 22, hwnd, (HMENU)IDC_CHANNEL, g_hInst, nullptr);
-    HWND hLoad = CreateWindowEx(0, L"BUTTON", L"Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 10, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
-    CreateWindowEx(0, L"STATIC", L"Qualities:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
+    HWND hLoad = CreateWindowEx(0, L"BUTTON", L"1. Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 10, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
+    CreateWindowEx(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
     HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 140, 60, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
-    HWND hWatch = CreateWindowEx(0, L"BUTTON", L"Watch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 40, 60, 22, hwnd, (HMENU)IDC_WATCH, g_hInst, nullptr);
+    HWND hWatch = CreateWindowEx(0, L"BUTTON", L"2. Watch", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 220, 40, 60, 22, hwnd, (HMENU)IDC_WATCH, g_hInst, nullptr);
     HWND hStop = CreateWindowEx(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 290, 40, 60, 22, hwnd, (HMENU)IDC_STOP, g_hInst, nullptr);
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
@@ -454,20 +544,72 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
 }
 
 void ResizeTabAndChildren(HWND hwnd) {
-    RECT rcMain;
+    RECT rcMain, rcStatus;
     GetClientRect(hwnd, &rcMain);
-    int logHeight = 120;
-    SetWindowPos(g_hTab, nullptr, 0, 0, rcMain.right, rcMain.bottom - logHeight, SWP_NOZORDER);
-    SetWindowPos(g_hLogList, nullptr, 0, rcMain.bottom - logHeight, rcMain.right, logHeight, SWP_NOZORDER);
-    int sel = TabCtrl_GetCurSel(g_hTab);
-    for (size_t i = 0; i < g_streams.size(); ++i) {
-        ShowWindow(g_streams[i].hChild, i == sel ? SW_SHOW : SW_HIDE);
-        if (i == sel) {
-            RECT rcTab;
-            GetClientRect(g_hTab, &rcTab);
-            TabCtrl_AdjustRect(g_hTab, FALSE, &rcTab);
-            SetWindowPos(g_streams[i].hChild, nullptr, rcTab.left, rcTab.top, rcTab.right - rcTab.left, rcTab.bottom - rcTab.top, SWP_NOZORDER | SWP_SHOWWINDOW);
+    
+    // Get status bar height
+    GetWindowRect(g_hStatusBar, &rcStatus);
+    int statusHeight = rcStatus.bottom - rcStatus.top;
+    
+    // Resize status bar
+    SendMessage(g_hStatusBar, WM_SIZE, 0, 0);
+    
+    // Layout constants
+    const int favoritesWidth = 200;
+    const int margin = 10;
+    
+    // Calculate available area (minus status bar)
+    int availableHeight = rcMain.bottom - statusHeight;
+    
+    // Position favorites panel
+    SetWindowPos(g_hFavoritesList, nullptr, margin, 30, favoritesWidth - 20, availableHeight - 100, SWP_NOZORDER);
+    SetWindowPos(g_hFavoritesAdd, nullptr, margin, availableHeight - 60, 40, 25, SWP_NOZORDER);
+    SetWindowPos(g_hFavoritesDelete, nullptr, margin + 45, availableHeight - 60, 50, 25, SWP_NOZORDER);
+    SetWindowPos(g_hFavoritesEdit, nullptr, margin + 100, availableHeight - 60, 40, 25, SWP_NOZORDER);
+    SetWindowPos(g_hCheckVersion, nullptr, margin, availableHeight - 30, 100, 25, SWP_NOZORDER);
+    
+    // Position main tab control
+    int mainTabX = favoritesWidth + margin;
+    int mainTabWidth = rcMain.right - mainTabX - margin;
+    SetWindowPos(g_hMainTab, nullptr, mainTabX, margin, mainTabWidth, availableHeight - 20, SWP_NOZORDER);
+    
+    // Get the display area of the main tab control
+    RECT rcMainTab;
+    GetClientRect(g_hMainTab, &rcMainTab);
+    TabCtrl_AdjustRect(g_hMainTab, FALSE, &rcMainTab);
+    
+    // Check which tab is selected in main tab control
+    int mainTabSel = TabCtrl_GetCurSel(g_hMainTab);
+    
+    if (mainTabSel == 0) {
+        // Main tab is selected - show stream tabs
+        ShowWindow(g_hTab, SW_SHOW);
+        ShowWindow(g_hLogList, SW_HIDE);
+        
+        // Position stream tab control within main tab
+        SetWindowPos(g_hTab, nullptr, mainTabX + rcMainTab.left, margin + rcMainTab.top, 
+                    rcMainTab.right - rcMainTab.left, rcMainTab.bottom - rcMainTab.top, SWP_NOZORDER);
+        
+        // Resize stream tab children
+        int sel = TabCtrl_GetCurSel(g_hTab);
+        for (size_t i = 0; i < g_streams.size(); ++i) {
+            ShowWindow(g_streams[i].hChild, i == sel ? SW_SHOW : SW_HIDE);
+            if (i == sel) {
+                RECT rcTab;
+                GetClientRect(g_hTab, &rcTab);
+                TabCtrl_AdjustRect(g_hTab, FALSE, &rcTab);
+                SetWindowPos(g_streams[i].hChild, nullptr, rcTab.left, rcTab.top, 
+                            rcTab.right - rcTab.left, rcTab.bottom - rcTab.top, SWP_NOZORDER | SWP_SHOWWINDOW);
+            }
         }
+    } else if (mainTabSel == 1) {
+        // Log tab is selected - show log list
+        ShowWindow(g_hTab, SW_HIDE);
+        ShowWindow(g_hLogList, SW_SHOW);
+        
+        // Position log list within main tab
+        SetWindowPos(g_hLogList, nullptr, mainTabX + rcMainTab.left, margin + rcMainTab.top, 
+                    rcMainTab.right - rcMainTab.left, rcMainTab.bottom - rcMainTab.top, SWP_NOZORDER);
     }
 }
 
@@ -524,9 +666,41 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         RegisterStreamChildClass();
         HMENU hMenu = LoadMenu(g_hInst, MAKEINTRESOURCE(IDR_MYMENU));
         SetMenu(hwnd, hMenu);
+        
+        // Create favorites panel on the left
+        CreateWindowEx(0, L"STATIC", L"Favorites:", WS_CHILD | WS_VISIBLE, 10, 10, 80, 18, hwnd, nullptr, g_hInst, nullptr);
+        g_hFavoritesList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 10, 30, 180, 300, hwnd, (HMENU)IDC_FAVORITES_LIST, g_hInst, nullptr);
+        
+        // Favorites management buttons
+        g_hFavoritesAdd = CreateWindowEx(0, L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 340, 40, 25, hwnd, (HMENU)IDC_FAVORITES_ADD, g_hInst, nullptr);
+        g_hFavoritesDelete = CreateWindowEx(0, L"BUTTON", L"Delete", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 55, 340, 50, 25, hwnd, (HMENU)IDC_FAVORITES_DELETE, g_hInst, nullptr);
+        g_hFavoritesEdit = CreateWindowEx(0, L"BUTTON", L"Edit", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 110, 340, 40, 25, hwnd, (HMENU)IDC_FAVORITES_EDIT, g_hInst, nullptr);
+        g_hCheckVersion = CreateWindowEx(0, L"BUTTON", L"Check Version", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 370, 100, 25, hwnd, (HMENU)IDC_CHECK_VERSION, g_hInst, nullptr);
+        
+        // Create main tab control for "Main" and "Log"
+        g_hMainTab = CreateWindowEx(0, WC_TABCONTROL, L"", WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE, 200, 10, 500, 300, hwnd, (HMENU)IDC_MAIN_TAB, g_hInst, nullptr);
+        
+        // Add tabs to main tab control
+        TCITEM tie = { 0 };
+        tie.mask = TCIF_TEXT;
+        tie.pszText = (LPWSTR)L"Main";
+        TabCtrl_InsertItem(g_hMainTab, 0, &tie);
+        tie.pszText = (LPWSTR)L"Log";
+        TabCtrl_InsertItem(g_hMainTab, 1, &tie);
+        
+        // Create stream tab control (inside main tab)
         g_hTab = CreateWindowEx(0, WC_TABCONTROL, L"", WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE, 0, 0, 100, 100, hwnd, (HMENU)IDC_TAB, g_hInst, nullptr);
-        g_hLogList = CreateWindowEx(WS_EX_CLIENTEDGE, WC_LISTVIEW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL, 0, 0, 100, 100, hwnd, (HMENU)IDC_LOG_LIST, g_hInst, nullptr);
+        
+        // Create log list (initially hidden)
+        g_hLogList = CreateWindowEx(WS_EX_CLIENTEDGE, WC_LISTVIEW, NULL, WS_CHILD | LVS_REPORT | LVS_SINGLESEL, 0, 0, 100, 100, hwnd, (HMENU)IDC_LOG_LIST, g_hInst, nullptr);
         InitLogList(g_hLogList);
+        
+        // Create status bar
+        g_hStatusBar = CreateWindowEx(0, L"msctls_statusbar32", L"Chunk Queue: 0", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS_BAR, g_hInst, nullptr);
+        
+        // Load favorites
+        LoadFavorites();
+        
         AddStreamTab();
         ResizeTabAndChildren(hwnd);
         break;
@@ -539,6 +713,14 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             reinterpret_cast<LPNMHDR>(lParam)->code == TCN_SELCHANGE) {
             int sel = TabCtrl_GetCurSel(g_hTab);
             SwitchToTab(sel);
+        }
+        else if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hMainTab &&
+                 reinterpret_cast<LPNMHDR>(lParam)->code == TCN_SELCHANGE) {
+            ResizeTabAndChildren(hwnd);
+        }
+        else if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hFavoritesList &&
+                 reinterpret_cast<LPNMHDR>(lParam)->code == NM_DBLCLK) {
+            OnFavoriteDoubleClick();
         }
         break;
     case WM_COMMAND:
@@ -554,6 +736,23 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             break;
         case IDM_EXIT:
             PostMessage(hwnd, WM_CLOSE, 0, 0);
+            break;
+        case IDC_FAVORITES_ADD:
+            AddFavorite();
+            break;
+        case IDC_FAVORITES_DELETE:
+            DeleteFavorite();
+            break;
+        case IDC_FAVORITES_EDIT:
+            EditFavorite();
+            break;
+        case IDC_CHECK_VERSION:
+            CheckVersion();
+            break;
+        case IDC_FAVORITES_LIST:
+            if (HIWORD(wParam) == LBN_DBLCLK) {
+                OnFavoriteDoubleClick();
+            }
             break;
         }
         break;
