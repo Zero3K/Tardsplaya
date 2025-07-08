@@ -39,6 +39,7 @@ struct StreamTab {
     bool isStreaming = false;
     bool playerStarted = false; // Track if player has started successfully
     HANDLE playerProcess = nullptr; // Store player process handle for cleanup
+    std::atomic<int> chunkCount{0}; // Track actual chunk queue size
 
     // Make the struct movable but not copyable
     StreamTab() = default;
@@ -58,6 +59,7 @@ struct StreamTab {
         , isStreaming(other.isStreaming)
         , playerStarted(other.playerStarted)
         , playerProcess(other.playerProcess)
+        , chunkCount(other.chunkCount.load())
     {
         other.hChild = nullptr;
         other.hQualities = nullptr;
@@ -81,6 +83,7 @@ struct StreamTab {
             isStreaming = other.isStreaming;
             playerStarted = other.playerStarted;
             playerProcess = other.playerProcess;
+            chunkCount = other.chunkCount.load();
             
             other.hChild = nullptr;
             other.hQualities = nullptr;
@@ -110,9 +113,6 @@ bool g_minimizeToTray = false;
 // Tray icon support
 NOTIFYICONDATA g_nid = {};
 bool g_trayIconCreated = false;
-
-// Chunk queue simulation
-int g_currentChunkCount = 0;
 
 void CreateTrayIcon() {
     if (g_trayIconCreated) return;
@@ -763,7 +763,8 @@ void WatchStream(StreamTab& tab) {
             PostMessage(g_hMainWnd, WM_USER + 1, 0, (LPARAM)new std::wstring(msg));
         },
         3, // buffer 3 segments
-        tab.channel // channel name for player window title
+        tab.channel, // channel name for player window title
+        &tab.chunkCount // chunk count for status display
     );
     
     tab.isStreaming = true;
@@ -777,7 +778,6 @@ void WatchStream(StreamTab& tab) {
     SetTimer(g_hMainWnd, TIMER_PLAYER_CHECK, 3000, nullptr);
     
     // Set a timer to periodically update chunk queue status
-    g_currentChunkCount = 0;
     SetTimer(g_hMainWnd, TIMER_CHUNK_UPDATE, 2000, nullptr);
     
     // Detach the thread so it runs independently
@@ -986,6 +986,14 @@ void CloseAllTabs() {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             s.streamThread.join();
         }
+        
+        // Close media player process if it's still running
+        if (s.playerProcess && s.playerProcess != INVALID_HANDLE_VALUE) {
+            TerminateProcess(s.playerProcess, 0);
+            CloseHandle(s.playerProcess);
+            s.playerProcess = nullptr;
+        }
+        
         if (s.hChild) DestroyWindow(s.hChild);
     }
     g_streams.clear();
@@ -1184,6 +1192,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         break;
     case WM_CLOSE:
+        CloseAllTabs(); // Properly clean up all streaming tabs and media players
         DestroyWindow(hwnd);
         break;
     case WM_USER + 1: {
@@ -1228,21 +1237,19 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             KillTimer(hwnd, TIMER_PLAYER_CHECK);
         } else if (wParam == TIMER_CHUNK_UPDATE) {
-            // Check if any stream is active
+            // Check if any stream is active and get total chunk count
             bool hasActiveStream = false;
+            int totalChunkCount = 0;
             for (const auto& tab : g_streams) {
                 if (tab.isStreaming) {
                     hasActiveStream = true;
-                    break;
+                    totalChunkCount += tab.chunkCount.load();
                 }
             }
             
             if (hasActiveStream) {
-                // Simulate chunk queue count (in real implementation, this would come from stream pipe)
-                g_currentChunkCount = (g_currentChunkCount + 1) % 4; // Cycle 0-3
-                if (g_currentChunkCount == 0) g_currentChunkCount = 1; // Keep 1-3 range
-                
-                std::wstring status = L"Chunk Queue: " + std::to_wstring(g_currentChunkCount);
+                // Show actual chunk queue count from streaming threads
+                std::wstring status = L"Chunk Queue: " + std::to_wstring(totalChunkCount);
                 UpdateStatusBar(status);
             } else {
                 // No active streams, stop the timer

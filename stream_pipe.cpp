@@ -171,7 +171,8 @@ bool BufferAndPipeStreamToPlayer(
     const std::wstring& playlist_url,
     std::atomic<bool>& cancel_token,
     int buffer_segments,
-    const std::wstring& channel_name
+    const std::wstring& channel_name,
+    std::atomic<int>* chunk_count
 ) {
     // 1. Download the master playlist and pick the first media playlist (or use playlist_url directly if it's media)
     std::string master;
@@ -254,6 +255,11 @@ bool BufferAndPipeStreamToPlayer(
             if (!segment_data.empty()) {
                 segment_buffer.push_back(std::move(segment_data));
                 new_segments++;
+                
+                // Update chunk count for status display
+                if (chunk_count) {
+                    *chunk_count = (int)segment_buffer.size();
+                }
 
                 // Once buffer is filled, start writing to player
                 if (!started && (int)segment_buffer.size() >= buffer_segments) {
@@ -264,12 +270,20 @@ bool BufferAndPipeStreamToPlayer(
                         WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr);
                     }
                     segment_buffer.clear();
+                    // Update chunk count after clearing buffer
+                    if (chunk_count) {
+                        *chunk_count = (int)segment_buffer.size();
+                    }
                 } else if (started) {
                     if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
                     auto& buf = segment_buffer.front();
                     DWORD written = 0;
                     WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr);
                     segment_buffer.erase(segment_buffer.begin());
+                    // Update chunk count after removing segment
+                    if (chunk_count) {
+                        *chunk_count = (int)segment_buffer.size();
+                    }
                 }
             }
         }
