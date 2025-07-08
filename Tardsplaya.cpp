@@ -299,7 +299,19 @@ void OnFavoriteDoubleClick() {
     int activeTab = TabCtrl_GetCurSel(g_hTab);
     if (activeTab < 0 || activeTab >= (int)g_streams.size()) return;
     
-    SetDlgItemText(g_streams[activeTab].hChild, IDC_CHANNEL, g_favorites[sel].c_str());
+    HWND hChannelEdit = GetDlgItem(g_streams[activeTab].hChild, IDC_CHANNEL);
+    if (hChannelEdit) {
+        // Set focus first to ensure proper text setting
+        SetFocus(hChannelEdit);
+        // Clear the existing text first
+        SetWindowTextW(hChannelEdit, L"");
+        // Set the new text
+        SetWindowTextW(hChannelEdit, g_favorites[sel].c_str());
+        // Force the control to update
+        UpdateWindow(hChannelEdit);
+        // Send a change notification to trigger any dependent logic
+        SendMessage(GetParent(hChannelEdit), WM_COMMAND, MAKEWPARAM(IDC_CHANNEL, EN_CHANGE), (LPARAM)hChannelEdit);
+    }
     UpdateAddFavoriteButtonState();
 }
 
@@ -979,17 +991,43 @@ void CloseAllTabs() {
         }
     }
     
-    // Give threads some time to clean up, then force join
+    // Give threads more time to clean up gracefully
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    
+    // Force join all threads and close media players
     for (auto& s : g_streams) {
         if (s.streamThread.joinable()) {
-            // Wait a bit for graceful shutdown, then force join
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            s.streamThread.join();
+            // Try to join with a timeout, then force join
+            try {
+                s.streamThread.join();
+            } catch (...) {
+                // If join fails, detach the thread
+                s.streamThread.detach();
+            }
         }
         
-        // Close media player process if it's still running
+        // More robust media player process termination
         if (s.playerProcess && s.playerProcess != INVALID_HANDLE_VALUE) {
-            TerminateProcess(s.playerProcess, 0);
+            // First try to close gracefully by sending WM_CLOSE to the process windows
+            DWORD processId = GetProcessId(s.playerProcess);
+            if (processId != 0) {
+                // Enumerate windows of the process and send WM_CLOSE
+                EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+                    DWORD windowProcessId;
+                    GetWindowThreadProcessId(hwnd, &windowProcessId);
+                    if (windowProcessId == (DWORD)lParam) {
+                        PostMessage(hwnd, WM_CLOSE, 0, 0);
+                    }
+                    return TRUE;
+                }, (LPARAM)processId);
+                
+                // Wait a bit for graceful shutdown
+                if (WaitForSingleObject(s.playerProcess, 2000) != WAIT_OBJECT_0) {
+                    // If still running, force terminate
+                    TerminateProcess(s.playerProcess, 0);
+                    WaitForSingleObject(s.playerProcess, 1000);
+                }
+            }
             CloseHandle(s.playerProcess);
             s.playerProcess = nullptr;
         }
