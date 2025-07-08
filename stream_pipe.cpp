@@ -173,7 +173,11 @@ bool BufferAndPipeStreamToPlayer(
     if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return false;
 
     // 3. Launch the player with stdin redirected
-    std::wstring cmd = L"\"" + player_path + L"\" -";
+    std::wstring cmd = L"\"" + player_path + L"\"";
+    if (!channel_name.empty()) {
+        cmd += L" --title=\"" + channel_name + L"\"";
+    }
+    cmd += L" -";
     STARTUPINFOW si = { sizeof(si) };
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = hRead;

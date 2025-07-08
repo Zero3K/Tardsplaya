@@ -13,6 +13,7 @@
 #include <regex>
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include "resource.h"
 #include "json_minimal.h"
 #include "stream_thread.h"
@@ -36,6 +37,7 @@ struct StreamTab {
     std::atomic<bool> cancelToken{false};
     bool isStreaming = false;
     bool playerStarted = false; // Track if player has started successfully
+    HANDLE playerProcess = nullptr; // Store player process handle for cleanup
 
     // Make the struct movable but not copyable
     StreamTab() = default;
@@ -54,12 +56,14 @@ struct StreamTab {
         , cancelToken(other.cancelToken.load())
         , isStreaming(other.isStreaming)
         , playerStarted(other.playerStarted)
+        , playerProcess(other.playerProcess)
     {
         other.hChild = nullptr;
         other.hQualities = nullptr;
         other.hWatchBtn = nullptr;
         other.hStopBtn = nullptr;
         other.isStreaming = false;
+        other.playerProcess = nullptr;
     }
     StreamTab& operator=(StreamTab&& other) noexcept {
         if (this != &other) {
@@ -75,6 +79,7 @@ struct StreamTab {
             cancelToken = other.cancelToken.load();
             isStreaming = other.isStreaming;
             playerStarted = other.playerStarted;
+            playerProcess = other.playerProcess;
             
             other.hChild = nullptr;
             other.hQualities = nullptr;
@@ -82,7 +87,7 @@ struct StreamTab {
             other.hStopBtn = nullptr;
             other.isStreaming = false;
             other.playerStarted = false;
-            other.playerStarted = false;
+            other.playerProcess = nullptr;
         }
         return *this;
     }
@@ -538,6 +543,22 @@ std::wstring StandardizeQualityName(const std::wstring& originalName) {
         return L"160p";
     }
     
+    // Handle resolution strings like "1920x1080", "1280x720", etc.
+    std::wregex resolutionPattern(L"(\\d+)x(\\d+)");
+    std::wsmatch resMatch;
+    if (std::regex_search(originalName, resMatch, resolutionPattern)) {
+        int width = std::stoi(resMatch[1].str());
+        int height = std::stoi(resMatch[2].str());
+        
+        // Map common resolutions to quality names
+        if (height >= 1080) return L"1080p60"; // Assume high res is 60fps
+        if (height >= 720) return L"720p";
+        if (height >= 480) return L"480p";
+        if (height >= 360) return L"360p";
+        if (height >= 160) return L"160p";
+        return L"audio_only"; // Very low resolution
+    }
+    
     // Try to extract resolution from string patterns like "1080p60", "720p", etc.
     std::wregex resPattern(L"(\\d+)p(?:(\\d+))?");
     std::wsmatch match;
@@ -677,8 +698,6 @@ void StopStream(StreamTab& tab) {
         
         if (!hasActiveStream) {
             UpdateStatusBar(L"Chunk Queue: 0");
-            // Restore window title to default
-            SetWindowTextW(g_hMainWnd, L"Tardsplaya");
         }
         
         AddLog(L"Stream stopped.");
@@ -724,10 +743,6 @@ void WatchStream(StreamTab& tab) {
     
     std::wstring url = it->second;
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L")");
-    
-    // Update window title to show channel name
-    std::wstring title = L"Tardsplaya - " + tab.channel;
-    SetWindowTextW(g_hMainWnd, title.c_str());
     
     // Reset cancel token
     tab.cancelToken = false;
@@ -955,9 +970,15 @@ void CloseAllTabs() {
     for (auto& s : g_streams) {
         if (s.isStreaming) {
             s.cancelToken = true;
-            if (s.streamThread.joinable()) {
-                s.streamThread.join();
-            }
+        }
+    }
+    
+    // Give threads some time to clean up, then force join
+    for (auto& s : g_streams) {
+        if (s.streamThread.joinable()) {
+            // Wait a bit for graceful shutdown, then force join
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            s.streamThread.join();
         }
         if (s.hChild) DestroyWindow(s.hChild);
     }
