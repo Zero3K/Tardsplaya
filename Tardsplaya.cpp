@@ -78,7 +78,7 @@ struct StreamTab {
 };
 
 HINSTANCE g_hInst;
-HWND g_hMainWnd, g_hTab, g_hLogList, g_hMainTab, g_hStatusBar;
+HWND g_hMainWnd, g_hTab, g_hLogList, g_hStatusBar;
 HWND g_hFavoritesList, g_hFavoritesAdd, g_hFavoritesDelete, g_hFavoritesEdit, g_hCheckVersion;
 std::vector<StreamTab> g_streams;
 std::vector<std::wstring> g_favorites;
@@ -564,6 +564,7 @@ void ResizeTabAndChildren(HWND hwnd) {
     // Layout constants
     const int favoritesWidth = 200;
     const int margin = 10;
+    const int logHeight = 120;
     
     // Calculate available area (minus status bar)
     int availableHeight = rcMain.bottom - statusHeight;
@@ -575,48 +576,25 @@ void ResizeTabAndChildren(HWND hwnd) {
     SetWindowPos(g_hFavoritesEdit, nullptr, margin + 100, availableHeight - 60, 40, 25, SWP_NOZORDER);
     SetWindowPos(g_hCheckVersion, nullptr, margin, availableHeight - 30, 100, 25, SWP_NOZORDER);
     
-    // Position main tab control
-    int mainTabX = favoritesWidth + margin;
-    int mainTabWidth = rcMain.right - mainTabX - margin;
-    SetWindowPos(g_hMainTab, nullptr, mainTabX, margin, mainTabWidth, availableHeight - 20, SWP_NOZORDER);
+    // Position stream tab control (main area, excluding favorites panel)
+    int mainAreaX = favoritesWidth + margin;
+    int mainAreaWidth = rcMain.right - mainAreaX - margin;
+    SetWindowPos(g_hTab, nullptr, mainAreaX, margin, mainAreaWidth, availableHeight - logHeight - margin, SWP_NOZORDER);
     
-    // Get the display area of the main tab control
-    RECT rcMainTab;
-    GetClientRect(g_hMainTab, &rcMainTab);
-    TabCtrl_AdjustRect(g_hMainTab, FALSE, &rcMainTab);
+    // Position log list at the bottom
+    SetWindowPos(g_hLogList, nullptr, mainAreaX, availableHeight - logHeight, mainAreaWidth, logHeight, SWP_NOZORDER);
     
-    // Check which tab is selected in main tab control
-    int mainTabSel = TabCtrl_GetCurSel(g_hMainTab);
-    
-    if (mainTabSel == 0) {
-        // Main tab is selected - show stream tabs
-        ShowWindow(g_hTab, SW_SHOW);
-        ShowWindow(g_hLogList, SW_HIDE);
-        
-        // Position stream tab control within main tab
-        SetWindowPos(g_hTab, nullptr, mainTabX + rcMainTab.left, margin + rcMainTab.top, 
-                    rcMainTab.right - rcMainTab.left, rcMainTab.bottom - rcMainTab.top, SWP_NOZORDER);
-        
-        // Resize stream tab children
-        int sel = TabCtrl_GetCurSel(g_hTab);
-        for (size_t i = 0; i < g_streams.size(); ++i) {
-            ShowWindow(g_streams[i].hChild, i == sel ? SW_SHOW : SW_HIDE);
-            if (i == sel) {
-                RECT rcTab;
-                GetClientRect(g_hTab, &rcTab);
-                TabCtrl_AdjustRect(g_hTab, FALSE, &rcTab);
-                SetWindowPos(g_streams[i].hChild, nullptr, rcTab.left, rcTab.top, 
-                            rcTab.right - rcTab.left, rcTab.bottom - rcTab.top, SWP_NOZORDER | SWP_SHOWWINDOW);
-            }
+    // Resize stream tab children
+    int sel = TabCtrl_GetCurSel(g_hTab);
+    for (size_t i = 0; i < g_streams.size(); ++i) {
+        ShowWindow(g_streams[i].hChild, i == sel ? SW_SHOW : SW_HIDE);
+        if (i == sel) {
+            RECT rcTab;
+            GetClientRect(g_hTab, &rcTab);
+            TabCtrl_AdjustRect(g_hTab, FALSE, &rcTab);
+            SetWindowPos(g_streams[i].hChild, nullptr, rcTab.left, rcTab.top, 
+                        rcTab.right - rcTab.left, rcTab.bottom - rcTab.top, SWP_NOZORDER | SWP_SHOWWINDOW);
         }
-    } else if (mainTabSel == 1) {
-        // Log tab is selected - show log list
-        ShowWindow(g_hTab, SW_HIDE);
-        ShowWindow(g_hLogList, SW_SHOW);
-        
-        // Position log list within main tab
-        SetWindowPos(g_hLogList, nullptr, mainTabX + rcMainTab.left, margin + rcMainTab.top, 
-                    rcMainTab.right - rcMainTab.left, rcMainTab.bottom - rcMainTab.top, SWP_NOZORDER);
     }
 }
 
@@ -684,22 +662,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         g_hFavoritesEdit = CreateWindowEx(0, L"BUTTON", L"Edit", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 110, 340, 40, 25, hwnd, (HMENU)IDC_FAVORITES_EDIT, g_hInst, nullptr);
         g_hCheckVersion = CreateWindowEx(0, L"BUTTON", L"Check Version", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 370, 100, 25, hwnd, (HMENU)IDC_CHECK_VERSION, g_hInst, nullptr);
         
-        // Create main tab control for "Main" and "Log"
-        g_hMainTab = CreateWindowEx(0, WC_TABCONTROL, L"", WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE, 200, 10, 500, 300, hwnd, (HMENU)IDC_MAIN_TAB, g_hInst, nullptr);
+        // Create stream tab control (main area)
+        g_hTab = CreateWindowEx(0, WC_TABCONTROL, L"", WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE, 200, 10, 500, 300, hwnd, (HMENU)IDC_TAB, g_hInst, nullptr);
         
-        // Add tabs to main tab control
-        TCITEM tie = { 0 };
-        tie.mask = TCIF_TEXT;
-        tie.pszText = (LPWSTR)L"Main";
-        TabCtrl_InsertItem(g_hMainTab, 0, &tie);
-        tie.pszText = (LPWSTR)L"Log";
-        TabCtrl_InsertItem(g_hMainTab, 1, &tie);
-        
-        // Create stream tab control (inside main tab)
-        g_hTab = CreateWindowEx(0, WC_TABCONTROL, L"", WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE, 0, 0, 100, 100, hwnd, (HMENU)IDC_TAB, g_hInst, nullptr);
-        
-        // Create log list (initially hidden)
-        g_hLogList = CreateWindowEx(WS_EX_CLIENTEDGE, WC_LISTVIEW, NULL, WS_CHILD | LVS_REPORT | LVS_SINGLESEL, 0, 0, 100, 100, hwnd, (HMENU)IDC_LOG_LIST, g_hInst, nullptr);
+        // Create log list (at bottom)
+        g_hLogList = CreateWindowEx(WS_EX_CLIENTEDGE, WC_LISTVIEW, NULL, WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL, 200, 320, 500, 120, hwnd, (HMENU)IDC_LOG_LIST, g_hInst, nullptr);
         InitLogList(g_hLogList);
         
         // Create status bar
@@ -720,10 +687,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             reinterpret_cast<LPNMHDR>(lParam)->code == TCN_SELCHANGE) {
             int sel = TabCtrl_GetCurSel(g_hTab);
             SwitchToTab(sel);
-        }
-        else if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hMainTab &&
-                 reinterpret_cast<LPNMHDR>(lParam)->code == TCN_SELCHANGE) {
-            ResizeTabAndChildren(hwnd);
         }
         else if (reinterpret_cast<LPNMHDR>(lParam)->hwndFrom == g_hFavoritesList &&
                  reinterpret_cast<LPNMHDR>(lParam)->code == NM_DBLCLK) {

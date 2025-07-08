@@ -30,5 +30,4 @@
 #define IDC_FAVORITES_DELETE    1108
 #define IDC_FAVORITES_EDIT      1109
 #define IDC_CHECK_VERSION       1110
-#define IDC_MAIN_TAB            1111
-#define IDC_STATUS_BAR          1112
+#define IDC_STATUS_BAR          1111
