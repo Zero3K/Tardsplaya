@@ -16,6 +16,10 @@
 #include "twitch_api.h"
 #include "urlencode.h"
 #include "tlsclient/tlsclient.h"
+#include "json_minimal.h"
+
+// Forward declaration - AddLog is defined in Tardsplaya.cpp
+extern void AddLog(const std::wstring& msg);
 
 // Helper: HTTP GET request (using WinHTTP, wide string version)
 bool HttpGetText(const std::wstring& url, std::string& out) {
@@ -111,4 +115,150 @@ bool FetchTwitchStreamQualities(const std::wstring& channel, std::vector<std::ws
     }
     playlist_url = url;
     return !qualities.empty();
+}
+
+// Modern GraphQL API approach for getting stream access token - based on TLS client example
+std::wstring GetModernAccessToken(const std::wstring& channel) {
+    // Convert channel to UTF-8 for the JSON request
+    std::string channelUtf8;
+    int len = WideCharToMultiByte(CP_UTF8, 0, channel.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len > 0) {
+        channelUtf8.resize(len - 1);
+        WideCharToMultiByte(CP_UTF8, 0, channel.c_str(), -1, &channelUtf8[0], len, nullptr, nullptr);
+    }
+    
+    // Try a simpler approach first - just get the PlaybackAccessToken
+    std::string gqlBody = 
+        "{"
+        "\"operationName\":\"PlaybackAccessToken\","
+        "\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712\"}},"
+        "\"variables\":{\"isLive\":true,\"login\":\"" + channelUtf8 + "\",\"isVod\":false,\"vodID\":\"\",\"playerType\":\"embed\"}"
+        "}";
+
+    // Build headers
+    std::wstring headers = 
+        L"Client-ID: kimne78kx3ncx6brgo4mv6wki5h1ko\r\n"
+        L"User-Agent: Mozilla/5.0\r\n"
+        L"Content-Type: application/json\r\n";
+
+    // Use TLS client to make the GraphQL POST request
+    AddLog(L"Making GraphQL POST request to gql.twitch.tv for channel: " + channel);
+    
+    TLSClient client;
+    std::string response;
+    std::wstring url = L"https://gql.twitch.tv/gql";
+    bool success = client.HttpPostW(url, gqlBody, response, headers);
+    
+    if (!success || response.empty()) {
+        std::string error = client.GetLastError();
+        std::wstring werror(error.begin(), error.end());
+        AddLog(L"GraphQL POST request failed - " + werror);
+        return L""; // Request failed
+    }
+    
+    AddLog(L"GraphQL request completed, checking response...");
+    
+    // Log response details for debugging
+    std::string body = get_http_body(response);
+    if (body.empty()) {
+        AddLog(L"Response received but body is empty after parsing");
+        // Log the raw response for debugging
+        std::wstring rawResponse(response.begin(), response.end());
+        AddLog(L"Raw response: " + rawResponse.substr(0, 500)); // First 500 chars
+        return L"";
+    }
+    
+    AddLog(L"GraphQL response received, parsing JSON...");
+    // Try to parse the JSON response
+    try {
+        JsonValue root = parse_json(body);
+        if (root.type == JsonValue::Object) {
+            JsonValue data = root["data"];
+            if (data.type == JsonValue::Object) {
+                JsonValue token_obj = data["streamPlaybackAccessToken"];
+                if (token_obj.type == JsonValue::Object) {
+                    std::string sig = token_obj["signature"].as_str();
+                    std::string token = token_obj["value"].as_str();
+                    
+                    if (!sig.empty() && !token.empty()) {
+                        AddLog(L"Successfully extracted token and signature from GraphQL response");
+                        // Convert to wide strings and return in format expected by existing code
+                        std::wstring wsig(sig.begin(), sig.end());
+                        std::wstring wtoken(token.begin(), token.end());
+                        return wsig + L"|" + wtoken;
+                    } else {
+                        AddLog(L"GraphQL response missing signature or token value");
+                    }
+                } else {
+                    AddLog(L"GraphQL response missing streamPlaybackAccessToken object");
+                }
+            } else {
+                AddLog(L"GraphQL response missing data object");
+            }
+        } else {
+            AddLog(L"GraphQL response is not a valid JSON object");
+        }
+    } catch (...) {
+        AddLog(L"Exception occurred while parsing GraphQL JSON response");
+        // JSON parsing failed, fall back to legacy API
+    }
+    
+    return L""; // Failed to get token from GraphQL API
+}
+
+// Parse M3U8 playlist using improved logic from TLS client example
+std::map<std::wstring, std::wstring> ParseM3U8Playlist(const std::string& m3u8Content) {
+    std::map<std::wstring, std::wstring> result;
+    std::istringstream iss(m3u8Content);
+    std::string line, lastInfoLine;
+    
+    while (std::getline(iss, line)) {
+        // Remove carriage return if present
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        
+        if (line.find("#EXT-X-STREAM-INF:") == 0) {
+            lastInfoLine = line;
+            continue;
+        }
+        
+        // If this is a URL line and we have a previous info line
+        if (!line.empty() && line[0] != '#' && !lastInfoLine.empty()) {
+            std::string quality = "Unknown";
+            
+            // Extract resolution from the info line
+            auto resPos = lastInfoLine.find("RESOLUTION=");
+            if (resPos != std::string::npos) {
+                auto resStart = resPos + 11;
+                auto resEnd = lastInfoLine.find(",", resStart);
+                if (resEnd == std::string::npos) {
+                    resEnd = lastInfoLine.find(" ", resStart);
+                }
+                if (resEnd == std::string::npos) {
+                    resEnd = lastInfoLine.length();
+                }
+                quality = lastInfoLine.substr(resStart, resEnd - resStart);
+            }
+            
+            // Extract NAME if available (for named qualities like "source")
+            auto namePos = lastInfoLine.find("NAME=\"");
+            if (namePos != std::string::npos) {
+                auto nameStart = namePos + 6;
+                auto nameEnd = lastInfoLine.find("\"", nameStart);
+                if (nameEnd != std::string::npos) {
+                    quality = lastInfoLine.substr(nameStart, nameEnd - nameStart);
+                }
+            }
+            
+            // Convert to wide strings
+            std::wstring wQuality(quality.begin(), quality.end());
+            std::wstring wUrl(line.begin(), line.end());
+            result[wQuality] = wUrl;
+            
+            lastInfoLine.clear();
+        }
+    }
+    
+    return result;
 }
