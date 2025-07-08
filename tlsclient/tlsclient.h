@@ -27,8 +27,15 @@ public:
     // Returns true on success, false on failure
     bool HttpGet(const std::string& url, std::string& response, const std::string& headers = "");
     
+    // Perform HTTP POST request using TLS client
+    // Returns true on success, false on failure
+    bool HttpPost(const std::string& url, const std::string& postData, std::string& response, const std::string& headers = "");
+    
     // Perform HTTP GET request (wide string version)
     bool HttpGetW(const std::wstring& url, std::string& response, const std::wstring& headers = L"");
+    
+    // Perform HTTP POST request (wide string version)
+    bool HttpPostW(const std::wstring& url, const std::string& postData, std::string& response, const std::wstring& headers = L"");
 
     // Get the last error message
     std::string GetLastError() const { return lastError; }
@@ -47,6 +54,9 @@ namespace TLSClientHTTP {
     
     // HTTP GET with TLS client (returns response as string)
     std::string HttpGet(const std::wstring& host, const std::wstring& path, const std::wstring& headers = L"");
+    
+    // HTTP POST with TLS client (returns response as string)
+    std::string HttpPost(const std::wstring& host, const std::wstring& path, const std::string& postData, const std::wstring& headers = L"");
     
     // HTTP GET with full URL
     bool HttpGetText(const std::wstring& url, std::string& out);

@@ -181,7 +181,13 @@ std::string HttpGet(const wchar_t* host, const wchar_t* path, const wchar_t* hea
 }
 
 std::wstring GetAccessToken(const std::wstring& channel) {
-    // Use modern Twitch API - get access token for channel
+    // First try the modern GraphQL API approach
+    std::wstring modernToken = GetModernAccessToken(channel);
+    if (!modernToken.empty()) {
+        return modernToken;
+    }
+    
+    // Fallback to legacy API approach
     std::wstring path = L"/api/channels/" + channel + L"/access_token?need_https=true&oauth_token=&platform=web&player_backend=mediaplayer&player_type=site";
     std::string resp = HttpGet(L"gql.twitch.tv", path.c_str(), L"Client-ID: kimne78kx3ncx6brgo4mv6wki5h1ko");
     
@@ -223,6 +229,14 @@ std::wstring FetchPlaylist(const std::wstring& channel, const std::wstring& acce
 }
 
 std::map<std::wstring, std::wstring> ParsePlaylist(const std::wstring& m3u8) {
+    // First try the improved M3U8 parser
+    std::string m3u8Utf8 = WideToUtf8(m3u8);
+    std::map<std::wstring, std::wstring> modernResult = ParseM3U8Playlist(m3u8Utf8);
+    if (!modernResult.empty()) {
+        return modernResult;
+    }
+    
+    // Fallback to original parser
     std::map<std::wstring, std::wstring> result;
     std::wistringstream iss(m3u8);
     std::wstring line, quality, url;

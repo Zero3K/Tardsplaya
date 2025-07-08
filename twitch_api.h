@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <map>
 
 // Output: qualities - list of available qualities (e.g. "1080p (source)", "720p", etc.)
 // Output: playlist_url - the best playlist URL (for the selected quality)
@@ -13,3 +14,11 @@ bool FetchTwitchStreamQualities(
     std::wstring& playlist_url,
     std::vector<std::wstring>* log = nullptr
 );
+
+// Modern GraphQL API approach for getting stream access token
+// Returns the access token in format "signature|token" or empty string on failure
+std::wstring GetModernAccessToken(const std::wstring& channel);
+
+// Parse M3U8 playlist using improved logic from TLS client example
+// Returns a map of quality names to stream URLs
+std::map<std::wstring, std::wstring> ParseM3U8Playlist(const std::string& m3u8Content);
