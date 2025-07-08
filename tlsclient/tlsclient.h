@@ -46,6 +46,9 @@ private:
     bool ParseUrlW(const std::wstring& url, std::string& host, int& port, std::string& path, bool& isHttps);
 };
 
+// Utility function for HTTP response parsing
+std::string get_http_body(const std::string& resp);
+
 // Global functions for easy integration with existing code
 // These can be used as drop-in replacements for WinHTTP functions
 namespace TLSClientHTTP {

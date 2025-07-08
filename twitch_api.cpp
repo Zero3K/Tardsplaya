@@ -21,13 +21,6 @@
 // Forward declaration - AddLog is defined in Tardsplaya.cpp
 extern void AddLog(const std::wstring& msg);
 
-// Helper: Get HTTP body (skip headers)
-std::string get_http_body(const std::string& resp) {
-    auto pos = resp.find("\r\n\r\n");
-    if (pos == std::string::npos) return "";
-    return resp.substr(pos + 4);
-}
-
 // Helper: HTTP GET request (using WinHTTP, wide string version)
 bool HttpGetText(const std::wstring& url, std::string& out) {
     URL_COMPONENTS uc = { sizeof(uc) };
