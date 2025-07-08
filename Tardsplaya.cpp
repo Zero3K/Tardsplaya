@@ -647,19 +647,19 @@ void LoadChannel(StreamTab& tab) {
     }
     
     // Convert channel name to lowercase for API calls
-    std::wstring channelName = channel;
-    std::transform(channelName.begin(), channelName.end(), channelName.begin(), ::towlower);
+    std::wstring channelNameLower = channel;
+    std::transform(channelNameLower.begin(), channelNameLower.end(), channelNameLower.begin(), ::towlower);
     
-    tab.channel = channelName; // Store the lowercase version
+    tab.channel = channel; // Store the original version for display
     AddLog(L"Requesting Twitch access token...");
-    std::wstring token = GetAccessToken(channelName);
+    std::wstring token = GetAccessToken(channelNameLower);
     if (token.empty()) {
         MessageBoxW(tab.hChild, L"Failed to get access token. The channel may be offline, does not exist, or has been renamed.", L"Channel Error", MB_OK | MB_ICONERROR);
         AddLog(L"Failed to get Twitch access token - channel may be offline or not exist.");
         return;
     }
     AddLog(L"Fetching playlist...");
-    std::wstring m3u8 = FetchPlaylist(channelName, token);
+    std::wstring m3u8 = FetchPlaylist(channelNameLower, token);
     if (m3u8.empty()) {
         MessageBoxW(tab.hChild, L"Failed to get playlist. The channel may be offline, no longer exist, or have been renamed.", L"Channel Error", MB_OK | MB_ICONERROR);
         AddLog(L"Failed to get playlist - channel may be offline or not exist.");

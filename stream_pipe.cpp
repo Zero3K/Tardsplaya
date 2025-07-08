@@ -123,22 +123,46 @@ static BOOL CALLBACK FindWindowByProcessId(HWND hwnd, LPARAM lParam) {
     return TRUE; // Continue enumeration
 }
 
-// Function to set the title of the player window
+// Function to set and maintain the title of the player window
 static void SetPlayerWindowTitle(DWORD processId, const std::wstring& title) {
     if (title.empty()) return;
     
     // Try multiple times as the player window might take time to appear
+    HWND playerWindow = nullptr;
     for (int attempts = 0; attempts < 10; ++attempts) {
         FindWindowData data = { processId, NULL };
         EnumWindows(FindWindowByProcessId, reinterpret_cast<LPARAM>(&data));
         
         if (data.hwnd) {
-            SetWindowTextW(data.hwnd, title.c_str());
-            return;
+            playerWindow = data.hwnd;
+            break;
         }
         
         // Wait before trying again
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    
+    if (!playerWindow) return;
+    
+    // Set the title initially and then monitor it to keep it set
+    SetWindowTextW(playerWindow, title.c_str());
+    
+    // Continue monitoring the title and reset it if it changes
+    // This handles cases where the player might reset the title to "stdin"
+    for (int monitor_attempts = 0; monitor_attempts < 60; ++monitor_attempts) {  // Monitor for 30 seconds
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        
+        // Check if the window still exists
+        if (!IsWindow(playerWindow)) break;
+        
+        // Check current title
+        wchar_t currentTitle[256];
+        int titleLen = GetWindowTextW(playerWindow, currentTitle, 256);
+        
+        // If title is different from what we want, reset it
+        if (titleLen == 0 || wcscmp(currentTitle, title.c_str()) != 0) {
+            SetWindowTextW(playerWindow, title.c_str());
+        }
     }
 }
 
