@@ -127,12 +127,11 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
         WideCharToMultiByte(CP_UTF8, 0, channel.c_str(), -1, &channelUtf8[0], len, nullptr, nullptr);
     }
     
-    // Try a simpler approach first - just get the PlaybackAccessToken
+    // Try full GraphQL query instead of persisted query to avoid outdated hash issues
     std::string gqlBody = 
         "{"
-        "\"operationName\":\"PlaybackAccessToken\","
-        "\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712\"}},"
-        "\"variables\":{\"isLive\":true,\"login\":\"" + channelUtf8 + "\",\"isVod\":false,\"vodID\":\"\",\"playerType\":\"embed\"}"
+        "\"query\":\"query PlaybackAccessToken($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) { streamPlaybackAccessToken(channelName: $login, params: {platform: \\\"web\\\", playerBackend: \\\"mediaplayer\\\", playerType: $playerType}) @include(if: $isLive) { value signature __typename } videoPlaybackAccessToken(id: $vodID, params: {platform: \\\"web\\\", playerBackend: \\\"mediaplayer\\\", playerType: $playerType}) @include(if: $isVod) { value signature __typename } }\","
+        "\"variables\":{\"isLive\":true,\"login\":\"" + channelUtf8 + "\",\"isVod\":false,\"vodID\":\"\",\"playerType\":\"site\"}"
         "}";
 
     // Build headers
@@ -169,10 +168,25 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
     }
     
     AddLog(L"GraphQL response received, parsing JSON...");
+    
+    // Log the first 1000 characters of the response for debugging
+    std::wstring debugBody(body.begin(), body.end());
+    if (debugBody.length() > 1000) {
+        debugBody = debugBody.substr(0, 1000) + L"...";
+    }
+    AddLog(L"GraphQL response body: " + debugBody);
+    
     // Try to parse the JSON response
     try {
         JsonValue root = parse_json(body);
         if (root.type == JsonValue::Object) {
+            // Check for errors first
+            JsonValue errors = root["errors"];
+            if (errors.type == JsonValue::Array) {
+                AddLog(L"GraphQL response contains errors");
+                return L""; // GraphQL errors present
+            }
+            
             JsonValue data = root["data"];
             if (data.type == JsonValue::Object) {
                 JsonValue token_obj = data["streamPlaybackAccessToken"];
@@ -189,9 +203,14 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
                     } else {
                         AddLog(L"GraphQL response missing signature or token value");
                     }
+                } else if (token_obj.type == JsonValue::Null) {
+                    AddLog(L"Channel '" + channel + L"' is offline or does not exist");
+                    return L"OFFLINE"; // Special return value to indicate channel is offline
                 } else {
                     AddLog(L"GraphQL response missing streamPlaybackAccessToken object");
                 }
+            } else if (data.type == JsonValue::Null) {
+                AddLog(L"GraphQL response data is null");
             } else {
                 AddLog(L"GraphQL response missing data object");
             }

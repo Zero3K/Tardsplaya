@@ -100,11 +100,79 @@ static bool ProcessStillRunning(HANDLE hProcess) {
     return false;
 }
 
+// Structure for finding windows by process ID
+struct FindWindowData {
+    DWORD processId;
+    HWND hwnd;
+};
+
+// Callback function to find window by process ID
+static BOOL CALLBACK FindWindowByProcessId(HWND hwnd, LPARAM lParam) {
+    FindWindowData* data = reinterpret_cast<FindWindowData*>(lParam);
+    DWORD processId;
+    GetWindowThreadProcessId(hwnd, &processId);
+    
+    if (processId == data->processId && IsWindowVisible(hwnd)) {
+        // Check if this is a main window (has a title bar and is not a child window)
+        LONG style = GetWindowLong(hwnd, GWL_STYLE);
+        if ((style & WS_CAPTION) && GetParent(hwnd) == NULL) {
+            data->hwnd = hwnd;
+            return FALSE; // Stop enumeration
+        }
+    }
+    return TRUE; // Continue enumeration
+}
+
+// Function to set and maintain the title of the player window
+static void SetPlayerWindowTitle(DWORD processId, const std::wstring& title) {
+    if (title.empty()) return;
+    
+    // Try multiple times as the player window might take time to appear
+    HWND playerWindow = nullptr;
+    for (int attempts = 0; attempts < 10; ++attempts) {
+        FindWindowData data = { processId, NULL };
+        EnumWindows(FindWindowByProcessId, reinterpret_cast<LPARAM>(&data));
+        
+        if (data.hwnd) {
+            playerWindow = data.hwnd;
+            break;
+        }
+        
+        // Wait before trying again
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    
+    if (!playerWindow) return;
+    
+    // Set the title initially and then monitor it to keep it set
+    SetWindowTextW(playerWindow, title.c_str());
+    
+    // Continue monitoring the title and reset it if it changes
+    // This handles cases where the player might reset the title to "stdin"
+    for (int monitor_attempts = 0; monitor_attempts < 60; ++monitor_attempts) {  // Monitor for 30 seconds
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        
+        // Check if the window still exists
+        if (!IsWindow(playerWindow)) break;
+        
+        // Check current title
+        wchar_t currentTitle[256];
+        int titleLen = GetWindowTextW(playerWindow, currentTitle, 256);
+        
+        // If title is different from what we want, reset it
+        if (titleLen == 0 || wcscmp(currentTitle, title.c_str()) != 0) {
+            SetWindowTextW(playerWindow, title.c_str());
+        }
+    }
+}
+
 bool BufferAndPipeStreamToPlayer(
     const std::wstring& player_path,
     const std::wstring& playlist_url,
     std::atomic<bool>& cancel_token,
-    int buffer_segments
+    int buffer_segments,
+    const std::wstring& channel_name,
+    std::atomic<int>* chunk_count
 ) {
     // 1. Download the master playlist and pick the first media playlist (or use playlist_url directly if it's media)
     std::string master;
@@ -144,6 +212,13 @@ bool BufferAndPipeStreamToPlayer(
     CloseHandle(hRead);
     if (!ok) { CloseHandle(hWrite); return false; }
 
+    // Set the player window title to the channel name (in a separate thread to avoid blocking)
+    if (!channel_name.empty()) {
+        std::thread([processId = pi.dwProcessId, title = channel_name]() {
+            SetPlayerWindowTitle(processId, title);
+        }).detach();
+    }
+
     // 4. Download media playlist and buffer segments
     std::set<std::wstring> downloaded;
     std::vector<std::vector<char>> segment_buffer;
@@ -180,6 +255,11 @@ bool BufferAndPipeStreamToPlayer(
             if (!segment_data.empty()) {
                 segment_buffer.push_back(std::move(segment_data));
                 new_segments++;
+                
+                // Update chunk count for status display
+                if (chunk_count) {
+                    *chunk_count = (int)segment_buffer.size();
+                }
 
                 // Once buffer is filled, start writing to player
                 if (!started && (int)segment_buffer.size() >= buffer_segments) {
@@ -190,12 +270,20 @@ bool BufferAndPipeStreamToPlayer(
                         WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr);
                     }
                     segment_buffer.clear();
+                    // Update chunk count after clearing buffer
+                    if (chunk_count) {
+                        *chunk_count = (int)segment_buffer.size();
+                    }
                 } else if (started) {
                     if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
                     auto& buf = segment_buffer.front();
                     DWORD written = 0;
                     WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr);
                     segment_buffer.erase(segment_buffer.begin());
+                    // Update chunk count after removing segment
+                    if (chunk_count) {
+                        *chunk_count = (int)segment_buffer.size();
+                    }
                 }
             }
         }

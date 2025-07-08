@@ -9,5 +9,7 @@ bool BufferAndPipeStreamToPlayer(
     const std::wstring& player_path,
     const std::wstring& playlist_url,
     std::atomic<bool>& cancel_token,
-    int buffer_segments = 3 // How many segments to buffer before starting playback
+    int buffer_segments = 3, // How many segments to buffer before starting playback
+    const std::wstring& channel_name = L"", // Channel name for window title
+    std::atomic<int>* chunk_count = nullptr // Pointer to chunk count for status display
 );
