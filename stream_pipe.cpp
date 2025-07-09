@@ -1,6 +1,5 @@
 #include "stream_pipe.h"
 #include "stream_thread.h"
-#include "stream_memory_map.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -13,7 +12,138 @@
 #include <winhttp.h>
 #include <atomic>
 #include <iostream>
+#include <queue>
+#include <mutex>
 #include "tlsclient/tlsclient.h"
+
+// Simple HTTP server for localhost streaming
+class StreamHttpServer {
+private:
+    SOCKET listen_socket;
+    int port;
+    std::atomic<bool> running;
+    std::queue<std::vector<char>> data_queue;
+    std::mutex queue_mutex;
+    std::atomic<bool> stream_ended;
+    std::thread server_thread;
+    
+public:
+    StreamHttpServer() : listen_socket(INVALID_SOCKET), port(0), running(false), stream_ended(false) {
+        WSADATA wsaData;
+        WSAStartup(MAKEWORD(2, 2), &wsaData);
+    }
+    
+    ~StreamHttpServer() {
+        Stop();
+        WSACleanup();
+    }
+    
+    bool Start(int preferred_port = 8080) {
+        // Find available port starting from preferred_port
+        for (int try_port = preferred_port; try_port < preferred_port + 100; try_port++) {
+            listen_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (listen_socket == INVALID_SOCKET) continue;
+            
+            sockaddr_in addr = {};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            addr.sin_port = htons(try_port);
+            
+            if (bind(listen_socket, (sockaddr*)&addr, sizeof(addr)) == 0) {
+                if (listen(listen_socket, 5) == 0) {
+                    port = try_port;
+                    running = true;
+                    
+                    // Start server thread
+                    server_thread = std::thread([this]() { ServerLoop(); });
+                    return true;
+                }
+            }
+            closesocket(listen_socket);
+            listen_socket = INVALID_SOCKET;
+        }
+        return false;
+    }
+    
+    void Stop() {
+        running = false;
+        if (listen_socket != INVALID_SOCKET) {
+            closesocket(listen_socket);
+            listen_socket = INVALID_SOCKET;
+        }
+        if (server_thread.joinable()) {
+            server_thread.join();
+        }
+    }
+    
+    int GetPort() const { return port; }
+    
+    void AddData(const std::vector<char>& data) {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        data_queue.push(data);
+    }
+    
+    void SetStreamEnded() {
+        stream_ended = true;
+    }
+    
+private:
+    void ServerLoop() {
+        while (running) {
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(listen_socket, &read_fds);
+            
+            timeval timeout = { 1, 0 }; // 1 second timeout
+            int result = select(0, &read_fds, nullptr, nullptr, &timeout);
+            
+            if (result > 0 && FD_ISSET(listen_socket, &read_fds)) {
+                SOCKET client_socket = accept(listen_socket, nullptr, nullptr);
+                if (client_socket != INVALID_SOCKET) {
+                    std::thread([this, client_socket]() { HandleClient(client_socket); }).detach();
+                }
+            }
+        }
+    }
+    
+    void HandleClient(SOCKET client_socket) {
+        // Read HTTP request (we don't really need to parse it)
+        char buffer[1024];
+        recv(client_socket, buffer, sizeof(buffer), 0);
+        
+        // Send HTTP response headers
+        std::string response = 
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: video/mp2t\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: close\r\n"
+            "\r\n";
+        send(client_socket, response.c_str(), (int)response.length(), 0);
+        
+        // Stream data from queue
+        while (running) {
+            std::vector<char> data;
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex);
+                if (!data_queue.empty()) {
+                    data = std::move(data_queue.front());
+                    data_queue.pop();
+                }
+            }
+            
+            if (!data.empty()) {
+                int sent = send(client_socket, data.data(), (int)data.size(), 0);
+                if (sent <= 0) break; // Client disconnected
+            } else if (stream_ended) {
+                break; // No more data and stream ended
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        
+        closesocket(client_socket);
+    }
+};
 
 // Utility: HTTP GET (returns as binary), with error retries
 static bool HttpGetBinary(const std::wstring& url, std::vector<char>& out, int max_attempts = 3, std::atomic<bool>* cancel_token = nullptr) {
@@ -176,7 +306,7 @@ bool BufferAndPipeStreamToPlayer(
     const std::wstring& channel_name,
     std::atomic<int>* chunk_count
 ) {
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting with memory-mapped buffering for " + channel_name + L", URL=" + playlist_url);
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting HTTP server streaming for " + channel_name + L", URL=" + playlist_url);
     
     // 1. Download the master playlist and pick the first media playlist
     std::string master;
@@ -200,118 +330,56 @@ bool BufferAndPipeStreamToPlayer(
     }
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Using media playlist URL=" + media_playlist_url + L" for " + channel_name);
 
-    // 2. Create memory-mapped buffer for internal buffering (64MB buffer)
-    StreamMemoryMap memory_buffer;
-    if (!memory_buffer.CreateAsWriter(channel_name, 64 * 1024 * 1024)) {
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create memory buffer for " + channel_name);
+    // 2. Create and start HTTP server
+    StreamHttpServer http_server;
+    if (!http_server.Start(8080)) {
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to start HTTP server for " + channel_name);
         return false;
     }
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Created 64MB memory buffer for " + channel_name);
+    
+    int server_port = http_server.GetPort();
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Started HTTP server on port " + std::to_wstring(server_port) + L" for " + channel_name);
 
-    // 3. Create pipe for media player
-    HANDLE hRead = NULL, hWrite = NULL;
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-    if (!CreatePipe(&hRead, &hWrite, &sa, 128*1024)) { // 128KB pipe buffer
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create pipe for " + channel_name);
-        memory_buffer.Close();
-        return false;
-    }
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Created pipe for " + channel_name);
-
-    // 4. Create media player process
-    std::wstring cmd = L"\"" + player_path + L"\" -";
+    // 3. Create media player process with localhost URL
+    std::wstring localhost_url = L"http://localhost:" + std::to_wstring(server_port) + L"/";
+    std::wstring cmd = L"\"" + player_path + L"\" \"" + localhost_url + L"\"";
+    
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = hRead;
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-
     PROCESS_INFORMATION pi = {};
+    
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Launching player: " + cmd + L" for " + channel_name);
     
     BOOL success = CreateProcessW(
-        nullptr, const_cast<LPWSTR>(cmd.c_str()), nullptr, nullptr, TRUE,
+        nullptr, const_cast<LPWSTR>(cmd.c_str()), nullptr, nullptr, FALSE,
         CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi
     );
 
     if (!success) {
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create process for " + channel_name + 
                    L", Error=" + std::to_wstring(GetLastError()));
-        CloseHandle(hRead); CloseHandle(hWrite);
-        memory_buffer.Close();
         return false;
     }
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Process created successfully for " + channel_name + 
                L", PID=" + std::to_wstring(pi.dwProcessId));
 
-    CloseHandle(hRead); // Media player process now owns this
-
-    // 5. Start thread to maintain player window title with channel name
+    // 4. Start thread to maintain player window title with channel name
     std::thread title_thread([pi, channel_name]() {
         SetPlayerWindowTitle(pi.dwProcessId, channel_name);
     });
     title_thread.detach();
 
-    // 6. Start background thread to read from memory buffer and write to pipe
-    std::atomic<bool> pipe_writer_active = true;
-    std::atomic<bool> stream_ended = false;
-    
-    std::thread pipe_writer([&memory_buffer, hWrite, &pipe_writer_active, &cancel_token, &stream_ended, channel_name, &pi]() {
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe writer thread started for " + channel_name);
-        
-        const size_t CHUNK_SIZE = 32768; // 32KB chunks for smooth playback
-        std::vector<char> chunk_buffer(CHUNK_SIZE);
-        
-        while (pipe_writer_active.load() && !cancel_token.load() && ProcessStillRunning(pi.hProcess)) {
-            size_t bytes_read = memory_buffer.ReadData(chunk_buffer.data(), CHUNK_SIZE);
-            
-            if (bytes_read > 0) {
-                DWORD written = 0;
-                BOOL write_ok = WriteFile(hWrite, chunk_buffer.data(), static_cast<DWORD>(bytes_read), &written, nullptr);
-                
-                if (!write_ok) {
-                    DWORD error = GetLastError();
-                    if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
-                        AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe closed by player for " + channel_name);
-                        break;
-                    } else {
-                        AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe write failed with error " + 
-                                   std::to_wstring(error) + L" for " + channel_name);
-                        // Try a few retries with delays for temporary issues
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        continue;
-                    }
-                } else {
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Wrote " + std::to_wstring(written) + 
-                               L" bytes to pipe for " + channel_name);
-                }
-            } else {
-                // No data available, check if stream ended
-                if (memory_buffer.IsStreamEnded()) {
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Stream ended, pipe writer finishing for " + channel_name);
-                    stream_ended = true;
-                    break;
-                }
-                // Brief pause when no data available
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
-        }
-        
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe writer thread finished for " + channel_name);
-    });
-
-    // 7. Download segments and write to memory buffer
-    std::set<std::wstring> downloaded;
+    // 5. Download segments and feed to HTTP server
     std::vector<std::vector<char>> segment_buffer;
-    bool started = false;
+    segment_buffer.reserve(buffer_segments);
+    std::set<std::wstring> seen_urls;
     int consecutive_errors = 0;
-    const int max_consecutive_errors = 30; // ~60 seconds of errors before giving up
+    const int max_consecutive_errors = 30; // ~60 seconds of retries (2 sec intervals)
+    bool started = false;
+    int new_segments = 0;
     bool stream_ended_normally = false;
     
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting segment download loop for " + channel_name);
-    
-    while (!cancel_token.load() && ProcessStillRunning(pi.hProcess) && !stream_ended.load()) {
+    while (!cancel_token.load() && ProcessStillRunning(pi.hProcess) && consecutive_errors < max_consecutive_errors) {
         std::string playlist;
         if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
             consecutive_errors++;
@@ -337,9 +405,9 @@ bool BufferAndPipeStreamToPlayer(
 
         size_t new_segments = 0;
         for (auto& seg : segments) {
-            if (cancel_token.load() || !ProcessStillRunning(pi.hProcess) || stream_ended.load()) break;
-            if (downloaded.count(seg)) continue;
-            downloaded.insert(seg);
+            if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
+            if (seen_urls.count(seg)) continue;
+            seen_urls.insert(seg);
 
             std::wstring seg_url = JoinUrl(media_playlist_url, seg);
             std::vector<char> seg_data;
@@ -361,17 +429,14 @@ bool BufferAndPipeStreamToPlayer(
                     *chunk_count = (int)segment_buffer.size();
                 }
 
-                // Once buffer is filled, start writing to memory buffer
+                // Once buffer is filled, start feeding data to HTTP server
                 if (!started && (int)segment_buffer.size() >= buffer_segments) {
                     started = true;
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting to write buffered segments (" + 
-                               std::to_wstring(segment_buffer.size()) + L") to memory buffer for " + channel_name);
+                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting to serve buffered segments (" + 
+                               std::to_wstring(segment_buffer.size()) + L") via HTTP for " + channel_name);
                     for (auto& buf : segment_buffer) {
-                        if (cancel_token.load() || !ProcessStillRunning(pi.hProcess) || stream_ended.load()) break;
-                        if (!memory_buffer.WriteData(buf.data(), buf.size(), cancel_token)) {
-                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to write to memory buffer for " + channel_name);
-                            goto cleanup;
-                        }
+                        if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
+                        http_server.AddData(buf);
                     }
                     segment_buffer.clear();
                     if (chunk_count) {
@@ -379,10 +444,7 @@ bool BufferAndPipeStreamToPlayer(
                     }
                 } else if (started && !segment_buffer.empty()) {
                     auto& buf = segment_buffer.front();
-                    if (!memory_buffer.WriteData(buf.data(), buf.size(), cancel_token)) {
-                        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to write streaming data to memory buffer for " + channel_name);
-                        goto cleanup;
-                    }
+                    http_server.AddData(buf);
                     segment_buffer.erase(segment_buffer.begin());
                     if (chunk_count) {
                         *chunk_count = (int)segment_buffer.size();
@@ -393,7 +455,7 @@ bool BufferAndPipeStreamToPlayer(
             }
         }
 
-        if (cancel_token.load() || !ProcessStillRunning(pi.hProcess) || stream_ended.load()) break;
+        if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
         if (segments.empty()) {
             AddDebugLog(L"BufferAndPipeStreamToPlayer: No segments found, waiting for " + channel_name);
             std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -404,24 +466,18 @@ bool BufferAndPipeStreamToPlayer(
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
-cleanup:
-
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Cleanup starting for " + channel_name + 
                L", cancel=" + std::to_wstring(cancel_token.load()) + 
                L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess)) +
                L", stream_ended_normally=" + std::to_wstring(stream_ended_normally));
 
-    // Signal stream end in memory buffer
-    memory_buffer.SignalStreamEnd();
+    // Signal stream end to HTTP server
+    http_server.SetStreamEnded();
     
-    // Wait for pipe writer to finish
-    pipe_writer_active = false;
-    if (pipe_writer.joinable()) {
-        pipe_writer.join();
-    }
+    // Stop HTTP server
+    http_server.Stop();
 
-    // Cleanup handles
-    CloseHandle(hWrite);
+    // Cleanup process
     if (ProcessStillRunning(pi.hProcess)) {
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Terminating player process for " + channel_name);
         TerminateProcess(pi.hProcess, 0);
