@@ -16,7 +16,6 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
-#include <mutex>
 #include <algorithm>
 #include "resource.h"
 #include "json_minimal.h"
@@ -117,10 +116,7 @@ bool g_verboseDebug = false; // Enable verbose debug output for troubleshooting
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
 
-// Global resource management for multi-stream stability
-std::mutex g_streamStartMutex;
-std::atomic<int> g_activeStreamCount{0};
-std::chrono::steady_clock::time_point g_lastStreamStart = std::chrono::steady_clock::now();
+
 
 // Tray icon support
 NOTIFYICONDATA g_nid = {};
@@ -781,11 +777,6 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
         tab.isStreaming = false;
         tab.playerStarted = false;
         
-        // Decrement active stream count for resource management
-        g_activeStreamCount--;
-        AddDebugLog(L"StopStream: Active stream count decremented to " + std::to_wstring(g_activeStreamCount) + 
-                   L" for " + tab.channel);
-        
         EnableWindow(tab.hWatchBtn, TRUE);
         EnableWindow(tab.hStopBtn, FALSE);
         SetWindowTextW(tab.hWatchBtn, L"2. Watch");
@@ -817,17 +808,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         return;
     }
 
-    // Check concurrent stream limit to prevent resource conflicts
-    // Based on testing, the system becomes unstable with 3+ concurrent streams
-    const int MAX_CONCURRENT_STREAMS = 2;
-    if (g_activeStreamCount >= MAX_CONCURRENT_STREAMS) {
-        std::wstring message = L"Cannot start more than " + std::to_wstring(MAX_CONCURRENT_STREAMS) + 
-                              L" concurrent streams due to system resource limitations.\n\n" +
-                              L"Please stop one of the active streams before starting a new one.";
-        MessageBoxW(tab.hChild, message.c_str(), L"Stream Limit Reached", MB_OK | MB_ICONWARNING);
-        AddLog(L"Stream start blocked: Maximum concurrent streams (" + std::to_wstring(MAX_CONCURRENT_STREAMS) + L") reached");
-        return;
-    }
+
 
     // Check if player path exists
     DWORD dwAttrib = GetFileAttributesW(g_playerPath.c_str());
@@ -862,37 +843,6 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     
     std::wstring url = it->second;
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L")");
-    
-    // Global synchronization for stream starting to prevent resource conflicts
-    {
-        std::lock_guard<std::mutex> lock(g_streamStartMutex);
-        
-        // Increment active stream count for resource management
-        g_activeStreamCount++;
-        
-        // Calculate delay based on current stream count and time since last stream start
-        auto now = std::chrono::steady_clock::now();
-        auto timeSinceLastStart = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastStreamStart).count();
-        
-        // Minimum delay between stream starts to prevent resource conflicts
-        int minimumDelay = 1000; // 1 second base delay
-        int additionalDelay = g_activeStreamCount * 500; // Extra 500ms per active stream
-        int totalDelay = minimumDelay + additionalDelay;
-        
-        AddDebugLog(L"WatchStream: Stream coordination - ActiveStreams=" + std::to_wstring(g_activeStreamCount) + 
-                   L", TimeSinceLastStart=" + std::to_wstring(timeSinceLastStart) + 
-                   L"ms, RequiredDelay=" + std::to_wstring(totalDelay) + L"ms for tab " + std::to_wstring(tabIndex));
-        
-        if (timeSinceLastStart < totalDelay) {
-            int waitTime = totalDelay - (int)timeSinceLastStart;
-            AddLog(L"Waiting " + std::to_wstring(waitTime) + L"ms before starting stream to prevent resource conflicts...");
-            AddDebugLog(L"WatchStream: Sleeping for " + std::to_wstring(waitTime) + L"ms for tab " + std::to_wstring(tabIndex));
-            std::this_thread::sleep_for(std::chrono::milliseconds(waitTime));
-        }
-        
-        g_lastStreamStart = std::chrono::steady_clock::now();
-        AddDebugLog(L"WatchStream: Stream start timing complete for tab " + std::to_wstring(tabIndex));
-    }
     
     // Reset cancel token and user requested stop flag
     tab.cancelToken = false;
