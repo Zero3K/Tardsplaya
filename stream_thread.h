@@ -15,5 +15,7 @@ std::thread StartStreamThread(
     int buffer_segments = 3,
     const std::wstring& channel_name = L"",
     std::atomic<int>* chunk_count = nullptr,
-    std::atomic<bool>* user_requested_stop = nullptr
+    std::atomic<bool>* user_requested_stop = nullptr,
+    HWND main_window = nullptr,
+    size_t tab_index = 0
 );

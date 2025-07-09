@@ -778,7 +778,7 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
     }
 }
 
-void WatchStream(StreamTab& tab) {
+void WatchStream(StreamTab& tab, size_t tabIndex) {
     if (tab.isStreaming) {
         StopStream(tab, true); // User clicked watch to stop current stream
         return;
@@ -834,7 +834,9 @@ void WatchStream(StreamTab& tab) {
         3, // buffer 3 segments
         tab.channel, // channel name for player window title
         &tab.chunkCount, // chunk count for status display
-        &tab.userRequestedStop // user requested stop flag
+        &tab.userRequestedStop, // user requested stop flag
+        g_hMainWnd, // main window handle for auto-stop messages
+        tabIndex // tab index for identifying which stream to auto-stop
     );
     
     tab.isStreaming = true;
@@ -870,7 +872,7 @@ LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             LoadChannel(tab);
             break;
         case IDC_WATCH:
-            WatchStream(tab);
+            WatchStream(tab, tabIndex);
             break;
         case IDC_STOP:
             StopStream(tab, true); // User clicked stop button
@@ -1296,19 +1298,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         std::wstring* msg = reinterpret_cast<std::wstring*>(lParam);
         if (msg) {
             AddLog(*msg);
-            
-            // Check if this message indicates the stream ended normally (not due to network issues)
-            if (*msg == L"Stream ended normally.") {
-                // Find the streaming tab and stop it
-                for (size_t i = 0; i < g_streams.size(); ++i) {
-                    if (g_streams[i].isStreaming) {
-                        // Post a message to stop this stream using the index
-                        PostMessage(hwnd, WM_USER + 2, (WPARAM)i, 0);
-                        break; // Assume only one stream can be "ending" at a time
-                    }
-                }
-            }
-            
             delete msg;
         }
         break;
