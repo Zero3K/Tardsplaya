@@ -87,11 +87,18 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist, bool
     std::istringstream ss(playlist);
     std::string line;
     bool ended = false;
+    bool has_valid_header = false;
+    bool has_segments = false;
+    
     while (std::getline(ss, line)) {
         if (line.empty()) continue;
         if (line[0] == '#') {
-            // Check for HLS stream end indicator
-            if (line.find("#EXT-X-ENDLIST") == 0) {
+            // Check for valid HLS header
+            if (line.find("#EXTM3U") == 0) {
+                has_valid_header = true;
+            }
+            // Check for HLS stream end indicator - but only if we have a valid playlist
+            if (line.find("#EXT-X-ENDLIST") == 0 && has_valid_header) {
                 ended = true;
             }
             continue;
@@ -99,8 +106,12 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist, bool
         // Should be a .ts or .aac segment
         std::wstring wline(line.begin(), line.end());
         segs.push_back(wline);
+        has_segments = true;
     }
-    if (is_ended) *is_ended = ended;
+    
+    // Only consider the stream ended if we have a valid playlist with segments
+    // and the end marker is present - this prevents false positives from partial downloads
+    if (is_ended) *is_ended = ended && has_valid_header && (has_segments || ended);
     return segs;
 }
 
@@ -409,6 +420,8 @@ bool BufferAndPipeStreamToPlayer(
         auto segments = ParseSegments(playlist, &playlist_ended);
         if (playlist_ended) {
             AddDebugLog(L"BufferAndPipeStreamToPlayer: Stream ended marker found for " + channel_name);
+            AddDebugLog(L"BufferAndPipeStreamToPlayer: Playlist content: " + 
+                       std::wstring(playlist.begin(), playlist.end()) + L" for " + channel_name);
             stream_ended = true;
         }
         
