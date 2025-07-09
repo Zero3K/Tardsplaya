@@ -736,7 +736,10 @@ void LoadChannel(StreamTab& tab) {
         EnableWindow(tab.hWatchBtn, FALSE);
     }
     else {
-        EnableWindow(tab.hWatchBtn, TRUE);
+        // Only enable the watch button if we're not currently streaming
+        if (!tab.isStreaming) {
+            EnableWindow(tab.hWatchBtn, TRUE);
+        }
     }
 }
 
