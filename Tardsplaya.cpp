@@ -14,6 +14,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <algorithm>
 #include "resource.h"
 #include "json_minimal.h"
@@ -112,6 +113,11 @@ std::wstring g_playerArg = L"-";
 bool g_enableLogging = true;
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
+
+// Global resource management for multi-stream stability
+std::mutex g_streamStartMutex;
+std::atomic<int> g_activeStreamCount{0};
+std::chrono::steady_clock::time_point g_lastStreamStart = std::chrono::steady_clock::now();
 
 // Tray icon support
 NOTIFYICONDATA g_nid = {};
@@ -757,6 +763,10 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
         }
         tab.isStreaming = false;
         tab.playerStarted = false;
+        
+        // Decrement active stream count for resource management
+        g_activeStreamCount--;
+        
         EnableWindow(tab.hWatchBtn, TRUE);
         EnableWindow(tab.hStopBtn, FALSE);
         SetWindowTextW(tab.hWatchBtn, L"2. Watch");
@@ -817,6 +827,31 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     
     std::wstring url = it->second;
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L")");
+    
+    // Global synchronization for stream starting to prevent resource conflicts
+    {
+        std::lock_guard<std::mutex> lock(g_streamStartMutex);
+        
+        // Increment active stream count for resource management
+        g_activeStreamCount++;
+        
+        // Calculate delay based on current stream count and time since last stream start
+        auto now = std::chrono::steady_clock::now();
+        auto timeSinceLastStart = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastStreamStart).count();
+        
+        // Minimum delay between stream starts to prevent resource conflicts
+        int minimumDelay = 1000; // 1 second base delay
+        int additionalDelay = g_activeStreamCount * 500; // Extra 500ms per active stream
+        int totalDelay = minimumDelay + additionalDelay;
+        
+        if (timeSinceLastStart < totalDelay) {
+            int waitTime = totalDelay - (int)timeSinceLastStart;
+            AddLog(L"Waiting " + std::to_wstring(waitTime) + L"ms before starting stream to prevent resource conflicts...");
+            std::this_thread::sleep_for(std::chrono::milliseconds(waitTime));
+        }
+        
+        g_lastStreamStart = std::chrono::steady_clock::now();
+    }
     
     // Reset cancel token and user requested stop flag
     tab.cancelToken = false;

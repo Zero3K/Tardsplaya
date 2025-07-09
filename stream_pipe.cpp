@@ -213,6 +213,9 @@ bool BufferAndPipeStreamToPlayer(
         seeded = true;
     }
     
+    // Add initial delay to spread out concurrent stream starts and reduce resource conflicts
+    std::this_thread::sleep_for(std::chrono::milliseconds(100 + (rand() % 200)));
+    
     // 1. Download the master playlist and pick the first media playlist (or use playlist_url directly if it's media)
     std::string master;
     if (cancel_token.load()) return false;
@@ -256,9 +259,13 @@ bool BufferAndPipeStreamToPlayer(
     si.hStdOutput = hStdOut;
     si.hStdError = hStdErr;
     PROCESS_INFORMATION pi = {};
+    
+    // Use process creation flags to improve isolation for multiple streams
+    DWORD creationFlags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    
     BOOL ok = CreateProcessW(
         nullptr, (LPWSTR)cmd.c_str(),
-        nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi
+        nullptr, nullptr, TRUE, creationFlags, nullptr, nullptr, &si, &pi
     );
     CloseHandle(hRead);
     if (!ok) { 
