@@ -11,6 +11,8 @@
 #include <winhttp.h>
 #include <atomic>
 #include <iostream>
+#include <cstdlib>
+#include <ctime>
 #include "tlsclient/tlsclient.h"
 
 // Utility: HTTP GET (returns as binary), with error retries
@@ -183,6 +185,13 @@ bool BufferAndPipeStreamToPlayer(
     const std::wstring& channel_name,
     std::atomic<int>* chunk_count
 ) {
+    // Seed random number generator for network request staggering
+    static bool seeded = false;
+    if (!seeded) {
+        srand((unsigned int)time(nullptr));
+        seeded = true;
+    }
+    
     // 1. Download the master playlist and pick the first media playlist (or use playlist_url directly if it's media)
     std::string master;
     if (cancel_token.load()) return false;
@@ -249,6 +258,9 @@ bool BufferAndPipeStreamToPlayer(
     int consecutive_errors = 0;
     const int max_consecutive_errors = 30; // ~60 seconds with 2s sleep - more tolerant for live streams
     bool stream_ended = false;
+
+    // Add small random delay for multiple streams to spread out network requests
+    std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 500));
 
     while (!cancel_token.load() && ProcessStillRunning(pi.hProcess) && !stream_ended) {
         std::string playlist;
