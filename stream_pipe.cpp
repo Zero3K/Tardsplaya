@@ -210,10 +210,13 @@ bool BufferAndPipeStreamToPlayer(
         }
     }
 
-    // 2. Create a pipe for stdin redirection to the player
+    // 2. Create a pipe for stdin redirection to the player with larger buffer for multiple streams
     HANDLE hRead = NULL, hWrite = NULL;
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return false;
+    // Use larger pipe buffer when multiple streams might be running
+    // This helps prevent pipe buffer overflows that can cause player crashes
+    DWORD pipeBufferSize = 65536; // 64KB buffer per stream
+    if (!CreatePipe(&hRead, &hWrite, &sa, pipeBufferSize)) return false;
 
     // Create separate output/error handles for process isolation to prevent conflicts between multiple streams
     HANDLE hStdOut = NULL, hStdErr = NULL;
@@ -312,7 +315,21 @@ bool BufferAndPipeStreamToPlayer(
                     for (auto& buf : segment_buffer) {
                         if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
                         DWORD written = 0;
-                        WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr);
+                        // Check for write errors that could indicate player crash/exit
+                        if (!WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr)) {
+                            // Pipe broken - player likely crashed or exited unexpectedly
+                            // Exit the streaming loop to avoid further errors
+                            goto streaming_cleanup;
+                        }
+                        // Verify we wrote the expected amount
+                        if (written != buf.size()) {
+                            // Partial write - pipe may be full or player struggling
+                            // This could indicate resource contention with multiple streams
+                            break;
+                        }
+                        // Small delay between segments when writing initial buffer
+                        // This helps prevent overwhelming the player with multiple concurrent streams
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
                     segment_buffer.clear();
                     // Update chunk count after clearing buffer
@@ -323,7 +340,20 @@ bool BufferAndPipeStreamToPlayer(
                     if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
                     auto& buf = segment_buffer.front();
                     DWORD written = 0;
-                    WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr);
+                    // Check for write errors that could indicate player crash/exit
+                    if (!WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr)) {
+                        // Pipe broken - player likely crashed or exited unexpectedly
+                        // Exit the streaming loop to avoid further errors
+                        goto streaming_cleanup;
+                    }
+                    // Verify we wrote the expected amount
+                    if (written != buf.size()) {
+                        // Partial write - pipe may be full or player struggling
+                        // This could indicate resource contention with multiple streams
+                        // Continue but don't remove the segment so it can be retried
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        continue;
+                    }
                     segment_buffer.erase(segment_buffer.begin());
                     // Update chunk count after removing segment
                     if (chunk_count) {
@@ -343,6 +373,7 @@ bool BufferAndPipeStreamToPlayer(
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
+streaming_cleanup:
     // 5. Cleanup: close write pipe, let player exit
     CloseHandle(hWrite);
     if (ProcessStillRunning(pi.hProcess)) {
