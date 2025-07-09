@@ -356,7 +356,8 @@ bool BufferAndPipeStreamToPlayer(
     if (hNullOut != INVALID_HANDLE_VALUE) CloseHandle(hNullOut);
     if (hNullErr != INVALID_HANDLE_VALUE) CloseHandle(hNullErr);
     
-    // Return true only if stream ended normally (with #EXT-X-ENDLIST) or user cancelled
-    // Return false if we exited due to network errors or player process died
-    return stream_ended || cancel_token.load();
+    // Return true only if stream ended normally (with #EXT-X-ENDLIST)
+    // Return false for all other cases (network errors, player crashes, user cancellation)
+    // User cancellation is handled separately via user_requested_stop flag
+    return stream_ended;
 }
