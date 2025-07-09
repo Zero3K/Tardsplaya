@@ -47,7 +47,7 @@ bool StreamSocket::Initialize() {
     // Bind to localhost on the found port
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    InetPtonA(AF_INET, "127.0.0.1", &addr.sin_addr);
     addr.sin_port = htons(port_);
     
     if (bind(server_socket_, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
@@ -203,7 +203,7 @@ int StreamSocket::FindAvailablePort() {
         
         sockaddr_in addr = {};
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        InetPtonA(AF_INET, "127.0.0.1", &addr.sin_addr);
         addr.sin_port = htons(port);
         
         if (bind(test_socket, (sockaddr*)&addr, sizeof(addr)) == 0) {

@@ -592,7 +592,7 @@ bool BufferAndPipeStreamToPlayer(
         
         // Parse segments and check for end marker
         bool ended = false;
-        std::vector<std::wstring> segments = ParseHLSPlaylist(media, &ended);
+        std::vector<std::wstring> segments = ParseSegments(media, &ended);
         
         if (ended) {
             AddDebugLog(L"BufferAndPipeStreamToPlayer: Stream ended marker found for " + channel_name);
@@ -663,4 +663,4 @@ bool BufferAndPipeStreamToPlayer(
     
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Returning " + std::to_wstring(stream_ended) + L" for " + channel_name);
     return stream_ended || cancel_token.load();
-}}
+}
