@@ -817,6 +817,18 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         return;
     }
 
+    // Check concurrent stream limit to prevent resource conflicts
+    // Based on testing, the system becomes unstable with 3+ concurrent streams
+    const int MAX_CONCURRENT_STREAMS = 2;
+    if (g_activeStreamCount >= MAX_CONCURRENT_STREAMS) {
+        std::wstring message = L"Cannot start more than " + std::to_wstring(MAX_CONCURRENT_STREAMS) + 
+                              L" concurrent streams due to system resource limitations.\n\n" +
+                              L"Please stop one of the active streams before starting a new one.";
+        MessageBoxW(tab.hChild, message.c_str(), L"Stream Limit Reached", MB_OK | MB_ICONWARNING);
+        AddLog(L"Stream start blocked: Maximum concurrent streams (" + std::to_wstring(MAX_CONCURRENT_STREAMS) + L") reached");
+        return;
+    }
+
     // Check if player path exists
     DWORD dwAttrib = GetFileAttributesW(g_playerPath.c_str());
     if (dwAttrib == INVALID_FILE_ATTRIBUTES || (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
