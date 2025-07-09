@@ -78,13 +78,40 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     return base.substr(0, pos + 1) + rel;
 }
 
-// Parse media segment URLs from m3u8 playlist
+// Parse media segment URLs from m3u8 playlist, filtering out ad segments
 static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
     std::vector<std::wstring> segs;
     std::istringstream ss(playlist);
     std::string line;
+    bool skip_next_segment = false;
+    
     while (std::getline(ss, line)) {
-        if (line.empty() || line[0] == '#') continue;
+        if (line.empty()) continue;
+        
+        if (line[0] == '#') {
+            // Check for ad markers - based on TwitchAdSolutions approach
+            // Look for "stitched" identifier which marks ad segments
+            if (line.find("stitched") != std::string::npos ||
+                line.find("STITCHED") != std::string::npos) {
+                skip_next_segment = true;
+            }
+            // Also check for explicit ad-related markers
+            else if (line.find("EXT-X-DATERANGE") != std::string::npos && 
+                     (line.find("stitched-ad-") != std::string::npos ||
+                      line.find("MIDROLL") != std::string::npos ||
+                      line.find("midroll") != std::string::npos)) {
+                skip_next_segment = true;
+            }
+            continue;
+        }
+        
+        // This is a segment URL
+        if (skip_next_segment) {
+            // Skip this segment as it contains ad content
+            skip_next_segment = false;
+            continue;
+        }
+        
         // Should be a .ts or .aac segment
         std::wstring wline(line.begin(), line.end());
         segs.push_back(wline);
