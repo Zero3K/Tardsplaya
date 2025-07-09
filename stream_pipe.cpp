@@ -349,7 +349,7 @@ bool BufferAndPipeStreamToPlayer(
 
     // Track consecutive process checks to avoid false positives under resource pressure
     int consecutive_process_failures = 0;
-    const int max_process_failures = 3; // Allow 3 consecutive failures before giving up
+    const int max_process_failures = 15; // Allow more failures for multi-stream tolerance
     
     // Detect if multiple streams might be running and adjust polling frequency
     // Use a longer random delay to spread out network requests more when system is under load
@@ -364,18 +364,23 @@ bool BufferAndPipeStreamToPlayer(
     while (!cancel_token.load() && consecutive_process_failures < max_process_failures && !stream_ended) {
         // Check if process is still running, but allow for temporary suspension/resource pressure
         if (!ProcessStillRunning(pi.hProcess, channel_name)) {
-            consecutive_process_failures++;
-            AddDebugLog(L"BufferAndPipeStreamToPlayer: Process check failed " + 
-                       std::to_wstring(consecutive_process_failures) + L"/" + 
-                       std::to_wstring(max_process_failures) + L" for " + channel_name);
-            if (consecutive_process_failures >= max_process_failures) {
-                // Process appears to be genuinely dead after multiple checks
-                AddDebugLog(L"BufferAndPipeStreamToPlayer: Process declared dead for " + channel_name);
-                break;
-            }
-            // Process might be temporarily suspended - wait and retry
+            // Add longer delay for main process check to allow recovery from resource pressure
             std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-            continue;
+            // Double-check process health after delay
+            if (!ProcessStillRunning(pi.hProcess, channel_name)) {
+                consecutive_process_failures++;
+                AddDebugLog(L"BufferAndPipeStreamToPlayer: Process check failed " + 
+                           std::to_wstring(consecutive_process_failures) + L"/" + 
+                           std::to_wstring(max_process_failures) + L" for " + channel_name);
+                if (consecutive_process_failures >= max_process_failures) {
+                    // Process appears to be genuinely dead after multiple checks
+                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Process declared dead for " + channel_name);
+                    break;
+                }
+                // Process might be temporarily suspended - wait and retry
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                continue;
+            }
         } else {
             // Process is running - reset failure counter
             if (consecutive_process_failures > 0) {
@@ -426,9 +431,14 @@ bool BufferAndPipeStreamToPlayer(
                 if (cancel_token.load()) break;
                 // Only check process health on segment download failures to reduce overhead
                 if (seg_attempts > 0 && !ProcessStillRunning(pi.hProcess, channel_name)) {
-                    consecutive_process_failures++;
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Process failed during segment download for " + channel_name);
-                    if (consecutive_process_failures >= max_process_failures) break;
+                    // Add delay to allow temporary resource pressure to resolve
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    // Double-check process health after delay
+                    if (!ProcessStillRunning(pi.hProcess, channel_name)) {
+                        consecutive_process_failures++;
+                        AddDebugLog(L"BufferAndPipeStreamToPlayer: Process failed during segment download for " + channel_name);
+                        if (consecutive_process_failures >= max_process_failures) break;
+                    }
                 }
                 seg_attempts++;
                 AddDebugLog(L"BufferAndPipeStreamToPlayer: Segment download attempt " + 
@@ -454,9 +464,14 @@ bool BufferAndPipeStreamToPlayer(
                         if (cancel_token.load()) break;
                         // Check process health before writing each buffer segment
                         if (!ProcessStillRunning(pi.hProcess, channel_name)) {
-                            consecutive_process_failures++;
-                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Process failed during buffer write for " + channel_name);
-                            if (consecutive_process_failures >= max_process_failures) break;
+                            // Add delay to allow temporary resource pressure to resolve
+                            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                            // Double-check process health after delay
+                            if (!ProcessStillRunning(pi.hProcess, channel_name)) {
+                                consecutive_process_failures++;
+                                AddDebugLog(L"BufferAndPipeStreamToPlayer: Process failed during buffer write for " + channel_name);
+                                if (consecutive_process_failures >= max_process_failures) break;
+                            }
                             // Process might be temporarily suspended - wait briefly and continue
                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
                             continue;
@@ -495,9 +510,14 @@ bool BufferAndPipeStreamToPlayer(
                     if (cancel_token.load()) break;
                     // Check process health before writing
                     if (!ProcessStillRunning(pi.hProcess, channel_name)) {
-                        consecutive_process_failures++;
-                        AddDebugLog(L"BufferAndPipeStreamToPlayer: Process failed during segment write for " + channel_name);
-                        if (consecutive_process_failures >= max_process_failures) break;
+                        // Add delay to allow temporary resource pressure to resolve
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                        // Double-check process health after delay
+                        if (!ProcessStillRunning(pi.hProcess, channel_name)) {
+                            consecutive_process_failures++;
+                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Process failed during segment write for " + channel_name);
+                            if (consecutive_process_failures >= max_process_failures) break;
+                        }
                         // Process might be temporarily suspended - wait briefly and continue
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                         continue;
