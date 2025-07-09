@@ -852,8 +852,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     // Set a timer to periodically update chunk queue status
     SetTimer(g_hMainWnd, TIMER_CHUNK_UPDATE, 2000, nullptr);
     
-    // Detach the thread so it runs independently
-    tab.streamThread.detach();
+    // Don't detach the thread - keep it joinable for proper synchronization
 }
 
 LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
