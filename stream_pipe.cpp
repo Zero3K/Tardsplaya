@@ -15,6 +15,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <ctime>
+#include <algorithm>
 #include "tlsclient/tlsclient.h"
 
 // Forward declarations
