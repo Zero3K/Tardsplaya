@@ -5,6 +5,7 @@
 #include <functional>
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
+#define NOMINMAX  // Prevent min/max macro conflicts
 #include <windows.h>
 
 // Forward declarations for debug logging

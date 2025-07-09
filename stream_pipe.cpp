@@ -1,3 +1,4 @@
+#define NOMINMAX  // Prevent Windows headers from defining min/max macros
 #include "stream_pipe.h"
 #include "stream_thread.h"
 #include "stream_resource_manager.h"
@@ -17,6 +18,14 @@
 #include <ctime>
 #include <algorithm>
 #include "tlsclient/tlsclient.h"
+
+// Additional safeguard: Undefine any min/max macros that may still be defined
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 
 // Forward declarations
 class StreamResourceGuard;
