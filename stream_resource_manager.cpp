@@ -41,7 +41,7 @@ bool StreamResourceManager::CreateStreamResources(const std::wstring& stream_id,
                 JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
                 JOB_OBJECT_LIMIT_PRIORITY_CLASS;
             
-            job_limits.BasicLimitInformation.ProcessMemoryLimit = quota.max_memory_mb * 1024 * 1024;
+            job_limits.ProcessMemoryLimit = quota.max_memory_mb * 1024 * 1024;
             job_limits.JobMemoryLimit = quota.max_memory_mb * 1024 * 1024;
             job_limits.BasicLimitInformation.ActiveProcessLimit = 1;
             job_limits.BasicLimitInformation.PriorityClass = quota.process_priority;
@@ -154,9 +154,12 @@ bool StreamResourceManager::IsSystemUnderLoad() const {
     if (active > 1) {
         std::lock_guard<std::mutex> lock(resources_mutex_);
         auto now = std::chrono::steady_clock::now();
-        for (const auto& [stream_id, start_time] : stream_start_times_) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
-            if (elapsed < 30) {
+        for (auto it = stream_start_times_.begin(); it != stream_start_times_.end(); ++it) {
+            const std::wstring& stream_id = it->first;
+            const std::chrono::steady_clock::time_point& start_time = it->second;
+            auto elapsed_duration = now - start_time;
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(elapsed_duration);
+            if (elapsed.count() < 30) {
                 return true;
             }
         }
@@ -203,7 +206,9 @@ StreamResourceManager::~StreamResourceManager() {
     AddDebugLog(L"StreamResourceManager: Destructor called, cleaning up all resources");
     
     // Cleanup all remaining resources
-    for (const auto& [stream_id, job_handle] : stream_jobs_) {
+    for (auto it = stream_jobs_.begin(); it != stream_jobs_.end(); ++it) {
+        const std::wstring& stream_id = it->first;
+        HANDLE job_handle = it->second;
         if (job_handle) {
             TerminateJobObject(job_handle, 0);
             CloseHandle(job_handle);
