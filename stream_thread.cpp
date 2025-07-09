@@ -21,7 +21,7 @@ std::thread StartStreamThread(
                    L", Tab=" + std::to_wstring(tab_index) + 
                    L", BufferSegs=" + std::to_wstring(buffer_segments));
         
-        bool ok = BufferAndPipeStreamToPlayer(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count);
+        bool ok = BufferAndStreamToPlayerWithMemoryMap(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count);
         
         AddDebugLog(L"StartStreamThread: Stream finished, ok=" + std::to_wstring(ok) + 
                    L", Channel=" + channel_name + L", Tab=" + std::to_wstring(tab_index));

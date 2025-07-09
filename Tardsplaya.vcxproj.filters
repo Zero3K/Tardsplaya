@@ -39,6 +39,12 @@
     <ClCompile Include="urlencode.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="stream_resource_manager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="stream_memory_map.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="tlsclient\tlsclient.cpp">
       <Filter>TLSClient</Filter>
     </ClCompile>
@@ -69,6 +75,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="urlencode.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="stream_resource_manager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="stream_memory_map.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="tlsclient\lock.h">

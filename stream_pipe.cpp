@@ -2,6 +2,7 @@
 #include "stream_pipe.h"
 #include "stream_thread.h"
 #include "stream_resource_manager.h"
+#include "stream_memory_map.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -567,5 +568,268 @@ streaming_cleanup:
     // Resource guard destructor will handle resource cleanup
     
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Returning " + std::to_wstring(stream_ended) + L" for " + channel_name);
+    return stream_ended;
+}
+
+// New memory-mapped file implementation for reliable multi-stream communication
+bool BufferAndStreamToPlayerWithMemoryMap(
+    const std::wstring& player_path,
+    const std::wstring& playlist_url,
+    std::atomic<bool>& cancel_token,
+    int buffer_segments,
+    const std::wstring& channel_name,
+    std::atomic<int>* chunk_count) {
+    
+    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Starting for " + channel_name + 
+               L", URL=" + playlist_url);
+    
+    // 1. Create resource guard for process isolation
+    auto& resource_manager = StreamResourceManager::getInstance();
+    auto quota = resource_manager.CreateResourceQuota(channel_name);
+    StreamResourceGuard resource_guard(quota);
+    
+    if (!resource_guard.IsValid()) {
+        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to create resource guard for " + channel_name);
+        return false;
+    }
+    
+    // 2. Download master playlist to get media playlist URL
+    std::string master;
+    if (cancel_token.load()) return false;
+    
+    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Downloading master playlist for " + channel_name);
+    if (!HttpGetText(playlist_url, master, &cancel_token)) {
+        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to download master playlist for " + channel_name);
+        return false;
+    }
+    
+    // Parse master playlist to get media playlist URL
+    std::wstring media_playlist_url = playlist_url;
+    bool is_master = false;
+    std::istringstream ss(master);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.find("#EXT-X-STREAM-INF:") == 0) is_master = true;
+        if (is_master && !line.empty() && line[0] != '#') {
+            media_playlist_url = JoinUrl(playlist_url, std::wstring(line.begin(), line.end()));
+            break;
+        }
+    }
+    
+    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Using media playlist URL for " + channel_name + 
+               L", is_master=" + std::to_wstring(is_master));
+    
+    // 3. Create memory-mapped file for internal buffering (not for IPC with player)
+    StreamMemoryMap memory_buffer;
+    if (!memory_buffer.CreateAsWriter(channel_name, 64 * 1024 * 1024)) { // 64MB internal buffer
+        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to create memory buffer for " + channel_name);
+        return false;
+    }
+    
+    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Created internal memory buffer for " + channel_name);
+    
+    // 4. Create pipe for media player (traditional approach for compatibility)
+    HANDLE hRead = NULL, hWrite = NULL;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    
+    // Use larger pipe buffer for better multi-stream performance
+    DWORD pipe_buffer_size = resource_manager.GetRecommendedPipeBuffer();
+    if (!CreatePipe(&hRead, &hWrite, &sa, pipe_buffer_size)) {
+        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to create pipe for " + channel_name);
+        return false;
+    }
+    
+    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Created pipe with buffer size " + 
+               std::to_wstring(pipe_buffer_size) + L" for " + channel_name);
+    
+    // 5. Launch player process
+    std::wstring cmd = L"\"" + player_path + L"\" -";
+    auto quota_settings = resource_manager.CreateResourceQuota(channel_name);
+    
+    PROCESS_INFORMATION pi = {};
+    if (!StreamProcessUtils::CreateIsolatedProcess(
+        cmd, channel_name, quota_settings, &pi, hRead, nullptr, nullptr)) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to create player process for " + channel_name);
+        return false;
+    }
+    
+    CloseHandle(hRead);
+    
+    if (!resource_guard.AssignProcess(pi.hProcess, pi.dwProcessId)) {
+        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to assign process to resource manager for " + channel_name);
+        TerminateProcess(pi.hProcess, 0);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        CloseHandle(hWrite);
+        return false;
+    }
+    
+    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Player process created, PID=" + 
+               std::to_wstring(pi.dwProcessId) + L" for " + channel_name);
+    
+    // 6. Start background thread for memory-mapped buffering and pipe writing
+    std::atomic<bool> writer_cancel = false;
+    std::thread writer_thread([&memory_buffer, hWrite, &writer_cancel, channel_name]() {
+        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Writer thread started for " + channel_name);
+        
+        const size_t CHUNK_SIZE = 65536; // 64KB chunks
+        std::vector<char> chunk_buffer(CHUNK_SIZE);
+        
+        while (!writer_cancel.load()) {
+            // Read from memory buffer and write to pipe
+            size_t bytes_read = memory_buffer.ReadData(chunk_buffer.data(), CHUNK_SIZE);
+            if (bytes_read > 0) {
+                DWORD written = 0;
+                if (!WriteFile(hWrite, chunk_buffer.data(), static_cast<DWORD>(bytes_read), &written, nullptr)) {
+                    DWORD error = GetLastError();
+                    if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
+                        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Pipe broken in writer thread for " + channel_name);
+                        break;
+                    }
+                    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Write error " + std::to_wstring(error) + L" in writer thread for " + channel_name);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                } else {
+                    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Wrote " + std::to_wstring(written) + L" bytes to pipe for " + channel_name);
+                }
+            } else {
+                // No data available, check if stream ended
+                if (memory_buffer.IsStreamEnded()) {
+                    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Stream ended, writer thread exiting for " + channel_name);
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+        
+        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Writer thread finished for " + channel_name);
+    });
+    
+    // 7. Download and stream segments using memory buffer
+    std::set<std::wstring> downloaded;
+    std::vector<std::vector<char>> segment_buffer;
+    bool started = false;
+    int consecutive_errors = 0;
+    const int max_consecutive_errors = 30;
+    bool stream_ended = false;
+    
+    int poll_interval = resource_manager.IsSystemUnderLoad() ? 3000 : 2000;
+    poll_interval += rand() % 1000; // Add jitter
+    
+    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Starting streaming loop for " + channel_name);
+    
+    while (!cancel_token.load() && !stream_ended) {
+        if (!resource_guard.IsProcessHealthy()) {
+            AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Process health check failed for " + channel_name);
+            break;
+        }
+        
+        std::string playlist;
+        if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
+            consecutive_errors++;
+            AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Playlist download failed " + 
+                       std::to_wstring(consecutive_errors) + L"/" + 
+                       std::to_wstring(max_consecutive_errors) + L" for " + channel_name);
+            if (consecutive_errors > max_consecutive_errors) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            continue;
+        }
+        consecutive_errors = 0;
+        
+        // Parse segments and check for stream end
+        bool playlist_ended = false;
+        auto segments = ParseSegments(playlist, &playlist_ended);
+        if (playlist_ended) {
+            AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Stream ended marker found for " + channel_name);
+            stream_ended = true;
+        }
+        
+        size_t new_segments = 0;
+        for (auto& seg : segments) {
+            if (cancel_token.load()) break;
+            if (!resource_guard.IsProcessHealthy()) break;
+            if (downloaded.count(seg)) continue;
+            downloaded.insert(seg);
+            
+            // Download segment
+            std::wstring seg_url = JoinUrl(media_playlist_url, seg);
+            std::vector<char> segment_data;
+            if (!HttpGetBinary(seg_url, segment_data, 1, &cancel_token)) {
+                AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Segment download failed for " + channel_name);
+                continue;
+            }
+            
+            if (!segment_data.empty()) {
+                segment_buffer.push_back(std::move(segment_data));
+                new_segments++;
+                
+                if (chunk_count) {
+                    *chunk_count = (int)segment_buffer.size();
+                }
+                
+                // Start streaming once buffer is filled or write buffered segments
+                if (!started && (int)segment_buffer.size() >= buffer_segments) {
+                    started = true;
+                    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Starting to stream " + 
+                               std::to_wstring(segment_buffer.size()) + L" segments for " + channel_name);
+                    
+                    for (auto& buf : segment_buffer) {
+                        if (cancel_token.load()) break;
+                        if (!resource_guard.IsProcessHealthy()) break;
+                        
+                        // Write to memory buffer instead of pipe directly
+                        if (!memory_buffer.WriteData(buf.data(), buf.size(), cancel_token)) {
+                            AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to write to memory buffer for " + channel_name);
+                            goto cleanup_memory_map;
+                        }
+                    }
+                    segment_buffer.clear();
+                    if (chunk_count) {
+                        *chunk_count = 0;
+                    }
+                } else if (started && !segment_buffer.empty()) {
+                    auto& buf = segment_buffer.front();
+                    
+                    // Write to memory buffer instead of pipe directly
+                    if (!memory_buffer.WriteData(buf.data(), buf.size(), cancel_token)) {
+                        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to write streaming data to memory buffer for " + channel_name);
+                        goto cleanup_memory_map;
+                    }
+                    
+                    segment_buffer.erase(segment_buffer.begin());
+                    if (chunk_count) {
+                        *chunk_count = (int)segment_buffer.size();
+                    }
+                }
+            }
+        }
+        
+        if (cancel_token.load() || !resource_guard.IsProcessHealthy()) break;
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval));
+    }
+    
+cleanup_memory_map:
+    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Cleanup starting for " + channel_name + 
+               L", stream_ended=" + std::to_wstring(stream_ended));
+    
+    // Signal stream end in memory buffer
+    memory_buffer.SignalStreamEnd();
+    
+    // Stop writer thread
+    writer_cancel = true;
+    if (writer_thread.joinable()) {
+        writer_thread.join();
+    }
+    
+    // Cleanup handles
+    CloseHandle(hWrite);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    
+    AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Returning " + std::to_wstring(stream_ended) + L" for " + channel_name);
     return stream_ended;
 }
