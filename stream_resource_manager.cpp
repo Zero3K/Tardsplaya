@@ -30,26 +30,21 @@ bool StreamResourceManager::CreateStreamResources(const std::wstring& stream_id,
     
     HANDLE job_handle = nullptr;
     if (quota.use_job_object) {
-        // Create job object for process isolation
+        // Create job object for process isolation - only for debugging/monitoring
         job_handle = CreateJobObject(nullptr, nullptr);
         if (job_handle) {
-            // Configure job limits
+            // Configure minimal job limits to avoid graphics interference
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limits = {};
             job_limits.BasicLimitInformation.LimitFlags = 
-                JOB_OBJECT_LIMIT_PROCESS_MEMORY | 
-                JOB_OBJECT_LIMIT_JOB_MEMORY |
-                JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
-                JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+                JOB_OBJECT_LIMIT_ACTIVE_PROCESS;  // Only limit active processes
             
-            job_limits.ProcessMemoryLimit = quota.max_memory_mb * 1024 * 1024;
-            job_limits.JobMemoryLimit = quota.max_memory_mb * 1024 * 1024;
             job_limits.BasicLimitInformation.ActiveProcessLimit = 1;
-            job_limits.BasicLimitInformation.PriorityClass = quota.process_priority;
+            // Remove memory, thread, and priority limits that can interfere with graphics
             
             SetInformationJobObject(job_handle, JobObjectExtendedLimitInformation, 
                                    &job_limits, sizeof(job_limits));
             
-            AddDebugLog(L"StreamResourceManager: Created job object for stream " + stream_id);
+            AddDebugLog(L"StreamResourceManager: Created minimal job object for stream " + stream_id);
         } else {
             AddDebugLog(L"StreamResourceManager: Failed to create job object for stream " + stream_id + 
                        L", Error=" + std::to_wstring(GetLastError()));
@@ -145,13 +140,13 @@ bool StreamResourceManager::IsSystemUnderLoad() const {
     int active = active_streams_.load();
     
     // System is under load if:
-    // 1. More than 3 active streams
-    // 2. Or if we have streams that started recently (within 30 seconds)
-    if (active > 3) {
+    // 1. More than 4 active streams (increased threshold)
+    // 2. Or if we have streams that started recently (within 15 seconds - reduced window)
+    if (active > 4) {
         return true;
     }
     
-    if (active > 1) {
+    if (active > 2) {
         std::lock_guard<std::mutex> lock(resources_mutex_);
         auto now = std::chrono::steady_clock::now();
         for (auto it = stream_start_times_.begin(); it != stream_start_times_.end(); ++it) {
@@ -159,7 +154,7 @@ bool StreamResourceManager::IsSystemUnderLoad() const {
             const std::chrono::steady_clock::time_point& start_time = it->second;
             auto elapsed_duration = now - start_time;
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(elapsed_duration);
-            if (elapsed.count() < 30) {
+            if (elapsed.count() < 15) {  // Reduced from 30 to 15 seconds
                 return true;
             }
         }
@@ -171,12 +166,12 @@ bool StreamResourceManager::IsSystemUnderLoad() const {
 DWORD StreamResourceManager::GetRecommendedStartDelay() const {
     int active = active_streams_.load();
     
-    if (active == 0) return 100;           // First stream - minimal delay
-    if (active == 1) return 1000;          // Second stream - 1 second
-    if (active == 2) return 2000;          // Third stream - 2 seconds
+    if (active == 0) return 50;            // First stream - minimal delay
+    if (active == 1) return 500;           // Second stream - 0.5 second  
+    if (active == 2) return 1000;          // Third stream - 1 second
     
-    // Additional streams get progressively longer delays
-    return 2000 + (active - 2) * 1000;
+    // Additional streams get modest delays to prevent resource conflicts
+    return 1000 + (active - 2) * 500;
 }
 
 DWORD StreamResourceManager::GetRecommendedPipeBuffer() const {
@@ -192,12 +187,8 @@ DWORD StreamResourceManager::GetRecommendedPipeBuffer() const {
 }
 
 DWORD StreamResourceManager::GetRecommendedProcessPriority() const {
-    int active = active_streams_.load();
-    
-    if (active <= 1) return NORMAL_PRIORITY_CLASS;
-    if (active <= 3) return BELOW_NORMAL_PRIORITY_CLASS;
-    
-    return IDLE_PRIORITY_CLASS;
+    // Always use normal priority to avoid graphics rendering issues
+    return NORMAL_PRIORITY_CLASS;
 }
 
 StreamResourceManager::~StreamResourceManager() {
@@ -269,13 +260,11 @@ namespace StreamProcessUtils {
             startup_info.hStdError = stderr_handle ? stderr_handle : GetStdHandle(STD_ERROR_HANDLE);
         }
         
-        // Use isolation flags for better process separation
+        // Use minimal isolation flags to avoid graphics interference
         DWORD creation_flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | quota.process_priority;
         
-        // Add additional isolation for multiple streams
-        if (StreamResourceManager::getInstance().GetActiveStreamCount() > 1) {
-            creation_flags |= CREATE_SEPARATE_WOW_VDM;
-        }
+        // Remove additional isolation that can interfere with graphics
+        // The CREATE_SEPARATE_WOW_VDM flag can prevent DirectX access
         
         AddDebugLog(L"StreamProcessUtils: Creating isolated process for stream " + stream_id + 
                    L", flags=" + std::to_wstring(creation_flags));

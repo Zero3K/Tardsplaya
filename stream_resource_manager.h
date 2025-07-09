@@ -18,12 +18,12 @@
 // This addresses the resource contention issues that cause streams to interfere with each other
 
 struct StreamResourceQuota {
-    DWORD max_memory_mb = 100;          // Maximum memory per stream
-    DWORD max_handles = 50;             // Maximum handles per stream  
-    DWORD max_threads = 4;              // Maximum threads per stream
+    DWORD max_memory_mb = 512;          // Increased memory limit for video rendering
+    DWORD max_handles = 100;            // Increased handles for graphics resources
+    DWORD max_threads = 8;              // Increased threads for media processing
     DWORD pipe_buffer_size = 65536;     // 64KB pipe buffer per stream
     DWORD process_priority = NORMAL_PRIORITY_CLASS;
-    bool use_job_object = true;         // Use job objects for better isolation
+    bool use_job_object = false;        // Disable job objects to avoid graphics interference
 };
 
 class StreamResourceManager {
