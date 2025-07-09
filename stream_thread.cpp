@@ -1,6 +1,5 @@
 #include "stream_thread.h"
 #include "stream_pipe.h"
-#include <windows.h>
 
 std::thread StartStreamThread(
     const std::wstring& player_path,

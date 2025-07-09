@@ -3,6 +3,8 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_
 #include <windows.h>
 
 // Forward declarations for debug logging
