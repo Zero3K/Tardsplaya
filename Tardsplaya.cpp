@@ -1289,14 +1289,14 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (msg) {
             AddLog(*msg);
             
-            // Check if this message indicates the player exited normally (user closed it)
-            if (*msg == L"Player exited normally.") {
+            // Check if this message indicates the stream ended normally (not due to network issues)
+            if (*msg == L"Stream ended normally.") {
                 // Find the streaming tab and stop it
                 for (size_t i = 0; i < g_streams.size(); ++i) {
                     if (g_streams[i].isStreaming) {
                         // Post a message to stop this stream using the index
                         PostMessage(hwnd, WM_USER + 2, (WPARAM)i, 0);
-                        break; // Assume only one stream can be "exiting" at a time
+                        break; // Assume only one stream can be "ending" at a time
                     }
                 }
             }
@@ -1310,7 +1310,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         size_t tabIndex = (size_t)wParam;
         if (tabIndex < g_streams.size() && g_streams[tabIndex].isStreaming) {
             StopStream(g_streams[tabIndex]);
-            AddLog(L"Stream stopped automatically (player closed).");
+            AddLog(L"Stream stopped automatically (stream ended).");
         }
         break;
     }

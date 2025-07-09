@@ -79,16 +79,25 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
 }
 
 // Parse media segment URLs from m3u8 playlist
-static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
+static std::vector<std::wstring> ParseSegments(const std::string& playlist, bool* is_ended = nullptr) {
     std::vector<std::wstring> segs;
     std::istringstream ss(playlist);
     std::string line;
+    bool ended = false;
     while (std::getline(ss, line)) {
-        if (line.empty() || line[0] == '#') continue;
+        if (line.empty()) continue;
+        if (line[0] == '#') {
+            // Check for HLS stream end indicator
+            if (line.find("#EXT-X-ENDLIST") == 0) {
+                ended = true;
+            }
+            continue;
+        }
         // Should be a .ts or .aac segment
         std::wstring wline(line.begin(), line.end());
         segs.push_back(wline);
     }
+    if (is_ended) *is_ended = ended;
     return segs;
 }
 
@@ -224,18 +233,28 @@ bool BufferAndPipeStreamToPlayer(
     std::vector<std::vector<char>> segment_buffer;
     bool started = false;
     int consecutive_errors = 0;
-    const int max_consecutive_errors = 12; // ~24 seconds with 2s sleep
+    const int max_consecutive_errors = 30; // ~60 seconds with 2s sleep - more tolerant for live streams
+    bool stream_ended = false;
 
-    while (!cancel_token.load() && ProcessStillRunning(pi.hProcess)) {
+    while (!cancel_token.load() && ProcessStillRunning(pi.hProcess) && !stream_ended) {
         std::string playlist;
         if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
             consecutive_errors++;
-            if (consecutive_errors > max_consecutive_errors) break; // too many errors
+            if (consecutive_errors > max_consecutive_errors) {
+                // Too many consecutive errors - likely stream is down or network issues
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
         }
         consecutive_errors = 0;
-        auto segments = ParseSegments(playlist);
+        
+        // Parse segments and check for stream end
+        bool playlist_ended = false;
+        auto segments = ParseSegments(playlist, &playlist_ended);
+        if (playlist_ended) {
+            stream_ended = true;
+        }
 
         size_t new_segments = 0;
         for (auto& seg : segments) {
@@ -289,7 +308,7 @@ bool BufferAndPipeStreamToPlayer(
         }
 
         if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
-        if (segments.empty()) { // End of stream or error
+        if (segments.empty() && !stream_ended) { // No segments but stream hasn't ended - continue polling
             std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
         }
@@ -306,5 +325,8 @@ bool BufferAndPipeStreamToPlayer(
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    return true;
+    
+    // Return true only if stream ended normally (with #EXT-X-ENDLIST) or user cancelled
+    // Return false if we exited due to network errors or player process died
+    return stream_ended || cancel_token.load();
 }
