@@ -421,7 +421,60 @@ bool BufferAndPipeStreamToPlayer(
                             DWORD error = GetLastError();
                             AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe write failed for " + channel_name + 
                                        L", Error=" + std::to_wstring(error));
-                            goto streaming_cleanup;
+                            
+                            // Check if this is a recoverable error and if the player is still running
+                            if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA || error == ERROR_INVALID_HANDLE) {
+                                // Fatal pipe errors - player has died or pipe is broken
+                                AddDebugLog(L"BufferAndPipeStreamToPlayer: Fatal pipe error, stopping for " + channel_name);
+                                goto streaming_cleanup;
+                            }
+                            
+                            // For other errors, check if player is still healthy and retry
+                            if (!resource_guard.IsProcessHealthy()) {
+                                AddDebugLog(L"BufferAndPipeStreamToPlayer: Player died during pipe write for " + channel_name);
+                                goto streaming_cleanup;
+                            }
+                            
+                            // Retry with exponential backoff for recoverable errors
+                            int retry_attempts = 0;
+                            const int max_retries = 5;
+                            while (retry_attempts < max_retries) {
+                                retry_attempts++;
+                                DWORD retry_delay = 50 * (1 << retry_attempts); // Exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms
+                                AddDebugLog(L"BufferAndPipeStreamToPlayer: Retrying pipe write attempt " + 
+                                           std::to_wstring(retry_attempts) + L" after " + std::to_wstring(retry_delay) + 
+                                           L"ms for " + channel_name);
+                                
+                                std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay));
+                                
+                                if (cancel_token.load()) break;
+                                if (!resource_guard.IsProcessHealthy()) {
+                                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Player died during retry for " + channel_name);
+                                    goto streaming_cleanup;
+                                }
+                                
+                                if (WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr)) {
+                                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe write succeeded on retry " + 
+                                               std::to_wstring(retry_attempts) + L" for " + channel_name);
+                                    break;
+                                }
+                                
+                                DWORD retry_error = GetLastError();
+                                AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe write retry " + 
+                                           std::to_wstring(retry_attempts) + L" failed, Error=" + 
+                                           std::to_wstring(retry_error) + L" for " + channel_name);
+                                
+                                if (retry_error == ERROR_BROKEN_PIPE || retry_error == ERROR_NO_DATA || retry_error == ERROR_INVALID_HANDLE) {
+                                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Fatal pipe error on retry, stopping for " + channel_name);
+                                    goto streaming_cleanup;
+                                }
+                            }
+                            
+                            // If all retries failed, give up
+                            if (retry_attempts >= max_retries) {
+                                AddDebugLog(L"BufferAndPipeStreamToPlayer: All pipe write retries failed for " + channel_name);
+                                goto streaming_cleanup;
+                            }
                         }
                         if (written != buf.size()) {
                             AddDebugLog(L"BufferAndPipeStreamToPlayer: Partial write for " + channel_name);
@@ -445,7 +498,60 @@ bool BufferAndPipeStreamToPlayer(
                         DWORD error = GetLastError();
                         AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe write failed during streaming for " + channel_name + 
                                    L", Error=" + std::to_wstring(error));
-                        goto streaming_cleanup;
+                        
+                        // Check if this is a recoverable error and if the player is still running
+                        if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA || error == ERROR_INVALID_HANDLE) {
+                            // Fatal pipe errors - player has died or pipe is broken
+                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Fatal pipe error during streaming, stopping for " + channel_name);
+                            goto streaming_cleanup;
+                        }
+                        
+                        // For other errors, check if player is still healthy and retry
+                        if (!resource_guard.IsProcessHealthy()) {
+                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Player died during streaming pipe write for " + channel_name);
+                            goto streaming_cleanup;
+                        }
+                        
+                        // Retry with exponential backoff for recoverable errors
+                        int retry_attempts = 0;
+                        const int max_retries = 5;
+                        while (retry_attempts < max_retries) {
+                            retry_attempts++;
+                            DWORD retry_delay = 50 * (1 << retry_attempts); // Exponential backoff: 100ms, 200ms, 400ms, 800ms, 1600ms
+                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Retrying streaming pipe write attempt " + 
+                                       std::to_wstring(retry_attempts) + L" after " + std::to_wstring(retry_delay) + 
+                                       L"ms for " + channel_name);
+                            
+                            std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay));
+                            
+                            if (cancel_token.load()) break;
+                            if (!resource_guard.IsProcessHealthy()) {
+                                AddDebugLog(L"BufferAndPipeStreamToPlayer: Player died during streaming retry for " + channel_name);
+                                goto streaming_cleanup;
+                            }
+                            
+                            if (WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr)) {
+                                AddDebugLog(L"BufferAndPipeStreamToPlayer: Streaming pipe write succeeded on retry " + 
+                                           std::to_wstring(retry_attempts) + L" for " + channel_name);
+                                break;
+                            }
+                            
+                            DWORD retry_error = GetLastError();
+                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Streaming pipe write retry " + 
+                                       std::to_wstring(retry_attempts) + L" failed, Error=" + 
+                                       std::to_wstring(retry_error) + L" for " + channel_name);
+                            
+                            if (retry_error == ERROR_BROKEN_PIPE || retry_error == ERROR_NO_DATA || retry_error == ERROR_INVALID_HANDLE) {
+                                AddDebugLog(L"BufferAndPipeStreamToPlayer: Fatal pipe error on streaming retry, stopping for " + channel_name);
+                                goto streaming_cleanup;
+                            }
+                        }
+                        
+                        // If all retries failed, give up
+                        if (retry_attempts >= max_retries) {
+                            AddDebugLog(L"BufferAndPipeStreamToPlayer: All streaming pipe write retries failed for " + channel_name);
+                            goto streaming_cleanup;
+                        }
                     }
                     if (written != buf.size()) {
                         AddDebugLog(L"BufferAndPipeStreamToPlayer: Partial write during streaming for " + channel_name);
