@@ -670,18 +670,31 @@ bool BufferAndStreamToPlayerWithMemoryMap(
         return false;
     }
     
+    // Resume the process if it was created suspended (due to job object assignment)
+    if (quota_settings.use_job_object) {
+        if (!StreamProcessUtils::ResumeProcessAfterJobAssignment(pi.hThread, channel_name)) {
+            AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to resume process for " + channel_name);
+            TerminateProcess(pi.hProcess, 0);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            CloseHandle(hWrite);
+            return false;
+        }
+        AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Process resumed successfully for " + channel_name);
+    }
+    
     AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Player process created, PID=" + 
                std::to_wstring(pi.dwProcessId) + L" for " + channel_name);
     
     // 6. Start background thread for memory-mapped buffering and pipe writing
     std::atomic<bool> writer_cancel = false;
-    std::thread writer_thread([&memory_buffer, hWrite, &writer_cancel, channel_name]() {
+    std::thread writer_thread([&memory_buffer, hWrite, &writer_cancel, &cancel_token, channel_name]() {
         AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Writer thread started for " + channel_name);
         
         const size_t CHUNK_SIZE = 65536; // 64KB chunks
         std::vector<char> chunk_buffer(CHUNK_SIZE);
         
-        while (!writer_cancel.load()) {
+        while (!writer_cancel.load() && !cancel_token.load()) {
             // Read from memory buffer and write to pipe
             size_t bytes_read = memory_buffer.ReadData(chunk_buffer.data(), CHUNK_SIZE);
             if (bytes_read > 0) {
