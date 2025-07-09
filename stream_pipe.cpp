@@ -23,7 +23,7 @@ private:
     int port;
     std::atomic<bool> running;
     std::queue<std::vector<char>> data_queue;
-    std::mutex queue_mutex;
+    mutable std::mutex queue_mutex;
     std::atomic<bool> stream_ended;
     std::thread server_thread;
     std::atomic<size_t> buffer_size;
