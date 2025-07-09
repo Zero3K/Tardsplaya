@@ -3,6 +3,7 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <windows.h>
 
 // Launches a thread to buffer and pipe the stream.
 // The callback is called with a log/status message (can be nullptr).
