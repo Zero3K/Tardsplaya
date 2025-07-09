@@ -113,7 +113,36 @@ bool StreamResourceManager::IsStreamProcessHealthy(const std::wstring& stream_id
         return false;
     }
     
-    return StreamProcessUtils::IsProcessGenuinelyRunning(process_it->second, stream_id);
+    // Check if process is genuinely running
+    bool is_healthy = StreamProcessUtils::IsProcessGenuinelyRunning(process_it->second, stream_id);
+    
+    // Implement failure tolerance for multi-stream scenarios
+    if (!is_healthy) {
+        // Track consecutive failures
+        stream_health_failures_[stream_id]++;
+        int failures = stream_health_failures_[stream_id];
+        
+        AddDebugLog(L"StreamResourceManager: Health check failed for " + stream_id + 
+                   L", failures=" + std::to_wstring(failures) + L"/10");
+        
+        // Allow up to 10 consecutive failures before declaring process dead
+        // This prevents false positives during multi-stream resource pressure
+        if (failures >= 10) {
+            AddDebugLog(L"StreamResourceManager: Process declared dead after " + 
+                       std::to_wstring(failures) + L" failures for " + stream_id);
+            return false;
+        }
+        
+        // Add a small delay to reduce system load and allow recovery
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        // Return true to give the process more time to recover
+        return true;
+    } else {
+        // Process is healthy - reset failure count
+        stream_health_failures_[stream_id] = 0;
+        return true;
+    }
 }
 
 void StreamResourceManager::CleanupStreamResources(const std::wstring& stream_id) {
@@ -143,6 +172,9 @@ void StreamResourceManager::CleanupStreamResources(const std::wstring& stream_id
     
     // Remove timing info
     stream_start_times_.erase(stream_id);
+    
+    // Reset health failure tracking
+    stream_health_failures_.erase(stream_id);
     
     if (active_streams_.load() > 0) {
         active_streams_--;
@@ -225,6 +257,7 @@ StreamResourceManager::~StreamResourceManager() {
     stream_jobs_.clear();
     stream_processes_.clear();
     stream_start_times_.clear();
+    stream_health_failures_.clear();
 }
 
 // StreamResourceGuard implementation
@@ -327,7 +360,7 @@ namespace StreamProcessUtils {
             return false;
         }
         
-        // First check: Get exit code
+        // Primary check: Get exit code - this is the most reliable
         DWORD exit_code;
         if (!GetExitCodeProcess(process_handle, &exit_code)) {
             AddDebugLog(L"StreamProcessUtils: GetExitCodeProcess failed for " + debug_name);
@@ -340,22 +373,23 @@ namespace StreamProcessUtils {
             return false;
         }
         
-        // Second check: Wait with 0 timeout to see if process is signaled
+        // Secondary check: Wait with 0 timeout to see if process is signaled
         DWORD wait_result = WaitForSingleObject(process_handle, 0);
         if (wait_result == WAIT_OBJECT_0) {
             AddDebugLog(L"StreamProcessUtils: Process handle signaled (dead) for " + debug_name);
             return false;
         }
         
-        // Third check: Verify process is responsive (not just suspended)
-        // Get process information to check if it's actually running
-        PROCESS_MEMORY_COUNTERS pmc;
-        if (GetProcessMemoryInfo(process_handle, &pmc, sizeof(pmc))) {
-            // If we can get memory info, process is genuinely running
+        // For multi-stream scenarios, be more tolerant of temporary resource pressure
+        // Only do additional checks if we have reason to suspect the process is dead
+        if (wait_result == WAIT_TIMEOUT) {
+            // Process handle is not signaled, so process is likely alive
+            // Skip resource-intensive checks that can fail under load
             return true;
         }
         
-        // Final check: Try to query process information
+        // If we get here, something unusual happened with the wait
+        // Do a final validation to be sure
         DWORD process_id = GetProcessId(process_handle);
         if (process_id == 0) {
             AddDebugLog(L"StreamProcessUtils: Cannot get process ID for " + debug_name);

@@ -35,6 +35,7 @@ private:
     std::map<std::wstring, HANDLE> stream_jobs_;         // Job objects per stream
     std::map<std::wstring, HANDLE> stream_processes_;    // Process handles per stream
     std::map<std::wstring, std::chrono::steady_clock::time_point> stream_start_times_;
+    std::map<std::wstring, int> stream_health_failures_; // Track consecutive health check failures
     std::atomic<int> active_streams_{0};
     std::atomic<int> total_streams_created_{0};
     
