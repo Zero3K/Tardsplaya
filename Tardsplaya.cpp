@@ -111,6 +111,7 @@ std::vector<std::wstring> g_favorites;
 std::wstring g_playerPath = L"mpv.exe";
 std::wstring g_playerArg = L"-";
 bool g_enableLogging = true;
+bool g_verboseDebug = false; // Enable verbose debug output for troubleshooting
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
 
@@ -212,6 +213,12 @@ void AddLog(const std::wstring& msg) {
     ListView_InsertItem(g_hLogList, &item);
     ListView_SetItemText(g_hLogList, item.iItem, 1, const_cast<LPWSTR>(msg.c_str()));
     if (g_logAutoScroll) ListView_EnsureVisible(g_hLogList, item.iItem, FALSE);
+}
+
+// Add verbose debug logging function
+void AddDebugLog(const std::wstring& msg) {
+    if (!g_verboseDebug) return;
+    AddLog(L"[DEBUG] " + msg);
 }
 
 void LoadFavorites() {
@@ -753,19 +760,29 @@ void LoadChannel(StreamTab& tab) {
 }
 
 void StopStream(StreamTab& tab, bool userInitiated = false) {
+    AddDebugLog(L"StopStream: Starting for channel=" + tab.channel + 
+               L", userInitiated=" + std::to_wstring(userInitiated) + 
+               L", isStreaming=" + std::to_wstring(tab.isStreaming));
+    
     if (tab.isStreaming) {
+        AddDebugLog(L"StopStream: Setting cancel token for " + tab.channel);
         tab.cancelToken = true;
         if (userInitiated) {
             tab.userRequestedStop = true;
+            AddDebugLog(L"StopStream: User requested stop set for " + tab.channel);
         }
         if (tab.streamThread.joinable()) {
+            AddDebugLog(L"StopStream: Joining stream thread for " + tab.channel);
             tab.streamThread.join();
+            AddDebugLog(L"StopStream: Stream thread joined for " + tab.channel);
         }
         tab.isStreaming = false;
         tab.playerStarted = false;
         
         // Decrement active stream count for resource management
         g_activeStreamCount--;
+        AddDebugLog(L"StopStream: Active stream count decremented to " + std::to_wstring(g_activeStreamCount) + 
+                   L" for " + tab.channel);
         
         EnableWindow(tab.hWatchBtn, TRUE);
         EnableWindow(tab.hStopBtn, FALSE);
@@ -789,7 +806,11 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
 }
 
 void WatchStream(StreamTab& tab, size_t tabIndex) {
+    AddDebugLog(L"WatchStream: Starting for tab " + std::to_wstring(tabIndex) + 
+               L", channel=" + tab.channel + L", isStreaming=" + std::to_wstring(tab.isStreaming));
+    
     if (tab.isStreaming) {
+        AddDebugLog(L"WatchStream: Stream already running, stopping first for tab " + std::to_wstring(tabIndex));
         StopStream(tab, true); // User clicked watch to stop current stream
         return;
     }
@@ -844,18 +865,27 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         int additionalDelay = g_activeStreamCount * 500; // Extra 500ms per active stream
         int totalDelay = minimumDelay + additionalDelay;
         
+        AddDebugLog(L"WatchStream: Stream coordination - ActiveStreams=" + std::to_wstring(g_activeStreamCount) + 
+                   L", TimeSinceLastStart=" + std::to_wstring(timeSinceLastStart) + 
+                   L"ms, RequiredDelay=" + std::to_wstring(totalDelay) + L"ms for tab " + std::to_wstring(tabIndex));
+        
         if (timeSinceLastStart < totalDelay) {
             int waitTime = totalDelay - (int)timeSinceLastStart;
             AddLog(L"Waiting " + std::to_wstring(waitTime) + L"ms before starting stream to prevent resource conflicts...");
+            AddDebugLog(L"WatchStream: Sleeping for " + std::to_wstring(waitTime) + L"ms for tab " + std::to_wstring(tabIndex));
             std::this_thread::sleep_for(std::chrono::milliseconds(waitTime));
         }
         
         g_lastStreamStart = std::chrono::steady_clock::now();
+        AddDebugLog(L"WatchStream: Stream start timing complete for tab " + std::to_wstring(tabIndex));
     }
     
     // Reset cancel token and user requested stop flag
     tab.cancelToken = false;
     tab.userRequestedStop = false;
+    
+    AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
+               L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -874,12 +904,16 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         tabIndex // tab index for identifying which stream to auto-stop
     );
     
+    AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));
+    
     tab.isStreaming = true;
     tab.playerStarted = false;
     EnableWindow(tab.hWatchBtn, FALSE);
     EnableWindow(tab.hStopBtn, TRUE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
     UpdateStatusBar(L"Chunk Queue: Buffering...");
+    
+    AddDebugLog(L"WatchStream: UI updated, stream starting for tab " + std::to_wstring(tabIndex));
     
     // Set a timer to update the button text after 3 seconds (player should be started by then)
     SetTimer(g_hMainWnd, TIMER_PLAYER_CHECK, 3000, nullptr);
@@ -1302,6 +1336,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case IDM_SETTINGS:
             ShowSettingsDialog();
             break;
+        case IDM_TOGGLE_DEBUG:
+            g_verboseDebug = !g_verboseDebug;
+            AddLog(g_verboseDebug ? L"Verbose debug enabled" : L"Verbose debug disabled");
+            break;
         case IDC_FAVORITES_ADD:
             AddFavorite();
             break;
@@ -1339,9 +1377,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_USER + 2: {
         // Auto-stop stream when player exits
         size_t tabIndex = (size_t)wParam;
+        AddDebugLog(L"WM_USER + 2: Auto-stop request for tab " + std::to_wstring(tabIndex) + 
+                   L", streams.size=" + std::to_wstring(g_streams.size()));
         if (tabIndex < g_streams.size() && g_streams[tabIndex].isStreaming) {
+            AddDebugLog(L"WM_USER + 2: Auto-stopping tab " + std::to_wstring(tabIndex) + 
+                       L", channel=" + g_streams[tabIndex].channel);
             StopStream(g_streams[tabIndex]); // Auto-stop, not user-initiated
             AddLog(L"Stream stopped automatically (stream ended).");
+        } else {
+            AddDebugLog(L"WM_USER + 2: Invalid auto-stop request - tab " + std::to_wstring(tabIndex) + 
+                       L" not streaming or out of range");
         }
         break;
     }

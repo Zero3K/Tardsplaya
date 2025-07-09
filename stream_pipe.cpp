@@ -104,19 +104,25 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist, bool
 }
 
 // Returns true if process handle is still alive - with robust checking for multi-stream scenarios
-static bool ProcessStillRunning(HANDLE hProcess) {
+static bool ProcessStillRunning(HANDLE hProcess, const std::wstring& channel_name = L"") {
     if (!hProcess || hProcess == INVALID_HANDLE_VALUE) {
+        AddDebugLog(L"ProcessStillRunning: Invalid handle for " + channel_name);
         return false;
     }
     
     DWORD code = 0;
     if (!GetExitCodeProcess(hProcess, &code)) {
         // GetExitCodeProcess failed - handle might be invalid
+        DWORD error = GetLastError();
+        AddDebugLog(L"ProcessStillRunning: GetExitCodeProcess failed for " + channel_name + 
+                   L", Error=" + std::to_wstring(error));
         return false;
     }
     
     if (code != STILL_ACTIVE) {
         // Process has actually exited
+        AddDebugLog(L"ProcessStillRunning: Process exited with code " + std::to_wstring(code) + 
+                   L" for " + channel_name);
         return false;
     }
     
@@ -125,6 +131,7 @@ static bool ProcessStillRunning(HANDLE hProcess) {
     DWORD waitResult = WaitForSingleObject(hProcess, 0);
     if (waitResult == WAIT_OBJECT_0) {
         // Process handle is signaled, meaning the process has terminated
+        AddDebugLog(L"ProcessStillRunning: Process handle signaled (terminated) for " + channel_name);
         return false;
     }
     
@@ -206,6 +213,9 @@ bool BufferAndPipeStreamToPlayer(
     const std::wstring& channel_name,
     std::atomic<int>* chunk_count
 ) {
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting for " + channel_name + 
+               L", PlayerPath=" + player_path);
+    
     // Seed random number generator for network request staggering
     static bool seeded = false;
     if (!seeded) {
@@ -214,12 +224,22 @@ bool BufferAndPipeStreamToPlayer(
     }
     
     // Add initial delay to spread out concurrent stream starts and reduce resource conflicts
-    std::this_thread::sleep_for(std::chrono::milliseconds(100 + (rand() % 200)));
+    int initial_delay = 100 + (rand() % 200);
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Initial delay " + std::to_wstring(initial_delay) + 
+               L"ms for " + channel_name);
+    std::this_thread::sleep_for(std::chrono::milliseconds(initial_delay));
     
     // 1. Download the master playlist and pick the first media playlist (or use playlist_url directly if it's media)
     std::string master;
     if (cancel_token.load()) return false;
-    if (!HttpGetText(playlist_url, master, &cancel_token)) return false;
+    
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Downloading master playlist for " + channel_name);
+    if (!HttpGetText(playlist_url, master, &cancel_token)) {
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to download master playlist for " + channel_name);
+        return false;
+    }
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Master playlist downloaded, size=" + 
+               std::to_wstring(master.size()) + L" for " + channel_name);
 
     // If this is a master playlist, pick the first stream URL
     std::wstring media_playlist_url = playlist_url;
@@ -233,6 +253,9 @@ bool BufferAndPipeStreamToPlayer(
             break;
         }
     }
+    
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Using media playlist URL for " + channel_name + 
+               L", is_master=" + std::to_wstring(is_master));
 
     // 2. Create a pipe for stdin redirection to the player with larger buffer for multiple streams
     HANDLE hRead = NULL, hWrite = NULL;
@@ -240,12 +263,28 @@ bool BufferAndPipeStreamToPlayer(
     // Use larger pipe buffer when multiple streams might be running
     // This helps prevent pipe buffer overflows that can cause player crashes
     DWORD pipeBufferSize = 65536; // 64KB buffer per stream
-    if (!CreatePipe(&hRead, &hWrite, &sa, pipeBufferSize)) return false;
+    
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Creating pipe with buffer size " + 
+               std::to_wstring(pipeBufferSize) + L" for " + channel_name);
+    
+    if (!CreatePipe(&hRead, &hWrite, &sa, pipeBufferSize)) {
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create pipe for " + channel_name + 
+                   L", Error=" + std::to_wstring(GetLastError()));
+        return false;
+    }
+    
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe created successfully, hRead=" + 
+               std::to_wstring((uintptr_t)hRead) + L", hWrite=" + std::to_wstring((uintptr_t)hWrite) + 
+               L" for " + channel_name);
 
     // Create separate output/error handles for process isolation to prevent conflicts between multiple streams
     HANDLE hStdOut = NULL, hStdErr = NULL;
     HANDLE hNullOut = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
     HANDLE hNullErr = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+    
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Created NULL handles, hNullOut=" + 
+               std::to_wstring((uintptr_t)hNullOut) + L", hNullErr=" + std::to_wstring((uintptr_t)hNullErr) + 
+               L" for " + channel_name);
     
     // Use separate null handles for output/error to prevent interference between multiple players
     hStdOut = (hNullOut != INVALID_HANDLE_VALUE) ? hNullOut : GetStdHandle(STD_OUTPUT_HANDLE);
@@ -253,6 +292,8 @@ bool BufferAndPipeStreamToPlayer(
 
     // 3. Launch the player with stdin redirected and isolated output/error handles
     std::wstring cmd = L"\"" + player_path + L"\" -";
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Player command: " + cmd + L" for " + channel_name);
+    
     STARTUPINFOW si = { sizeof(si) };
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = hRead;
@@ -263,17 +304,29 @@ bool BufferAndPipeStreamToPlayer(
     // Use process creation flags to improve isolation for multiple streams
     DWORD creationFlags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
     
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Creating player process with flags=" + 
+               std::to_wstring(creationFlags) + L" for " + channel_name);
+    
     BOOL ok = CreateProcessW(
         nullptr, (LPWSTR)cmd.c_str(),
         nullptr, nullptr, TRUE, creationFlags, nullptr, nullptr, &si, &pi
     );
+    
     CloseHandle(hRead);
+    
     if (!ok) { 
+        DWORD error = GetLastError();
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create process for " + channel_name + 
+                   L", Error=" + std::to_wstring(error));
         CloseHandle(hWrite); 
         if (hNullOut != INVALID_HANDLE_VALUE) CloseHandle(hNullOut);
         if (hNullErr != INVALID_HANDLE_VALUE) CloseHandle(hNullErr);
         return false; 
     }
+    
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Player process created successfully, PID=" + 
+               std::to_wstring(pi.dwProcessId) + L", Handle=" + std::to_wstring((uintptr_t)pi.hProcess) + 
+               L" for " + channel_name);
 
     // Set the player window title to the channel name (in a separate thread to avoid blocking)
     if (!channel_name.empty()) {
@@ -303,12 +356,20 @@ bool BufferAndPipeStreamToPlayer(
     int random_jitter = rand() % 1000; // 0-1000ms additional jitter
     int poll_interval = base_poll_interval + random_jitter;
     
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting streaming loop for " + channel_name + 
+               L", max_errors=" + std::to_wstring(max_consecutive_errors) + 
+               L", max_failures=" + std::to_wstring(max_process_failures));
+    
     while (!cancel_token.load() && consecutive_process_failures < max_process_failures && !stream_ended) {
         // Check if process is still running, but allow for temporary suspension/resource pressure
-        if (!ProcessStillRunning(pi.hProcess)) {
+        if (!ProcessStillRunning(pi.hProcess, channel_name)) {
             consecutive_process_failures++;
+            AddDebugLog(L"BufferAndPipeStreamToPlayer: Process check failed " + 
+                       std::to_wstring(consecutive_process_failures) + L"/" + 
+                       std::to_wstring(max_process_failures) + L" for " + channel_name);
             if (consecutive_process_failures >= max_process_failures) {
                 // Process appears to be genuinely dead after multiple checks
+                AddDebugLog(L"BufferAndPipeStreamToPlayer: Process declared dead for " + channel_name);
                 break;
             }
             // Process might be temporarily suspended - wait and retry
@@ -316,13 +377,20 @@ bool BufferAndPipeStreamToPlayer(
             continue;
         } else {
             // Process is running - reset failure counter
+            if (consecutive_process_failures > 0) {
+                AddDebugLog(L"BufferAndPipeStreamToPlayer: Process recovered, resetting failure count for " + channel_name);
+            }
             consecutive_process_failures = 0;
         }
         std::string playlist;
         if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
             consecutive_errors++;
+            AddDebugLog(L"BufferAndPipeStreamToPlayer: Playlist download failed " + 
+                       std::to_wstring(consecutive_errors) + L"/" + 
+                       std::to_wstring(max_consecutive_errors) + L" for " + channel_name);
             if (consecutive_errors > max_consecutive_errors) {
                 // Too many consecutive errors - likely stream is down or network issues
+                AddDebugLog(L"BufferAndPipeStreamToPlayer: Too many consecutive errors, stopping for " + channel_name);
                 break;
             }
             std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -334,8 +402,12 @@ bool BufferAndPipeStreamToPlayer(
         bool playlist_ended = false;
         auto segments = ParseSegments(playlist, &playlist_ended);
         if (playlist_ended) {
+            AddDebugLog(L"BufferAndPipeStreamToPlayer: Stream ended marker found for " + channel_name);
             stream_ended = true;
         }
+        
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Found " + std::to_wstring(segments.size()) + 
+                   L" segments, ended=" + std::to_wstring(playlist_ended) + L" for " + channel_name);
 
         size_t new_segments = 0;
         for (auto& seg : segments) {
@@ -352,11 +424,14 @@ bool BufferAndPipeStreamToPlayer(
             while (seg_attempts < 3 && !HttpGetBinary(seg_url, segment_data, 1, &cancel_token)) {
                 if (cancel_token.load()) break;
                 // Only check process health on segment download failures to reduce overhead
-                if (seg_attempts > 0 && !ProcessStillRunning(pi.hProcess)) {
+                if (seg_attempts > 0 && !ProcessStillRunning(pi.hProcess, channel_name)) {
                     consecutive_process_failures++;
+                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Process failed during segment download for " + channel_name);
                     if (consecutive_process_failures >= max_process_failures) break;
                 }
                 seg_attempts++;
+                AddDebugLog(L"BufferAndPipeStreamToPlayer: Segment download attempt " + 
+                           std::to_wstring(seg_attempts) + L" failed for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(600));
             }
             if (consecutive_process_failures >= max_process_failures) break;
@@ -372,11 +447,14 @@ bool BufferAndPipeStreamToPlayer(
                 // Once buffer is filled, start writing to player
                 if (!started && (int)segment_buffer.size() >= buffer_segments) {
                     started = true;
+                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting to write buffer (" + 
+                               std::to_wstring(segment_buffer.size()) + L" segments) to player for " + channel_name);
                     for (auto& buf : segment_buffer) {
                         if (cancel_token.load()) break;
                         // Check process health before writing each buffer segment
-                        if (!ProcessStillRunning(pi.hProcess)) {
+                        if (!ProcessStillRunning(pi.hProcess, channel_name)) {
                             consecutive_process_failures++;
+                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Process failed during buffer write for " + channel_name);
                             if (consecutive_process_failures >= max_process_failures) break;
                             // Process might be temporarily suspended - wait briefly and continue
                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -387,6 +465,9 @@ bool BufferAndPipeStreamToPlayer(
                         if (!WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr)) {
                             // Pipe broken - player likely crashed or exited unexpectedly
                             // Exit the streaming loop to avoid further errors
+                            DWORD error = GetLastError();
+                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe write failed for " + channel_name + 
+                                       L", Error=" + std::to_wstring(error));
                             consecutive_process_failures = max_process_failures; // Force exit
                             goto streaming_cleanup;
                         }
@@ -394,6 +475,9 @@ bool BufferAndPipeStreamToPlayer(
                         if (written != buf.size()) {
                             // Partial write - pipe may be full or player struggling
                             // This could indicate resource contention with multiple streams
+                            AddDebugLog(L"BufferAndPipeStreamToPlayer: Partial write for " + channel_name + 
+                                       L", Expected=" + std::to_wstring(buf.size()) + 
+                                       L", Written=" + std::to_wstring(written));
                             break;
                         }
                         // Small delay between segments when writing initial buffer
@@ -409,8 +493,9 @@ bool BufferAndPipeStreamToPlayer(
                 } else if (started) {
                     if (cancel_token.load()) break;
                     // Check process health before writing
-                    if (!ProcessStillRunning(pi.hProcess)) {
+                    if (!ProcessStillRunning(pi.hProcess, channel_name)) {
                         consecutive_process_failures++;
+                        AddDebugLog(L"BufferAndPipeStreamToPlayer: Process failed during segment write for " + channel_name);
                         if (consecutive_process_failures >= max_process_failures) break;
                         // Process might be temporarily suspended - wait briefly and continue
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -422,6 +507,9 @@ bool BufferAndPipeStreamToPlayer(
                     if (!WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr)) {
                         // Pipe broken - player likely crashed or exited unexpectedly
                         // Exit the streaming loop to avoid further errors
+                        DWORD error = GetLastError();
+                        AddDebugLog(L"BufferAndPipeStreamToPlayer: Pipe write failed during streaming for " + channel_name + 
+                                   L", Error=" + std::to_wstring(error));
                         consecutive_process_failures = max_process_failures; // Force exit
                         goto streaming_cleanup;
                     }
@@ -430,6 +518,9 @@ bool BufferAndPipeStreamToPlayer(
                         // Partial write - pipe may be full or player struggling
                         // This could indicate resource contention with multiple streams
                         // Continue but don't remove the segment so it can be retried
+                        AddDebugLog(L"BufferAndPipeStreamToPlayer: Partial write during streaming for " + channel_name + 
+                                   L", Expected=" + std::to_wstring(buf.size()) + 
+                                   L", Written=" + std::to_wstring(written));
                         std::this_thread::sleep_for(std::chrono::milliseconds(100));
                         continue;
                     }
@@ -453,9 +544,14 @@ bool BufferAndPipeStreamToPlayer(
     }
 
 streaming_cleanup:
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Cleanup starting for " + channel_name + 
+               L", stream_ended=" + std::to_wstring(stream_ended) + 
+               L", process_failures=" + std::to_wstring(consecutive_process_failures));
+    
     // 5. Cleanup: close write pipe, let player exit
     CloseHandle(hWrite);
-    if (ProcessStillRunning(pi.hProcess)) {
+    if (ProcessStillRunning(pi.hProcess, channel_name)) {
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Terminating player process for " + channel_name);
         // Ask player to exit
         TerminateProcess(pi.hProcess, 0);
     }
@@ -470,5 +566,7 @@ streaming_cleanup:
     // Return false for all other cases (network errors, player crashes, user cancellation)
     // User cancellation is handled separately via user_requested_stop flag
     // Also return false if we hit max process failures (likely player crash/resource issues)
-    return stream_ended && consecutive_process_failures < max_process_failures;
+    bool result = stream_ended && consecutive_process_failures < max_process_failures;
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Returning " + std::to_wstring(result) + L" for " + channel_name);
+    return result;
 }
