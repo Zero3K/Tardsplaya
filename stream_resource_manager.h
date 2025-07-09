@@ -18,12 +18,12 @@
 // This addresses the resource contention issues that cause streams to interfere with each other
 
 struct StreamResourceQuota {
-    DWORD max_memory_mb = 512;          // Increased memory limit for video rendering
-    DWORD max_handles = 100;            // Increased handles for graphics resources
-    DWORD max_threads = 8;              // Increased threads for media processing
+    DWORD max_memory_mb = 512;          // Memory limit for video rendering
+    DWORD max_handles = 100;            // Handles for graphics resources
+    DWORD max_threads = 8;              // Threads for media processing
     DWORD pipe_buffer_size = 65536;     // 64KB pipe buffer per stream
     DWORD process_priority = NORMAL_PRIORITY_CLASS;
-    bool use_job_object = false;        // Disable job objects to avoid graphics interference
+    bool use_job_object = true;         // Enable job objects for proper resource isolation
 };
 
 class StreamResourceManager {
@@ -93,6 +93,9 @@ namespace StreamProcessUtils {
         HANDLE stdout_handle = nullptr,
         HANDLE stderr_handle = nullptr
     );
+    
+    // Resume process after job assignment (for processes created suspended)
+    bool ResumeProcessAfterJobAssignment(HANDLE thread_handle, const std::wstring& stream_id);
     
     // Check if process is genuinely running (not just suspended due to resource pressure)
     bool IsProcessGenuinelyRunning(HANDLE process_handle, const std::wstring& debug_name = L"");

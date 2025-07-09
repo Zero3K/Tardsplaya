@@ -310,6 +310,12 @@ bool BufferAndPipeStreamToPlayer(
         return false;
     }
     
+    // Resume process after job assignment (if it was created suspended)
+    if (quota.use_job_object && !StreamProcessUtils::ResumeProcessAfterJobAssignment(pi.hThread, channel_name)) {
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to resume process after job assignment for " + channel_name);
+        // Continue anyway as the process might not have been created suspended
+    }
+    
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Player process created and assigned to resource manager, PID=" + 
                std::to_wstring(pi.dwProcessId) + L" for " + channel_name);
 

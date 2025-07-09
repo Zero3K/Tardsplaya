@@ -30,21 +30,37 @@ bool StreamResourceManager::CreateStreamResources(const std::wstring& stream_id,
     
     HANDLE job_handle = nullptr;
     if (quota.use_job_object) {
-        // Create job object for process isolation - only for debugging/monitoring
+        // Create job object for process isolation following browser patterns
         job_handle = CreateJobObject(nullptr, nullptr);
         if (job_handle) {
-            // Configure minimal job limits to avoid graphics interference
+            // Configure job object with proper limits that allow graphics access
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limits = {};
             job_limits.BasicLimitInformation.LimitFlags = 
-                JOB_OBJECT_LIMIT_ACTIVE_PROCESS;  // Only limit active processes
+                JOB_OBJECT_LIMIT_ACTIVE_PROCESS |           // Limit active processes
+                JOB_OBJECT_LIMIT_PROCESS_MEMORY |           // Limit process memory
+                JOB_OBJECT_LIMIT_JOB_MEMORY |               // Limit job memory
+                JOB_OBJECT_LIMIT_PROCESS_TIME |             // Limit process time
+                JOB_OBJECT_LIMIT_BREAKAWAY_OK;              // Allow breakaway for graphics drivers
             
             job_limits.BasicLimitInformation.ActiveProcessLimit = 1;
-            // Remove memory, thread, and priority limits that can interfere with graphics
+            job_limits.ProcessMemoryLimit = quota.max_memory_mb * 1024 * 1024;  // Convert MB to bytes
+            job_limits.JobMemoryLimit = quota.max_memory_mb * 1024 * 1024;      // Convert MB to bytes
+            job_limits.BasicLimitInformation.PerProcessUserTimeLimit.QuadPart = 0;  // No time limit
+            
+            // Configure UI restrictions to allow graphics access like browsers do
+            JOBOBJECT_BASIC_UI_RESTRICTIONS ui_restrictions = {};
+            ui_restrictions.UIRestrictionsClass = 
+                JOB_OBJECT_UILIMIT_DESKTOP |                // Allow desktop access
+                JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |        // Allow display settings
+                JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS;        // Allow system parameters
             
             SetInformationJobObject(job_handle, JobObjectExtendedLimitInformation, 
                                    &job_limits, sizeof(job_limits));
             
-            AddDebugLog(L"StreamResourceManager: Created minimal job object for stream " + stream_id);
+            SetInformationJobObject(job_handle, JobObjectBasicUIRestrictions,
+                                   &ui_restrictions, sizeof(ui_restrictions));
+            
+            AddDebugLog(L"StreamResourceManager: Created job object with graphics-friendly limits for stream " + stream_id);
         } else {
             AddDebugLog(L"StreamResourceManager: Failed to create job object for stream " + stream_id + 
                        L", Error=" + std::to_wstring(GetLastError()));
@@ -260,11 +276,16 @@ namespace StreamProcessUtils {
             startup_info.hStdError = stderr_handle ? stderr_handle : GetStdHandle(STD_ERROR_HANDLE);
         }
         
-        // Use minimal isolation flags to avoid graphics interference
-        DWORD creation_flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | quota.process_priority;
+        // Use proper process isolation flags following browser security patterns
+        DWORD creation_flags = CREATE_NEW_PROCESS_GROUP |    // Isolate process group
+                              CREATE_NO_WINDOW |             // Hide window
+                              CREATE_BREAKAWAY_FROM_JOB |    // Allow breakaway for graphics drivers
+                              quota.process_priority;        // Use specified priority
         
-        // Remove additional isolation that can interfere with graphics
-        // The CREATE_SEPARATE_WOW_VDM flag can prevent DirectX access
+        // Additional security flags that don't interfere with graphics
+        if (quota.use_job_object) {
+            creation_flags |= CREATE_SUSPENDED;             // Start suspended for job assignment
+        }
         
         AddDebugLog(L"StreamProcessUtils: Creating isolated process for stream " + stream_id + 
                    L", flags=" + std::to_wstring(creation_flags));
@@ -285,6 +306,13 @@ namespace StreamProcessUtils {
         if (success) {
             AddDebugLog(L"StreamProcessUtils: Process created successfully for stream " + stream_id + 
                        L", PID=" + std::to_wstring(process_info->dwProcessId));
+            
+            // Resume the process after job assignment (if it was created suspended)
+            if (quota.use_job_object && (creation_flags & CREATE_SUSPENDED)) {
+                // The process will be resumed by the caller after job assignment
+                AddDebugLog(L"StreamProcessUtils: Process created suspended for job assignment");
+            }
+            
             return true;
         } else {
             DWORD error = GetLastError();
@@ -336,6 +364,25 @@ namespace StreamProcessUtils {
         
         // Process appears to be running
         return true;
+    }
+    
+    bool ResumeProcessAfterJobAssignment(HANDLE thread_handle, const std::wstring& stream_id) {
+        if (!thread_handle || thread_handle == INVALID_HANDLE_VALUE) {
+            AddDebugLog(L"StreamProcessUtils: Invalid thread handle for resume " + stream_id);
+            return false;
+        }
+        
+        // Resume the main thread after job assignment
+        DWORD resume_count = ResumeThread(thread_handle);
+        if (resume_count != (DWORD)-1) {
+            AddDebugLog(L"StreamProcessUtils: Successfully resumed process thread for stream " + stream_id);
+            return true;
+        } else {
+            DWORD error = GetLastError();
+            AddDebugLog(L"StreamProcessUtils: Failed to resume process thread for stream " + stream_id + 
+                       L", Error=" + std::to_wstring(error));
+            return false;
+        }
     }
     
     void TerminateProcessGracefully(HANDLE process_handle, DWORD timeout_ms) {
