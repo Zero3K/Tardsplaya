@@ -844,6 +844,24 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     std::wstring url = it->second;
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L")");
     
+    // Log current stream status for debugging multi-stream issues
+    int active_streams = 0;
+    std::wstring active_channels;
+    for (size_t i = 0; i < g_streams.size(); i++) {
+        if (g_streams[i].isStreaming) {
+            active_streams++;
+            active_channels += L" [" + std::to_wstring(i) + L"]:" + g_streams[i].channel;
+        }
+    }
+    AddDebugLog(L"WatchStream: Starting new stream " + tab.channel + L" when " + std::to_wstring(active_streams) + 
+               L" streams already active:" + active_channels);
+    
+    // Add small delay between stream starts to reduce resource contention
+    if (active_streams > 0) {
+        AddDebugLog(L"WatchStream: Adding startup delay for multi-stream scenario");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000 + active_streams * 500));
+    }
+    
     // Reset cancel token and user requested stop flag
     tab.cancelToken = false;
     tab.userRequestedStop = false;

@@ -27,9 +27,11 @@ private:
     std::atomic<bool> stream_ended;
     std::thread server_thread;
     std::atomic<size_t> buffer_size;
+    std::atomic<int> active_connections;
+    static const int MAX_CONNECTIONS = 2; // Limit concurrent connections per stream
     
 public:
-    StreamHttpServer() : listen_socket(INVALID_SOCKET), port(0), running(false), stream_ended(false), buffer_size(0) {
+    StreamHttpServer() : listen_socket(INVALID_SOCKET), port(0), running(false), stream_ended(false), buffer_size(0), active_connections(0) {
         WSADATA wsaData;
         WSAStartup(MAKEWORD(2, 2), &wsaData);
     }
@@ -109,9 +111,22 @@ private:
             int result = select(0, &read_fds, nullptr, nullptr, &timeout);
             
             if (result > 0 && FD_ISSET(listen_socket, &read_fds)) {
-                SOCKET client_socket = accept(listen_socket, nullptr, nullptr);
-                if (client_socket != INVALID_SOCKET) {
-                    std::thread([this, client_socket]() { HandleClient(client_socket); }).detach();
+                // Limit concurrent connections to prevent resource exhaustion
+                if (active_connections.load() < MAX_CONNECTIONS) {
+                    SOCKET client_socket = accept(listen_socket, nullptr, nullptr);
+                    if (client_socket != INVALID_SOCKET) {
+                        active_connections++;
+                        std::thread([this, client_socket]() { 
+                            HandleClient(client_socket); 
+                            active_connections--;
+                        }).detach();
+                    }
+                } else {
+                    // Too many connections, reject new ones to prevent resource exhaustion
+                    SOCKET client_socket = accept(listen_socket, nullptr, nullptr);
+                    if (client_socket != INVALID_SOCKET) {
+                        closesocket(client_socket);
+                    }
                 }
             }
         }
@@ -236,11 +251,45 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
 }
 
 // Returns true if process handle is still alive
-static bool ProcessStillRunning(HANDLE hProcess) {
+static bool ProcessStillRunning(HANDLE hProcess, const std::wstring& debug_context = L"", DWORD pid = 0) {
+    if (hProcess == INVALID_HANDLE_VALUE || hProcess == nullptr) {
+        if (!debug_context.empty()) {
+            AddDebugLog(L"ProcessStillRunning: Invalid handle for " + debug_context);
+        }
+        return false;
+    }
+    
     DWORD code = 0;
-    if (GetExitCodeProcess(hProcess, &code))
-        return code == STILL_ACTIVE;
-    return false;
+    BOOL result = GetExitCodeProcess(hProcess, &code);
+    bool still_active = result && (code == STILL_ACTIVE);
+    
+    // Double-check using PID if we have it
+    if (!still_active && pid != 0) {
+        HANDLE pidHandle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+        if (pidHandle != nullptr) {
+            DWORD pidCode = 0;
+            BOOL pidResult = GetExitCodeProcess(pidHandle, &pidCode);
+            bool pidActive = pidResult && (pidCode == STILL_ACTIVE);
+            CloseHandle(pidHandle);
+            
+            if (pidActive && !still_active) {
+                AddDebugLog(L"ProcessStillRunning: Handle check failed but PID check succeeded for " + debug_context +
+                           L", may be handle corruption");
+                return true; // Trust PID check over handle check
+            }
+        }
+    }
+    
+    if (!debug_context.empty() && !still_active) {
+        AddDebugLog(L"ProcessStillRunning: Process NOT running for " + debug_context + 
+                   L", GetExitCodeProcess=" + std::to_wstring(result) + 
+                   L", ExitCode=" + std::to_wstring(code) + 
+                   L", STILL_ACTIVE=" + std::to_wstring(STILL_ACTIVE) +
+                   L", LastError=" + std::to_wstring(GetLastError()) +
+                   L", PID=" + std::to_wstring(pid));
+    }
+    
+    return still_active;
 }
 
 // Structure for finding windows by process ID
@@ -398,7 +447,8 @@ bool BufferAndPipeStreamToPlayer(
         int consecutive_errors = 0;
         const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
         
-        while (download_running && !cancel_token.load() && ProcessStillRunning(pi.hProcess) && 
+        while (download_running && !cancel_token.load() && 
+               ProcessStillRunning(pi.hProcess, channel_name + L" download_thread", pi.dwProcessId) && 
                consecutive_errors < max_consecutive_errors) {
             
             // Download current playlist
@@ -426,7 +476,7 @@ bool BufferAndPipeStreamToPlayer(
             
             // Download new segments
             for (auto& seg : segments) {
-                if (!download_running || cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
+                if (!download_running || cancel_token.load() || !ProcessStillRunning(pi.hProcess, channel_name + L" segment_download", pi.dwProcessId)) break;
                 if (seen_urls.count(seg)) continue;
                 
                 // Check buffer size before downloading more
@@ -475,14 +525,19 @@ bool BufferAndPipeStreamToPlayer(
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
         
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread ending for " + channel_name);
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread ending for " + channel_name + 
+                   L", download_running=" + std::to_wstring(download_running.load()) +
+                   L", cancel_token=" + std::to_wstring(cancel_token.load()) +
+                   L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" final_check", pi.dwProcessId)) +
+                   L", consecutive_errors=" + std::to_wstring(consecutive_errors) + L"/" + std::to_wstring(max_consecutive_errors));
     });
 
     // Main buffer feeding thread - keeps HTTP server well-fed
     std::thread feeder_thread([&]() {
         bool started = false;
         
-        while (!cancel_token.load() && ProcessStillRunning(pi.hProcess) && 
+        while (!cancel_token.load() && 
+               ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId) && 
                (download_running || !buffer_queue.empty())) {
             
             size_t buffer_size;
@@ -539,7 +594,7 @@ bool BufferAndPipeStreamToPlayer(
 
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Cleanup starting for " + channel_name + 
                L", cancel=" + std::to_wstring(cancel_token.load()) + 
-               L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess)) +
+               L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" cleanup_check", pi.dwProcessId)) +
                L", stream_ended_normally=" + std::to_wstring(stream_ended_normally.load()));
 
     // Signal stream end to HTTP server
@@ -552,7 +607,7 @@ bool BufferAndPipeStreamToPlayer(
     http_server.Stop();
 
     // Cleanup process
-    if (ProcessStillRunning(pi.hProcess)) {
+    if (ProcessStillRunning(pi.hProcess, channel_name + L" termination_check", pi.dwProcessId)) {
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Terminating player process for " + channel_name);
         TerminateProcess(pi.hProcess, 0);
     }
