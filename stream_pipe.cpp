@@ -103,12 +103,33 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist, bool
     return segs;
 }
 
-// Returns true if process handle is still alive
+// Returns true if process handle is still alive - with robust checking for multi-stream scenarios
 static bool ProcessStillRunning(HANDLE hProcess) {
+    if (!hProcess || hProcess == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    
     DWORD code = 0;
-    if (GetExitCodeProcess(hProcess, &code))
-        return code == STILL_ACTIVE;
-    return false;
+    if (!GetExitCodeProcess(hProcess, &code)) {
+        // GetExitCodeProcess failed - handle might be invalid
+        return false;
+    }
+    
+    if (code != STILL_ACTIVE) {
+        // Process has actually exited
+        return false;
+    }
+    
+    // Additional verification: Use WaitForSingleObject with 0 timeout to check if process is signaled
+    // This helps detect processes that are in a zombie state or have crashed but haven't been reaped
+    DWORD waitResult = WaitForSingleObject(hProcess, 0);
+    if (waitResult == WAIT_OBJECT_0) {
+        // Process handle is signaled, meaning the process has terminated
+        return false;
+    }
+    
+    // If we reach here, the process is still running
+    return true;
 }
 
 // Structure for finding windows by process ID
@@ -265,7 +286,31 @@ bool BufferAndPipeStreamToPlayer(
     // Add small random delay for multiple streams to spread out network requests
     std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 500));
 
-    while (!cancel_token.load() && ProcessStillRunning(pi.hProcess) && !stream_ended) {
+    // Track consecutive process checks to avoid false positives under resource pressure
+    int consecutive_process_failures = 0;
+    const int max_process_failures = 3; // Allow 3 consecutive failures before giving up
+    
+    // Detect if multiple streams might be running and adjust polling frequency
+    // Use a longer random delay to spread out network requests more when system is under load
+    int base_poll_interval = 2000; // 2 seconds base
+    int random_jitter = rand() % 1000; // 0-1000ms additional jitter
+    int poll_interval = base_poll_interval + random_jitter;
+    
+    while (!cancel_token.load() && consecutive_process_failures < max_process_failures && !stream_ended) {
+        // Check if process is still running, but allow for temporary suspension/resource pressure
+        if (!ProcessStillRunning(pi.hProcess)) {
+            consecutive_process_failures++;
+            if (consecutive_process_failures >= max_process_failures) {
+                // Process appears to be genuinely dead after multiple checks
+                break;
+            }
+            // Process might be temporarily suspended - wait and retry
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            continue;
+        } else {
+            // Process is running - reset failure counter
+            consecutive_process_failures = 0;
+        }
         std::string playlist;
         if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
             consecutive_errors++;
@@ -287,7 +332,9 @@ bool BufferAndPipeStreamToPlayer(
 
         size_t new_segments = 0;
         for (auto& seg : segments) {
-            if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
+            if (cancel_token.load()) break;
+            // Use less aggressive process checking in the inner loop
+            if (consecutive_process_failures >= max_process_failures) break;
             if (downloaded.count(seg)) continue;
             downloaded.insert(seg);
 
@@ -296,10 +343,16 @@ bool BufferAndPipeStreamToPlayer(
             std::vector<char> segment_data;
             int seg_attempts = 0;
             while (seg_attempts < 3 && !HttpGetBinary(seg_url, segment_data, 1, &cancel_token)) {
-                if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
+                if (cancel_token.load()) break;
+                // Only check process health on segment download failures to reduce overhead
+                if (seg_attempts > 0 && !ProcessStillRunning(pi.hProcess)) {
+                    consecutive_process_failures++;
+                    if (consecutive_process_failures >= max_process_failures) break;
+                }
                 seg_attempts++;
                 std::this_thread::sleep_for(std::chrono::milliseconds(600));
             }
+            if (consecutive_process_failures >= max_process_failures) break;
             if (!segment_data.empty()) {
                 segment_buffer.push_back(std::move(segment_data));
                 new_segments++;
@@ -313,12 +366,21 @@ bool BufferAndPipeStreamToPlayer(
                 if (!started && (int)segment_buffer.size() >= buffer_segments) {
                     started = true;
                     for (auto& buf : segment_buffer) {
-                        if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
+                        if (cancel_token.load()) break;
+                        // Check process health before writing each buffer segment
+                        if (!ProcessStillRunning(pi.hProcess)) {
+                            consecutive_process_failures++;
+                            if (consecutive_process_failures >= max_process_failures) break;
+                            // Process might be temporarily suspended - wait briefly and continue
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            continue;
+                        }
                         DWORD written = 0;
                         // Check for write errors that could indicate player crash/exit
                         if (!WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr)) {
                             // Pipe broken - player likely crashed or exited unexpectedly
                             // Exit the streaming loop to avoid further errors
+                            consecutive_process_failures = max_process_failures; // Force exit
                             goto streaming_cleanup;
                         }
                         // Verify we wrote the expected amount
@@ -331,19 +393,29 @@ bool BufferAndPipeStreamToPlayer(
                         // This helps prevent overwhelming the player with multiple concurrent streams
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
+                    if (consecutive_process_failures >= max_process_failures) break;
                     segment_buffer.clear();
                     // Update chunk count after clearing buffer
                     if (chunk_count) {
                         *chunk_count = (int)segment_buffer.size();
                     }
                 } else if (started) {
-                    if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
+                    if (cancel_token.load()) break;
+                    // Check process health before writing
+                    if (!ProcessStillRunning(pi.hProcess)) {
+                        consecutive_process_failures++;
+                        if (consecutive_process_failures >= max_process_failures) break;
+                        // Process might be temporarily suspended - wait briefly and continue
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        continue;
+                    }
                     auto& buf = segment_buffer.front();
                     DWORD written = 0;
                     // Check for write errors that could indicate player crash/exit
                     if (!WriteFile(hWrite, buf.data(), (DWORD)buf.size(), &written, nullptr)) {
                         // Pipe broken - player likely crashed or exited unexpectedly
                         // Exit the streaming loop to avoid further errors
+                        consecutive_process_failures = max_process_failures; // Force exit
                         goto streaming_cleanup;
                     }
                     // Verify we wrote the expected amount
@@ -363,14 +435,14 @@ bool BufferAndPipeStreamToPlayer(
             }
         }
 
-        if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
+        if (cancel_token.load() || consecutive_process_failures >= max_process_failures) break;
         if (segments.empty() && !stream_ended) { // No segments but stream hasn't ended - continue polling
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval));
             continue;
         }
 
-        // Wait for a few seconds before polling playlist again
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        // Wait before polling playlist again - use adaptive interval to reduce load
+        std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval));
     }
 
 streaming_cleanup:
@@ -390,5 +462,6 @@ streaming_cleanup:
     // Return true only if stream ended normally (with #EXT-X-ENDLIST)
     // Return false for all other cases (network errors, player crashes, user cancellation)
     // User cancellation is handled separately via user_requested_stop flag
-    return stream_ended;
+    // Also return false if we hit max process failures (likely player crash/resource issues)
+    return stream_ended && consecutive_process_failures < max_process_failures;
 }
