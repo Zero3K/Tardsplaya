@@ -16,7 +16,7 @@
 #include <mutex>
 #include "tlsclient/tlsclient.h"
 
-// Simple HTTP server for localhost streaming
+// Robust HTTP server for localhost streaming with persistent buffering
 class StreamHttpServer {
 private:
     SOCKET listen_socket;
@@ -26,9 +26,10 @@ private:
     std::mutex queue_mutex;
     std::atomic<bool> stream_ended;
     std::thread server_thread;
+    std::atomic<size_t> buffer_size;
     
 public:
-    StreamHttpServer() : listen_socket(INVALID_SOCKET), port(0), running(false), stream_ended(false) {
+    StreamHttpServer() : listen_socket(INVALID_SOCKET), port(0), running(false), stream_ended(false), buffer_size(0) {
         WSADATA wsaData;
         WSAStartup(MAKEWORD(2, 2), &wsaData);
     }
@@ -81,6 +82,16 @@ public:
     void AddData(const std::vector<char>& data) {
         std::lock_guard<std::mutex> lock(queue_mutex);
         data_queue.push(data);
+        buffer_size += data.size();
+    }
+    
+    size_t GetBufferSize() const {
+        return buffer_size.load();
+    }
+    
+    size_t GetQueueLength() const {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        return data_queue.size();
     }
     
     void SetStreamEnded() {
@@ -120,24 +131,24 @@ private:
             "\r\n";
         send(client_socket, response.c_str(), (int)response.length(), 0);
         
-        // Stream data from queue
-        while (running) {
+        // Stream data from queue with better buffering
+        while (running && !stream_ended) {
             std::vector<char> data;
             {
                 std::lock_guard<std::mutex> lock(queue_mutex);
                 if (!data_queue.empty()) {
                     data = std::move(data_queue.front());
                     data_queue.pop();
+                    buffer_size -= data.size();
                 }
             }
             
             if (!data.empty()) {
                 int sent = send(client_socket, data.data(), (int)data.size(), 0);
                 if (sent <= 0) break; // Client disconnected
-            } else if (stream_ended) {
-                break; // No more data and stream ended
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                // No data available, wait a bit
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
         
@@ -306,7 +317,7 @@ bool BufferAndPipeStreamToPlayer(
     const std::wstring& channel_name,
     std::atomic<int>* chunk_count
 ) {
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting HTTP server streaming for " + channel_name + L", URL=" + playlist_url);
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting robust HTTP streaming for " + channel_name + L", URL=" + playlist_url);
     
     // 1. Download the master playlist and pick the first media playlist
     std::string master;
@@ -369,110 +380,173 @@ bool BufferAndPipeStreamToPlayer(
     });
     title_thread.detach();
 
-    // 5. Download segments and feed to HTTP server
-    std::vector<std::vector<char>> segment_buffer;
-    segment_buffer.reserve(buffer_segments);
+    // 5. Robust streaming with background download threads and persistent buffering
+    std::queue<std::vector<char>> buffer_queue;
+    std::mutex buffer_mutex;
     std::set<std::wstring> seen_urls;
-    int consecutive_errors = 0;
-    const int max_consecutive_errors = 30; // ~60 seconds of retries (2 sec intervals)
-    bool started = false;
-    int new_segments = 0;
-    bool stream_ended_normally = false;
+    std::atomic<bool> download_running(true);
+    std::atomic<bool> stream_ended_normally(false);
     
-    while (!cancel_token.load() && ProcessStillRunning(pi.hProcess) && consecutive_errors < max_consecutive_errors) {
-        std::string playlist;
-        if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
-            consecutive_errors++;
-            AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to download playlist, errors=" + 
-                       std::to_wstring(consecutive_errors) + L"/" + 
-                       std::to_wstring(max_consecutive_errors) + L" for " + channel_name);
-            if (consecutive_errors > max_consecutive_errors) break;
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-            continue;
-        }
-        consecutive_errors = 0;
+    const int target_buffer_segments = std::max(buffer_segments, 10); // Minimum 10 segments
+    const int max_buffer_segments = target_buffer_segments * 2; // Don't over-buffer
+    
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Target buffer: " + std::to_wstring(target_buffer_segments) + 
+               L" segments, max: " + std::to_wstring(max_buffer_segments) + L" for " + channel_name);
 
-        // Check for HLS stream end marker
-        if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
-            AddDebugLog(L"BufferAndPipeStreamToPlayer: Found stream end marker for " + channel_name);
-            stream_ended_normally = true;
-            break;
-        }
+    // Background playlist monitor and segment downloader thread
+    std::thread download_thread([&]() {
+        int consecutive_errors = 0;
+        const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
+        
+        while (download_running && !cancel_token.load() && ProcessStillRunning(pi.hProcess) && 
+               consecutive_errors < max_consecutive_errors) {
+            
+            // Download current playlist
+            std::string playlist;
+            if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
+                consecutive_errors++;
+                AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread playlist error " + 
+                           std::to_wstring(consecutive_errors) + L"/" + 
+                           std::to_wstring(max_consecutive_errors) + L" for " + channel_name);
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                continue;
+            }
+            consecutive_errors = 0;
 
-        auto segments = ParseSegments(playlist);
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Found " + std::to_wstring(segments.size()) + 
-                   L" segments for " + channel_name);
-
-        size_t new_segments = 0;
-        for (auto& seg : segments) {
-            if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
-            if (seen_urls.count(seg)) continue;
-            seen_urls.insert(seg);
-
-            std::wstring seg_url = JoinUrl(media_playlist_url, seg);
-            std::vector<char> seg_data;
-            bool download_ok = false;
-            for (int retry = 0; retry < 3; ++retry) {
-                if (HttpGetBinary(seg_url, seg_data, 1, &cancel_token)) {
-                    download_ok = true;
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // Check for stream end
+            if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
+                AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread found stream end for " + channel_name);
+                stream_ended_normally = true;
+                break;
             }
 
-            if (download_ok && !seg_data.empty()) {
-                segment_buffer.push_back(std::move(seg_data));
-                new_segments++;
-                AddDebugLog(L"BufferAndPipeStreamToPlayer: Downloaded segment " + std::to_wstring(new_segments) + 
-                           L", buffer_size=" + std::to_wstring(segment_buffer.size()) + L" for " + channel_name);
-                if (chunk_count) {
-                    *chunk_count = (int)segment_buffer.size();
+            auto segments = ParseSegments(playlist);
+            AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread found " + std::to_wstring(segments.size()) + 
+                       L" segments for " + channel_name);
+            
+            // Download new segments
+            for (auto& seg : segments) {
+                if (!download_running || cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
+                if (seen_urls.count(seg)) continue;
+                
+                // Check buffer size before downloading more
+                size_t current_buffer_size;
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex);
+                    current_buffer_size = buffer_queue.size();
+                }
+                
+                if (current_buffer_size >= max_buffer_segments) {
+                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Buffer full (" + std::to_wstring(current_buffer_size) + 
+                               L"), waiting for " + channel_name);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    continue;
+                }
+                
+                seen_urls.insert(seg);
+                std::wstring seg_url = JoinUrl(media_playlist_url, seg);
+                std::vector<char> seg_data;
+                
+                // Download with retries
+                bool download_ok = false;
+                for (int retry = 0; retry < 3; ++retry) {
+                    if (HttpGetBinary(seg_url, seg_data, 1, &cancel_token)) {
+                        download_ok = true;
+                        break;
+                    }
+                    if (!download_running || cancel_token.load()) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 }
 
-                // Once buffer is filled, start feeding data to HTTP server
-                if (!started && (int)segment_buffer.size() >= buffer_segments) {
+                if (download_ok && !seg_data.empty()) {
+                    // Add to buffer
+                    {
+                        std::lock_guard<std::mutex> lock(buffer_mutex);
+                        buffer_queue.push(std::move(seg_data));
+                    }
+                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Downloaded segment, buffer=" + 
+                               std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
+                } else {
+                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to download segment for " + channel_name);
+                }
+            }
+            
+            // Poll playlist more frequently for live streams
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        }
+        
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread ending for " + channel_name);
+    });
+
+    // Main buffer feeding thread - keeps HTTP server well-fed
+    std::thread feeder_thread([&]() {
+        bool started = false;
+        
+        while (!cancel_token.load() && ProcessStillRunning(pi.hProcess) && 
+               (download_running || !buffer_queue.empty())) {
+            
+            size_t buffer_size;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex);
+                buffer_size = buffer_queue.size();
+            }
+            
+            // Wait for initial buffer before starting
+            if (!started) {
+                if (buffer_size >= target_buffer_segments) {
                     started = true;
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting to serve buffered segments (" + 
-                               std::to_wstring(segment_buffer.size()) + L") via HTTP for " + channel_name);
-                    for (auto& buf : segment_buffer) {
-                        if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
-                        http_server.AddData(buf);
-                    }
-                    segment_buffer.clear();
-                    if (chunk_count) {
-                        *chunk_count = 0;
-                    }
-                } else if (started && !segment_buffer.empty()) {
-                    auto& buf = segment_buffer.front();
-                    http_server.AddData(buf);
-                    segment_buffer.erase(segment_buffer.begin());
-                    if (chunk_count) {
-                        *chunk_count = (int)segment_buffer.size();
-                    }
+                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Initial buffer ready (" + 
+                               std::to_wstring(buffer_size) + L" segments), starting feed for " + channel_name);
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    continue;
+                }
+            }
+            
+            // Feed segments to HTTP server
+            std::vector<char> segment_data;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex);
+                if (!buffer_queue.empty()) {
+                    segment_data = std::move(buffer_queue.front());
+                    buffer_queue.pop();
+                }
+            }
+            
+            if (!segment_data.empty()) {
+                http_server.AddData(segment_data);
+                size_t http_buffer = http_server.GetQueueLength();
+                AddDebugLog(L"BufferAndPipeStreamToPlayer: Fed segment to HTTP server, local_buffer=" + 
+                           std::to_wstring(buffer_size - 1) + L", http_buffer=" + 
+                           std::to_wstring(http_buffer) + L" for " + channel_name);
+                
+                if (chunk_count) {
+                    *chunk_count = (int)buffer_size - 1;
                 }
             } else {
-                AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to download segment after retries for " + channel_name);
+                // No segments available, wait
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         }
+        
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Feeder thread ending for " + channel_name);
+    });
 
-        if (cancel_token.load() || !ProcessStillRunning(pi.hProcess)) break;
-        if (segments.empty()) {
-            AddDebugLog(L"BufferAndPipeStreamToPlayer: No segments found, waiting for " + channel_name);
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-            continue;
-        }
-
-        // Wait before polling playlist again
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-    }
+    // Wait for download and feeder threads to complete
+    download_thread.join();
+    download_running = false;
+    feeder_thread.join();
 
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Cleanup starting for " + channel_name + 
                L", cancel=" + std::to_wstring(cancel_token.load()) + 
                L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess)) +
-               L", stream_ended_normally=" + std::to_wstring(stream_ended_normally));
+               L", stream_ended_normally=" + std::to_wstring(stream_ended_normally.load()));
 
     // Signal stream end to HTTP server
     http_server.SetStreamEnded();
+    
+    // Allow time for final data to be sent
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     
     // Stop HTTP server
     http_server.Stop();
@@ -486,5 +560,5 @@ bool BufferAndPipeStreamToPlayer(
     CloseHandle(pi.hProcess);
     
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Cleanup complete for " + channel_name);
-    return stream_ended_normally || cancel_token.load();
+    return stream_ended_normally.load() || cancel_token.load();
 }
