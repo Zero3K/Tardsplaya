@@ -42,7 +42,7 @@ static bool WriteBufferToPipeWithFlowControl(
     const char* data = static_cast<const char*>(buffer);
     size_t totalWritten = 0;
     const size_t CHUNK_SIZE = 32768; // 32KB chunks for better flow control
-    const int MAX_FLOW_CONTROL_RETRIES = 10;
+    const int MAX_FLOW_CONTROL_RETRIES = 30; // High tolerance for multi-stream pipe recovery scenarios
     const int MAX_FATAL_ERROR_RETRIES = 3;
     
     AddDebugLog(L"WriteBufferToPipeWithFlowControl: Starting write for " + streamName + 
@@ -89,6 +89,13 @@ static bool WriteBufferToPipeWithFlowControl(
                                L" bytes for " + streamName + L" (total: " + std::to_wstring(totalWritten) + 
                                L"/" + std::to_wstring(bufferSize) + L")");
                     
+                    // Log recovery success if we had previous failures
+                    if (flowControlRetries > 0 || fatalErrorRetries > 0) {
+                        AddDebugLog(L"WriteBufferToPipeWithFlowControl: Recovered after " + 
+                                   std::to_wstring(flowControlRetries) + L" flow control retries and " + 
+                                   std::to_wstring(fatalErrorRetries) + L" fatal error retries for " + streamName);
+                    }
+                    
                     // If partial write, adjust for next iteration
                     if (written < chunkSize) {
                         break; // Continue with remaining data in next iteration
@@ -105,36 +112,66 @@ static bool WriteBufferToPipeWithFlowControl(
                 AddDebugLog(L"WriteBufferToPipeWithFlowControl: WriteFile failed for " + streamName + 
                            L", Error=" + std::to_wstring(error) + L", chunk size=" + std::to_wstring(chunkSize));
                 
-                // Classify error types
+                // Classify error types - distinguish between temporary and permanent pipe breaks
                 if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA || error == ERROR_INVALID_HANDLE) {
-                    // Fatal pipe errors - player has died or pipe is broken
-                    fatalErrorRetries++;
-                    if (fatalErrorRetries >= MAX_FATAL_ERROR_RETRIES) {
-                        AddDebugLog(L"WriteBufferToPipeWithFlowControl: Fatal pipe error after " + 
-                                   std::to_wstring(fatalErrorRetries) + L" retries for " + streamName);
-                        return false;
-                    }
+                    // Check if this is a temporary pipe break or permanent process death
+                    bool isProcessActuallyDead = !resource_guard.IsProcessHealthy();
                     
-                    // Brief pause before retrying fatal errors
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    if (isProcessActuallyDead) {
+                        // Process is actually dead - this is a fatal error
+                        AddDebugLog(L"WriteBufferToPipeWithFlowControl: Process confirmed dead for " + streamName + 
+                                   L", Error=" + std::to_wstring(error));
+                        return false;
+                    } else {
+                        // Process is alive but pipe is temporarily broken - treat as flow control issue
+                        // This can happen in multi-stream scenarios due to resource pressure
+                        flowControlRetries++;
+                        AddDebugLog(L"WriteBufferToPipeWithFlowControl: Temporary pipe break (process alive), retry " + 
+                                   std::to_wstring(flowControlRetries) + L" for " + streamName + 
+                                   L", Error=" + std::to_wstring(error));
+                        
+                        // Use adaptive delay for pipe recovery - longer delays for broken pipes
+                        DWORD delay = 500 + (flowControlRetries * 200); // 500ms, 700ms, 900ms, etc.
+                        if (resource_manager.GetActiveStreamCount() > 2) {
+                            delay = delay + (resource_manager.GetActiveStreamCount() * 100); // Additional delay per stream
+                        }
+                        
+                        AddDebugLog(L"WriteBufferToPipeWithFlowControl: Pipe recovery delay " + 
+                                   std::to_wstring(delay) + L"ms for " + streamName);
+                        
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                        
+                        // Significantly reduce chunk size for recovery attempts to avoid overwhelming the player
+                        chunkSize = std::max(chunkSize / 8, static_cast<size_t>(512)); // Min 512 bytes for recovery
+                        
+                        // For pipe breaks, also check process health again after the delay
+                        if (!resource_guard.IsProcessHealthy()) {
+                            AddDebugLog(L"WriteBufferToPipeWithFlowControl: Process died during pipe recovery for " + streamName);
+                            return false;
+                        }
+                    }
                     
                 } else if (error == ERROR_INSUFFICIENT_BUFFER || error == ERROR_NOT_READY || 
                           error == ERROR_BUSY || error == ERROR_NOT_ENOUGH_MEMORY) {
                     // Flow control errors - pipe buffer is full or player is busy
                     flowControlRetries++;
                     AddDebugLog(L"WriteBufferToPipeWithFlowControl: Flow control error, retry " + 
-                               std::to_wstring(flowControlRetries) + L" for " + streamName);
+                               std::to_wstring(flowControlRetries) + L" for " + streamName + 
+                               L", Error=" + std::to_wstring(error));
                     
-                    // Adaptive delay based on system load
+                    // Adaptive delay based on system load and stream count
                     DWORD delay = 100 + (flowControlRetries * 50); // 100ms, 150ms, 200ms, etc.
                     if (resource_manager.IsSystemUnderLoad()) {
                         delay *= 2; // Longer delays under load
+                    }
+                    if (resource_manager.GetActiveStreamCount() > 2) {
+                        delay += (resource_manager.GetActiveStreamCount() * 25); // Additional 25ms per stream
                     }
                     
                     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
                     
                     // Reduce chunk size for better flow control
-                    chunkSize = std::max(chunkSize / 2, static_cast<size_t>(4096)); // Min 4KB chunks
+                    chunkSize = std::max(chunkSize / 2, static_cast<size_t>(2048)); // Min 2KB chunks
                     
                 } else {
                     // Unknown error - treat as potential fatal error
