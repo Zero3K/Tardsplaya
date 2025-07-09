@@ -225,10 +225,10 @@ DWORD StreamResourceManager::GetRecommendedStartDelay() const {
 DWORD StreamResourceManager::GetRecommendedPipeBuffer() const {
     int active = active_streams_.load();
     
-    // Start with base buffer size and increase with load
+    // For multi-stream scenarios, use larger buffers to reduce pipe congestion
     DWORD base_size = 65536;  // 64KB
     if (active > 2) {
-        base_size = 32768;    // 32KB when system is loaded
+        base_size = 131072;   // 128KB when multiple streams are active
     }
     
     return base_size;
