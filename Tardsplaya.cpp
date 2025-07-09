@@ -36,6 +36,7 @@ struct StreamTab {
     std::map<std::wstring, std::wstring> standardToOriginalQuality;
     std::thread streamThread;
     std::atomic<bool> cancelToken{false};
+    std::atomic<bool> userRequestedStop{false}; // Track if user explicitly requested stop
     bool isStreaming = false;
     bool playerStarted = false; // Track if player has started successfully
     HANDLE playerProcess = nullptr; // Store player process handle for cleanup
@@ -56,6 +57,7 @@ struct StreamTab {
         , standardToOriginalQuality(std::move(other.standardToOriginalQuality))
         , streamThread(std::move(other.streamThread))
         , cancelToken(other.cancelToken.load())
+        , userRequestedStop(other.userRequestedStop.load())
         , isStreaming(other.isStreaming)
         , playerStarted(other.playerStarted)
         , playerProcess(other.playerProcess)
@@ -80,6 +82,7 @@ struct StreamTab {
             standardToOriginalQuality = std::move(other.standardToOriginalQuality);
             streamThread = std::move(other.streamThread);
             cancelToken = other.cancelToken.load();
+            userRequestedStop = other.userRequestedStop.load();
             isStreaming = other.isStreaming;
             playerStarted = other.playerStarted;
             playerProcess = other.playerProcess;
@@ -743,9 +746,12 @@ void LoadChannel(StreamTab& tab) {
     }
 }
 
-void StopStream(StreamTab& tab) {
+void StopStream(StreamTab& tab, bool userInitiated = false) {
     if (tab.isStreaming) {
         tab.cancelToken = true;
+        if (userInitiated) {
+            tab.userRequestedStop = true;
+        }
         if (tab.streamThread.joinable()) {
             tab.streamThread.join();
         }
@@ -774,7 +780,7 @@ void StopStream(StreamTab& tab) {
 
 void WatchStream(StreamTab& tab) {
     if (tab.isStreaming) {
-        StopStream(tab);
+        StopStream(tab, true); // User clicked watch to stop current stream
         return;
     }
 
@@ -812,8 +818,9 @@ void WatchStream(StreamTab& tab) {
     std::wstring url = it->second;
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L")");
     
-    // Reset cancel token
+    // Reset cancel token and user requested stop flag
     tab.cancelToken = false;
+    tab.userRequestedStop = false;
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -826,7 +833,8 @@ void WatchStream(StreamTab& tab) {
         },
         3, // buffer 3 segments
         tab.channel, // channel name for player window title
-        &tab.chunkCount // chunk count for status display
+        &tab.chunkCount, // chunk count for status display
+        &tab.userRequestedStop // user requested stop flag
     );
     
     tab.isStreaming = true;
@@ -865,7 +873,7 @@ LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             WatchStream(tab);
             break;
         case IDC_STOP:
-            StopStream(tab);
+            StopStream(tab, true); // User clicked stop button
             break;
         case IDC_CHANNEL:
             if (HIWORD(wParam) == EN_CHANGE) {
@@ -1309,7 +1317,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         // Auto-stop stream when player exits
         size_t tabIndex = (size_t)wParam;
         if (tabIndex < g_streams.size() && g_streams[tabIndex].isStreaming) {
-            StopStream(g_streams[tabIndex]);
+            StopStream(g_streams[tabIndex]); // Auto-stop, not user-initiated
             AddLog(L"Stream stopped automatically (stream ended).");
         }
         break;

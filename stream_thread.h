@@ -14,5 +14,6 @@ std::thread StartStreamThread(
     std::function<void(const std::wstring&)> log_callback = nullptr,
     int buffer_segments = 3,
     const std::wstring& channel_name = L"",
-    std::atomic<int>* chunk_count = nullptr
+    std::atomic<int>* chunk_count = nullptr,
+    std::atomic<bool>* user_requested_stop = nullptr
 );
