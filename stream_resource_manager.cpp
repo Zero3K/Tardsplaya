@@ -1,0 +1,364 @@
+#include "stream_resource_manager.h"
+#include "stream_thread.h"
+#include <psapi.h>
+#include <thread>
+#include <algorithm>
+
+// Static member definitions
+std::mutex StreamResourceManager::instance_mutex_;
+std::unique_ptr<StreamResourceManager> StreamResourceManager::instance_;
+
+StreamResourceManager& StreamResourceManager::getInstance() {
+    std::lock_guard<std::mutex> lock(instance_mutex_);
+    if (!instance_) {
+        instance_ = std::unique_ptr<StreamResourceManager>(new StreamResourceManager());
+    }
+    return *instance_;
+}
+
+bool StreamResourceManager::CreateStreamResources(const std::wstring& stream_id, const StreamResourceQuota& quota) {
+    std::lock_guard<std::mutex> lock(resources_mutex_);
+    
+    // Check if resources already exist for this stream
+    if (stream_jobs_.find(stream_id) != stream_jobs_.end()) {
+        AddDebugLog(L"StreamResourceManager: Resources already exist for stream " + stream_id);
+        return true;
+    }
+    
+    AddDebugLog(L"StreamResourceManager: Creating resources for stream " + stream_id + 
+               L", active=" + std::to_wstring(active_streams_.load()));
+    
+    HANDLE job_handle = nullptr;
+    if (quota.use_job_object) {
+        // Create job object for process isolation
+        job_handle = CreateJobObject(nullptr, nullptr);
+        if (job_handle) {
+            // Configure job limits
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limits = {};
+            job_limits.BasicLimitInformation.LimitFlags = 
+                JOB_OBJECT_LIMIT_PROCESS_MEMORY | 
+                JOB_OBJECT_LIMIT_JOB_MEMORY |
+                JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
+                JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+            
+            job_limits.BasicLimitInformation.ProcessMemoryLimit = quota.max_memory_mb * 1024 * 1024;
+            job_limits.JobMemoryLimit = quota.max_memory_mb * 1024 * 1024;
+            job_limits.BasicLimitInformation.ActiveProcessLimit = 1;
+            job_limits.BasicLimitInformation.PriorityClass = quota.process_priority;
+            
+            SetInformationJobObject(job_handle, JobObjectExtendedLimitInformation, 
+                                   &job_limits, sizeof(job_limits));
+            
+            AddDebugLog(L"StreamResourceManager: Created job object for stream " + stream_id);
+        } else {
+            AddDebugLog(L"StreamResourceManager: Failed to create job object for stream " + stream_id + 
+                       L", Error=" + std::to_wstring(GetLastError()));
+        }
+    }
+    
+    stream_jobs_[stream_id] = job_handle;
+    stream_start_times_[stream_id] = std::chrono::steady_clock::now();
+    active_streams_++;
+    total_streams_created_++;
+    
+    AddDebugLog(L"StreamResourceManager: Resources created for stream " + stream_id + 
+               L", active=" + std::to_wstring(active_streams_.load()));
+    
+    return true;
+}
+
+bool StreamResourceManager::AssignProcessToStream(const std::wstring& stream_id, HANDLE process_handle, DWORD process_id) {
+    std::lock_guard<std::mutex> lock(resources_mutex_);
+    
+    auto job_it = stream_jobs_.find(stream_id);
+    if (job_it == stream_jobs_.end()) {
+        AddDebugLog(L"StreamResourceManager: No job object found for stream " + stream_id);
+        return false;
+    }
+    
+    stream_processes_[stream_id] = process_handle;
+    
+    if (job_it->second) {
+        // Assign process to job object for resource isolation
+        if (!AssignProcessToJobObject(job_it->second, process_handle)) {
+            DWORD error = GetLastError();
+            AddDebugLog(L"StreamResourceManager: Failed to assign process to job for stream " + stream_id + 
+                       L", Error=" + std::to_wstring(error));
+            return false;
+        }
+        
+        AddDebugLog(L"StreamResourceManager: Assigned process " + std::to_wstring(process_id) + 
+                   L" to job for stream " + stream_id);
+    }
+    
+    return true;
+}
+
+bool StreamResourceManager::IsStreamProcessHealthy(const std::wstring& stream_id) {
+    std::lock_guard<std::mutex> lock(resources_mutex_);
+    
+    auto process_it = stream_processes_.find(stream_id);
+    if (process_it == stream_processes_.end() || !process_it->second) {
+        return false;
+    }
+    
+    return StreamProcessUtils::IsProcessGenuinelyRunning(process_it->second, stream_id);
+}
+
+void StreamResourceManager::CleanupStreamResources(const std::wstring& stream_id) {
+    std::lock_guard<std::mutex> lock(resources_mutex_);
+    
+    AddDebugLog(L"StreamResourceManager: Cleaning up resources for stream " + stream_id);
+    
+    // Cleanup process handle
+    auto process_it = stream_processes_.find(stream_id);
+    if (process_it != stream_processes_.end()) {
+        if (process_it->second) {
+            StreamProcessUtils::TerminateProcessGracefully(process_it->second);
+        }
+        stream_processes_.erase(process_it);
+    }
+    
+    // Cleanup job object
+    auto job_it = stream_jobs_.find(stream_id);
+    if (job_it != stream_jobs_.end()) {
+        if (job_it->second) {
+            // Terminate all processes in the job
+            TerminateJobObject(job_it->second, 0);
+            CloseHandle(job_it->second);
+        }
+        stream_jobs_.erase(job_it);
+    }
+    
+    // Remove timing info
+    stream_start_times_.erase(stream_id);
+    
+    if (active_streams_.load() > 0) {
+        active_streams_--;
+    }
+    
+    AddDebugLog(L"StreamResourceManager: Cleanup complete for stream " + stream_id + 
+               L", active=" + std::to_wstring(active_streams_.load()));
+}
+
+bool StreamResourceManager::IsSystemUnderLoad() const {
+    int active = active_streams_.load();
+    
+    // System is under load if:
+    // 1. More than 3 active streams
+    // 2. Or if we have streams that started recently (within 30 seconds)
+    if (active > 3) {
+        return true;
+    }
+    
+    if (active > 1) {
+        std::lock_guard<std::mutex> lock(resources_mutex_);
+        auto now = std::chrono::steady_clock::now();
+        for (const auto& [stream_id, start_time] : stream_start_times_) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+            if (elapsed < 30) {
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+DWORD StreamResourceManager::GetRecommendedStartDelay() const {
+    int active = active_streams_.load();
+    
+    if (active == 0) return 100;           // First stream - minimal delay
+    if (active == 1) return 1000;          // Second stream - 1 second
+    if (active == 2) return 2000;          // Third stream - 2 seconds
+    
+    // Additional streams get progressively longer delays
+    return 2000 + (active - 2) * 1000;
+}
+
+DWORD StreamResourceManager::GetRecommendedPipeBuffer() const {
+    int active = active_streams_.load();
+    
+    // Start with base buffer size and increase with load
+    DWORD base_size = 65536;  // 64KB
+    if (active > 2) {
+        base_size = 32768;    // 32KB when system is loaded
+    }
+    
+    return base_size;
+}
+
+DWORD StreamResourceManager::GetRecommendedProcessPriority() const {
+    int active = active_streams_.load();
+    
+    if (active <= 1) return NORMAL_PRIORITY_CLASS;
+    if (active <= 3) return BELOW_NORMAL_PRIORITY_CLASS;
+    
+    return IDLE_PRIORITY_CLASS;
+}
+
+StreamResourceManager::~StreamResourceManager() {
+    std::lock_guard<std::mutex> lock(resources_mutex_);
+    
+    AddDebugLog(L"StreamResourceManager: Destructor called, cleaning up all resources");
+    
+    // Cleanup all remaining resources
+    for (const auto& [stream_id, job_handle] : stream_jobs_) {
+        if (job_handle) {
+            TerminateJobObject(job_handle, 0);
+            CloseHandle(job_handle);
+        }
+    }
+    
+    stream_jobs_.clear();
+    stream_processes_.clear();
+    stream_start_times_.clear();
+}
+
+// StreamResourceGuard implementation
+StreamResourceGuard::StreamResourceGuard(const std::wstring& stream_id, const StreamResourceQuota& quota) 
+    : stream_id_(stream_id) {
+    resources_created_ = StreamResourceManager::getInstance().CreateStreamResources(stream_id, quota);
+    if (!resources_created_) {
+        AddDebugLog(L"StreamResourceGuard: Failed to create resources for stream " + stream_id_);
+    }
+}
+
+StreamResourceGuard::~StreamResourceGuard() {
+    if (resources_created_) {
+        StreamResourceManager::getInstance().CleanupStreamResources(stream_id_);
+    }
+}
+
+bool StreamResourceGuard::AssignProcess(HANDLE process_handle, DWORD process_id) {
+    if (!resources_created_) return false;
+    return StreamResourceManager::getInstance().AssignProcessToStream(stream_id_, process_handle, process_id);
+}
+
+bool StreamResourceGuard::IsProcessHealthy() {
+    if (!resources_created_) return false;
+    return StreamResourceManager::getInstance().IsStreamProcessHealthy(stream_id_);
+}
+
+// StreamProcessUtils implementation
+namespace StreamProcessUtils {
+    
+    bool CreateIsolatedProcess(
+        const std::wstring& command_line,
+        const std::wstring& stream_id,
+        const StreamResourceQuota& quota,
+        PROCESS_INFORMATION* process_info,
+        HANDLE stdin_handle,
+        HANDLE stdout_handle,
+        HANDLE stderr_handle) {
+        
+        if (!process_info) return false;
+        
+        STARTUPINFOW startup_info = {};
+        startup_info.cb = sizeof(startup_info);
+        
+        if (stdin_handle || stdout_handle || stderr_handle) {
+            startup_info.dwFlags = STARTF_USESTDHANDLES;
+            startup_info.hStdInput = stdin_handle;
+            startup_info.hStdOutput = stdout_handle ? stdout_handle : GetStdHandle(STD_OUTPUT_HANDLE);
+            startup_info.hStdError = stderr_handle ? stderr_handle : GetStdHandle(STD_ERROR_HANDLE);
+        }
+        
+        // Use isolation flags for better process separation
+        DWORD creation_flags = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | quota.process_priority;
+        
+        // Add additional isolation for multiple streams
+        if (StreamResourceManager::getInstance().GetActiveStreamCount() > 1) {
+            creation_flags |= CREATE_SEPARATE_WOW_VDM;
+        }
+        
+        AddDebugLog(L"StreamProcessUtils: Creating isolated process for stream " + stream_id + 
+                   L", flags=" + std::to_wstring(creation_flags));
+        
+        BOOL success = CreateProcessW(
+            nullptr,
+            const_cast<LPWSTR>(command_line.c_str()),
+            nullptr, // process security attributes
+            nullptr, // thread security attributes
+            TRUE,    // inherit handles
+            creation_flags,
+            nullptr, // environment
+            nullptr, // current directory
+            &startup_info,
+            process_info
+        );
+        
+        if (success) {
+            AddDebugLog(L"StreamProcessUtils: Process created successfully for stream " + stream_id + 
+                       L", PID=" + std::to_wstring(process_info->dwProcessId));
+            return true;
+        } else {
+            DWORD error = GetLastError();
+            AddDebugLog(L"StreamProcessUtils: Failed to create process for stream " + stream_id + 
+                       L", Error=" + std::to_wstring(error));
+            return false;
+        }
+    }
+    
+    bool IsProcessGenuinelyRunning(HANDLE process_handle, const std::wstring& debug_name) {
+        if (!process_handle || process_handle == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+        
+        // First check: Get exit code
+        DWORD exit_code;
+        if (!GetExitCodeProcess(process_handle, &exit_code)) {
+            AddDebugLog(L"StreamProcessUtils: GetExitCodeProcess failed for " + debug_name);
+            return false;
+        }
+        
+        if (exit_code != STILL_ACTIVE) {
+            AddDebugLog(L"StreamProcessUtils: Process has exited with code " + 
+                       std::to_wstring(exit_code) + L" for " + debug_name);
+            return false;
+        }
+        
+        // Second check: Wait with 0 timeout to see if process is signaled
+        DWORD wait_result = WaitForSingleObject(process_handle, 0);
+        if (wait_result == WAIT_OBJECT_0) {
+            AddDebugLog(L"StreamProcessUtils: Process handle signaled (dead) for " + debug_name);
+            return false;
+        }
+        
+        // Third check: Verify process is responsive (not just suspended)
+        // Get process information to check if it's actually running
+        PROCESS_MEMORY_COUNTERS pmc;
+        if (GetProcessMemoryInfo(process_handle, &pmc, sizeof(pmc))) {
+            // If we can get memory info, process is genuinely running
+            return true;
+        }
+        
+        // Final check: Try to query process information
+        DWORD process_id = GetProcessId(process_handle);
+        if (process_id == 0) {
+            AddDebugLog(L"StreamProcessUtils: Cannot get process ID for " + debug_name);
+            return false;
+        }
+        
+        // Process appears to be running
+        return true;
+    }
+    
+    void TerminateProcessGracefully(HANDLE process_handle, DWORD timeout_ms) {
+        if (!process_handle || process_handle == INVALID_HANDLE_VALUE) {
+            return;
+        }
+        
+        // Check if process is already dead
+        DWORD exit_code;
+        if (GetExitCodeProcess(process_handle, &exit_code) && exit_code != STILL_ACTIVE) {
+            return;
+        }
+        
+        // Try to terminate gracefully first
+        if (TerminateProcess(process_handle, 0)) {
+            // Wait for process to actually terminate
+            WaitForSingleObject(process_handle, timeout_ms);
+        }
+    }
+}
