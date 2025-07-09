@@ -206,20 +206,34 @@ bool BufferAndPipeStreamToPlayer(
     SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
     if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return false;
 
-    // 3. Launch the player with stdin redirected
+    // Create separate output/error handles for process isolation to prevent conflicts between multiple streams
+    HANDLE hStdOut = NULL, hStdErr = NULL;
+    HANDLE hNullOut = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+    HANDLE hNullErr = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+    
+    // Use separate null handles for output/error to prevent interference between multiple players
+    hStdOut = (hNullOut != INVALID_HANDLE_VALUE) ? hNullOut : GetStdHandle(STD_OUTPUT_HANDLE);
+    hStdErr = (hNullErr != INVALID_HANDLE_VALUE) ? hNullErr : GetStdHandle(STD_ERROR_HANDLE);
+
+    // 3. Launch the player with stdin redirected and isolated output/error handles
     std::wstring cmd = L"\"" + player_path + L"\" -";
     STARTUPINFOW si = { sizeof(si) };
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = hRead;
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    si.hStdOutput = hStdOut;
+    si.hStdError = hStdErr;
     PROCESS_INFORMATION pi = {};
     BOOL ok = CreateProcessW(
         nullptr, (LPWSTR)cmd.c_str(),
         nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi
     );
     CloseHandle(hRead);
-    if (!ok) { CloseHandle(hWrite); return false; }
+    if (!ok) { 
+        CloseHandle(hWrite); 
+        if (hNullOut != INVALID_HANDLE_VALUE) CloseHandle(hNullOut);
+        if (hNullErr != INVALID_HANDLE_VALUE) CloseHandle(hNullErr);
+        return false; 
+    }
 
     // Set the player window title to the channel name (in a separate thread to avoid blocking)
     if (!channel_name.empty()) {
@@ -325,6 +339,10 @@ bool BufferAndPipeStreamToPlayer(
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
+    
+    // Cleanup the isolated output/error handles if they were created
+    if (hNullOut != INVALID_HANDLE_VALUE) CloseHandle(hNullOut);
+    if (hNullErr != INVALID_HANDLE_VALUE) CloseHandle(hNullErr);
     
     // Return true only if stream ended normally (with #EXT-X-ENDLIST) or user cancelled
     // Return false if we exited due to network errors or player process died
