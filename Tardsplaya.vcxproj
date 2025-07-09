@@ -84,7 +84,7 @@
       <TargetMachine>MachineX86</TargetMachine>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>comctl32.lib;winhttp.lib;wininet.lib;psapi.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>comctl32.lib;winhttp.lib;wininet.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -101,7 +101,7 @@
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalDependencies>comctl32.lib;winhttp.lib;wininet.lib;psapi.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>comctl32.lib;winhttp.lib;wininet.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -109,7 +109,7 @@
     <ClCompile Include="playlist_parser.cpp" />
     <ClCompile Include="stream_pipe.cpp" />
     <ClCompile Include="stream_resource_manager.cpp" />
-    <ClCompile Include="stream_socket.cpp" />
+
     <ClCompile Include="stream_thread.cpp" />
     <ClCompile Include="Tardsplaya.cpp" />
     <ClCompile Include="tlsclient\tlsclient.cpp" />
@@ -125,7 +125,7 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="stream_pipe.h" />
     <ClInclude Include="stream_resource_manager.h" />
-    <ClInclude Include="stream_socket.h" />
+
     <ClInclude Include="stream_thread.h" />
     <ClInclude Include="tlsclient\tls.h" />
     <ClInclude Include="tlsclient\tlsclient.h" />

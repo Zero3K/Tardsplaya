@@ -2,10 +2,7 @@
 #include <string>
 #include <atomic>
 
-// Launches the player and streams the HLS content via local TCP socket connection.
-// CHANGED: Replaced named pipes with TCP sockets for better multi-stream reliability.
-// TCP sockets provide better flow control and error handling than pipes in multi-stream scenarios.
-// Each stream gets its own TCP port and the media player connects to http://localhost:port/
+// Launches the player and pipes the HLS stream (playlist_url) to its stdin with a buffer.
 // Provides a cancel_token for cooperative cancellation. Returns true on success.
 // Set cancel_token to true to request stop.
 bool BufferAndPipeStreamToPlayer(
