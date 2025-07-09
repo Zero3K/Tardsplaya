@@ -585,8 +585,10 @@ bool BufferAndStreamToPlayerWithMemoryMap(
     
     // 1. Create resource guard for process isolation
     auto& resource_manager = StreamResourceManager::getInstance();
-    auto quota = resource_manager.CreateResourceQuota(channel_name);
-    StreamResourceGuard resource_guard(quota);
+    StreamResourceQuota quota;
+    quota.max_memory_mb = 512;
+    quota.use_job_object = true;
+    StreamResourceGuard resource_guard(channel_name, quota);
     
     if (!resource_guard.IsValid()) {
         AddDebugLog(L"BufferAndStreamToPlayerWithMemoryMap: Failed to create resource guard for " + channel_name);
@@ -644,7 +646,9 @@ bool BufferAndStreamToPlayerWithMemoryMap(
     
     // 5. Launch player process
     std::wstring cmd = L"\"" + player_path + L"\" -";
-    auto quota_settings = resource_manager.CreateResourceQuota(channel_name);
+    StreamResourceQuota quota_settings;
+    quota_settings.max_memory_mb = 512;
+    quota_settings.use_job_object = true;
     
     PROCESS_INFORMATION pi = {};
     if (!StreamProcessUtils::CreateIsolatedProcess(
