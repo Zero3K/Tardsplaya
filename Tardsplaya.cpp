@@ -120,6 +120,7 @@ HINSTANCE g_hInst;
 HWND g_hMainWnd, g_hTab, g_hLogList, g_hStatusBar;
 HWND g_hFavoritesList, g_hFavoritesAdd, g_hFavoritesDelete, g_hFavoritesEdit, g_hCheckVersion;
 HFONT g_hFont = nullptr; // Tahoma font for UI controls
+HACCEL g_hAccel = nullptr; // Accelerator table for hotkeys
 std::vector<StreamTab> g_streams;
 std::vector<std::wstring> g_favorites;
 
@@ -1275,6 +1276,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         HMENU hMenu = LoadMenu(g_hInst, MAKEINTRESOURCE(IDR_MYMENU));
         SetMenu(hwnd, hMenu);
         
+        // Load accelerator table for hotkeys
+        g_hAccel = LoadAccelerators(g_hInst, MAKEINTRESOURCE(IDR_MYACCEL));
+        
         // Create Tahoma font to match original design (Font.Height = -11)
         g_hFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -1500,8 +1504,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     UpdateWindow(hwnd);
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        if (!g_hAccel || !TranslateAccelerator(g_hMainWnd, g_hAccel, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
     }
     return (int)msg.wParam;
 }
