@@ -59,17 +59,18 @@ struct StreamTab {
         , qualityToUrl(std::move(other.qualityToUrl))
         , standardToOriginalQuality(std::move(other.standardToOriginalQuality))
         , streamThread(std::move(other.streamThread))
-        , cancelToken(false)  // Reset to false to prevent cancel token propagation
-        , userRequestedStop(false)  // Reset to false
+        , cancelToken(other.cancelToken.load())  // Preserve cancel state (moves should not happen with reserved capacity)
+        , userRequestedStop(other.userRequestedStop.load())  // Preserve user stop state
         , isStreaming(other.isStreaming)
         , playerStarted(other.playerStarted)
         , playerProcess(other.playerProcess)
         , chunkCount(other.chunkCount.load())
     {
-        // Debug: Log move constructor usage to track vector reallocations
+        // Note: With vector capacity reservation, moves should not happen during normal operation
+        // This move constructor exists for completeness but should not be called for active streams
         std::wstring debug_msg = L"StreamTab move constructor called for channel: " + channel + 
-                                L", old_cancelToken=" + std::to_wstring(other.cancelToken.load()) + 
-                                L", new_cancelToken=false (reset)";
+                                L", cancelToken=" + std::to_wstring(cancelToken.load()) + 
+                                L" (WARNING: move during active streaming should not happen with reserved capacity)";
         OutputDebugStringW(debug_msg.c_str());
         
         other.hChild = nullptr;
@@ -83,8 +84,8 @@ struct StreamTab {
         if (this != &other) {
             // Debug: Log move assignment usage
             std::wstring debug_msg = L"StreamTab move assignment called from " + other.channel + 
-                                    L" to " + channel + L", old_cancelToken=" + 
-                                    std::to_wstring(other.cancelToken.load()) + L", will reset to false";
+                                    L" to " + channel + L", cancelToken=" + 
+                                    std::to_wstring(other.cancelToken.load()) + L" (WARNING: should not happen with reserved capacity)";
             OutputDebugStringW(debug_msg.c_str());
             
             channel = std::move(other.channel);
@@ -96,8 +97,8 @@ struct StreamTab {
             qualityToUrl = std::move(other.qualityToUrl);
             standardToOriginalQuality = std::move(other.standardToOriginalQuality);
             streamThread = std::move(other.streamThread);
-            cancelToken = false;  // Reset to false to prevent cancel token propagation
-            userRequestedStop = false;  // Reset to false
+            cancelToken = other.cancelToken.load();  // Preserve cancel state (moves should not happen)
+            userRequestedStop = other.userRequestedStop.load();  // Preserve user stop state
             isStreaming = other.isStreaming;
             playerStarted = other.playerStarted;
             playerProcess = other.playerProcess;
@@ -1096,8 +1097,10 @@ void AddStreamTab(const std::wstring& channel = L"") {
     g_streams.emplace_back();
     size_t new_capacity = g_streams.capacity();
     if (new_capacity != old_capacity) {
-        AddDebugLog(L"AddStreamTab: VECTOR REALLOCATED - old_capacity=" + std::to_wstring(old_capacity) + 
-                   L", new_capacity=" + std::to_wstring(new_capacity) + L", vector move operations occurred");
+        AddDebugLog(L"AddStreamTab: *** CRITICAL *** VECTOR REALLOCATED - old_capacity=" + std::to_wstring(old_capacity) + 
+                   L", new_capacity=" + std::to_wstring(new_capacity) + L", this will cause cancelToken use-after-free!");
+    } else {
+        AddDebugLog(L"AddStreamTab: No reallocation - capacity stable at " + std::to_wstring(new_capacity));
     }
     StreamTab& tab = g_streams.back();
     HWND hChild = CreateStreamChild(g_hTab, tab, channel.c_str());
@@ -1473,6 +1476,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     
     // Load settings from INI file
     LoadSettings();
+    
+    // Reserve sufficient capacity for streams vector to prevent reallocation
+    // This prevents use-after-free bugs when running threads reference cancelToken
+    g_streams.reserve(20);  // Support up to 20 concurrent streams without reallocation
     
     // Initialize TLS client system for fallback support
     TLSClientHTTP::Initialize();
