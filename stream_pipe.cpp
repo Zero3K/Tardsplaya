@@ -551,7 +551,7 @@ bool BufferAndPipeStreamToPlayer(
                L", PID=" + std::to_wstring(pi.dwProcessId) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
     
     // Set process priority for better multi-stream performance
-    int stream_count = g_active_streams.load();
+    stream_count = g_active_streams.load(); // Update count before setting priority
     if (stream_count > 1) {
         // Lower priority for additional streams to reduce conflicts
         SetPriorityClass(pi.hProcess, BELOW_NORMAL_PRIORITY_CLASS);
