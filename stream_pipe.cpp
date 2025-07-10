@@ -466,6 +466,15 @@ bool BufferAndPipeStreamToPlayer(
     }
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Using media playlist URL=" + media_playlist_url + L" for " + channel_name);
 
+    // Add startup delay for multi-stream scenarios to reduce resource contention
+    int stream_count = g_active_streams.load();
+    if (stream_count > 1) {
+        int delay_ms = (stream_count - 1) * 500; // 500ms delay per additional stream
+        AddDebugLog(L"[ISOLATION] Adding " + std::to_wstring(delay_ms) + L"ms startup delay for stream #" + 
+                   std::to_wstring(stream_count) + L" (" + channel_name + L")");
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
+
     // 2. Create and start HTTP server with detailed port allocation logging
     StreamHttpServer http_server;
     AddDebugLog(L"[HTTP] Attempting to start HTTP server for " + channel_name + L", preferred port=8080");
@@ -486,21 +495,40 @@ bool BufferAndPipeStreamToPlayer(
                    L" instead of 8080 for " + channel_name);
     }
 
-    // 3. Create media player process with localhost URL
+    // 3. Create media player process with localhost URL and proper isolation
     std::wstring localhost_url = L"http://localhost:" + std::to_wstring(server_port) + L"/";
-    std::wstring cmd = L"\"" + player_path + L"\" \"" + localhost_url + L"\"";
+    
+    // Create isolated working directory for this stream to prevent conflicts
+    std::wstring temp_dir = L"C:\\Temp\\Tardsplaya_" + channel_name + L"_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount());
+    CreateDirectoryW(temp_dir.c_str(), nullptr);
+    
+    // Build command with media player isolation parameters
+    std::wstring cmd;
+    if (player_path.find(L"mpc-hc") != std::wstring::npos) {
+        // MPC-HC specific isolation: use different config path and disable instance management
+        cmd = L"\"" + player_path + L"\" \"" + localhost_url + L"\" /new /nofocus";
+    } else if (player_path.find(L"vlc") != std::wstring::npos) {
+        // VLC specific isolation: use different config directory
+        std::wstring vlc_config = temp_dir + L"\\vlc_config";
+        CreateDirectoryW(vlc_config.c_str(), nullptr);
+        cmd = L"\"" + player_path + L"\" \"" + localhost_url + L"\" --intf dummy --no-one-instance --config=" + vlc_config;
+    } else {
+        // Generic media player - basic isolation
+        cmd = L"\"" + player_path + L"\" \"" + localhost_url + L"\"";
+    }
     
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi = {};
     
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Launching player: " + cmd + L" for " + channel_name);
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Launching isolated player: " + cmd + L" for " + channel_name);
+    AddDebugLog(L"[ISOLATION] Working directory: " + temp_dir + L" for " + channel_name);
     
     // Record timing for process creation
     auto start_time = std::chrono::high_resolution_clock::now();
     BOOL success = CreateProcessW(
         nullptr, const_cast<LPWSTR>(cmd.c_str()), nullptr, nullptr, FALSE,
-        CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi
+        CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB, nullptr, temp_dir.c_str(), &si, &pi
     );
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
@@ -509,6 +537,11 @@ bool BufferAndPipeStreamToPlayer(
         DWORD error = GetLastError();
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create process for " + channel_name + 
                    L", Error=" + std::to_wstring(error) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
+        // Clean up temp directory on failure
+        if (!temp_dir.empty()) {
+            std::wstring rmdir_cmd = L"rmdir /s /q \"" + temp_dir + L"\"";
+            _wsystem(rmdir_cmd.c_str());
+        }
         // Decrement stream counter on early exit
         std::lock_guard<std::mutex> lock(g_stream_mutex);
         --g_active_streams;
@@ -516,6 +549,18 @@ bool BufferAndPipeStreamToPlayer(
     }
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Process created successfully for " + channel_name + 
                L", PID=" + std::to_wstring(pi.dwProcessId) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
+    
+    // Set process priority for better multi-stream performance
+    int stream_count = g_active_streams.load();
+    if (stream_count > 1) {
+        // Lower priority for additional streams to reduce conflicts
+        SetPriorityClass(pi.hProcess, BELOW_NORMAL_PRIORITY_CLASS);
+        AddDebugLog(L"[ISOLATION] Set BELOW_NORMAL priority for stream #" + std::to_wstring(stream_count) + L" (" + channel_name + L")");
+    } else {
+        // Normal priority for first stream
+        SetPriorityClass(pi.hProcess, NORMAL_PRIORITY_CLASS);
+        AddDebugLog(L"[ISOLATION] Set NORMAL priority for first stream (" + channel_name + L")");
+    }
     
     // Verify process is actually running immediately after creation
     std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Brief delay for process startup
@@ -534,6 +579,9 @@ bool BufferAndPipeStreamToPlayer(
     std::set<std::wstring> seen_urls;
     std::atomic<bool> download_running(true);
     std::atomic<bool> stream_ended_normally(false);
+    
+    // Store temp directory for cleanup
+    std::wstring temp_dir_for_cleanup = temp_dir;
     
     const int target_buffer_segments = std::max(buffer_segments, 10); // Minimum 10 segments
     const int max_buffer_segments = target_buffer_segments * 2; // Don't over-buffer
@@ -817,6 +865,15 @@ bool BufferAndPipeStreamToPlayer(
     bool user_cancel = cancel_token.load();
     
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Cleanup complete for " + channel_name);
+    
+    // Clean up isolated temp directory
+    if (!temp_dir_for_cleanup.empty()) {
+        AddDebugLog(L"[ISOLATION] Cleaning up temp directory: " + temp_dir_for_cleanup + L" for " + channel_name);
+        // Use system command to remove directory recursively 
+        std::wstring rmdir_cmd = L"rmdir /s /q \"" + temp_dir_for_cleanup + L"\"";
+        _wsystem(rmdir_cmd.c_str());
+    }
+    
     AddDebugLog(L"[STREAMS] Stream ended - " + std::to_wstring(remaining_streams) + L" streams remain active");
     AddDebugLog(L"[STREAMS] Exit reason: normal_end=" + std::to_wstring(normal_end) + 
                L", user_cancel=" + std::to_wstring(user_cancel) + L" for " + channel_name);
