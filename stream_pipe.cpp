@@ -249,7 +249,7 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     return base.substr(0, pos + 1) + rel;
 }
 
-// Parse media segment URLs from m3u8 playlist, filtering out ad segments and unwanted messages
+// Parse media segment URLs from m3u8 playlist, filtering out ad segments
 static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
     std::vector<std::wstring> segs;
     std::istringstream ss(playlist);
@@ -273,70 +273,13 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
                       line.find("midroll") != std::string::npos)) {
                 skip_next_segment = true;
             }
-            // Check for "Preparing Stream" messages
-            else if (line.find("Preparing Stream") != std::string::npos ||
-                     line.find("PREPARING_STREAM") != std::string::npos ||
-                     line.find("preparing-stream") != std::string::npos ||
-                     line.find("PREPARING STREAM") != std::string::npos) {
-                skip_next_segment = true;
-                AddDebugLog(L"[FILTER] Detected 'Preparing Stream' message, skipping next segment");
-            }
-            // Check for "Commercial Break" messages
-            else if (line.find("Commercial Break") != std::string::npos ||
-                     line.find("COMMERCIAL_BREAK") != std::string::npos ||
-                     line.find("commercial-break") != std::string::npos ||
-                     line.find("COMMERCIAL BREAK") != std::string::npos ||
-                     line.find("commercial_break") != std::string::npos) {
-                skip_next_segment = true;
-                AddDebugLog(L"[FILTER] Detected 'Commercial Break' message, skipping next segment");
-            }
-            // Check for additional stream state markers that commonly contain these messages
-            else if (line.find("EXT-X-PROGRAM-DATE-TIME") != std::string::npos) {
-                // Check the next few lines for stream state information
-                std::string current_line = line;
-                std::transform(current_line.begin(), current_line.end(), current_line.begin(), ::tolower);
-                if (current_line.find("preparing") != std::string::npos ||
-                    current_line.find("commercial") != std::string::npos ||
-                    current_line.find("break") != std::string::npos) {
-                    skip_next_segment = true;
-                    AddDebugLog(L"[FILTER] Detected stream state message in program date, skipping next segment");
-                }
-            }
-            // Check for program information tags that might contain these messages
-            else if ((line.find("EXT-X-PROGRAM-INFO") != std::string::npos ||
-                      line.find("EXT-X-MEDIA-SEQUENCE") != std::string::npos ||
-                      line.find("EXT-X-CUE-OUT") != std::string::npos ||
-                      line.find("EXT-X-DATERANGE") != std::string::npos) &&
-                     (line.find("preparing") != std::string::npos ||
-                      line.find("commercial") != std::string::npos ||
-                      line.find("break") != std::string::npos ||
-                      line.find("Preparing") != std::string::npos ||
-                      line.find("Commercial") != std::string::npos ||
-                      line.find("Break") != std::string::npos)) {
-                skip_next_segment = true;
-                AddDebugLog(L"[FILTER] Detected unwanted message in program info, skipping next segment");
-            }
             continue;
         }
         
         // This is a segment URL
         if (skip_next_segment) {
-            // Skip this segment as it contains ad content or unwanted messages
-            AddDebugLog(L"[FILTER] Skipping flagged segment: " + std::wstring(line.begin(), line.end()));
+            // Skip this segment as it contains ad content
             skip_next_segment = false;
-            continue;
-        }
-        
-        // Additional check: filter segment URLs that might contain these messages in their names
-        std::string lower_line = line;
-        std::transform(lower_line.begin(), lower_line.end(), lower_line.begin(), ::tolower);
-        if (lower_line.find("preparing") != std::string::npos ||
-            lower_line.find("commercial") != std::string::npos ||
-            lower_line.find("break") != std::string::npos ||
-            lower_line.find("standby") != std::string::npos ||
-            lower_line.find("intermission") != std::string::npos) {
-            // Skip segments with these keywords in their URLs
-            AddDebugLog(L"[FILTER] Skipping segment with unwanted keyword in URL: " + std::wstring(line.begin(), line.end()));
             continue;
         }
         
