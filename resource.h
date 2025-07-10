@@ -9,8 +9,6 @@
 #define IDM_EXIT            205
 #define IDM_SETTINGS        206
 #define IDM_ABOUT           207
-#define IDM_TOGGLE_DEBUG    208
-#define IDM_TOGGLE_FILE_LOG 209
 
 #define IDD_SETTINGS        300
 
@@ -26,6 +24,8 @@
 #define IDC_PLAYERARGS      1301
 #define IDC_MINIMIZETOTRAY  1302
 #define IDC_BROWSE_PLAYER   1303
+#define IDC_VERBOSE_DEBUG   1304
+#define IDC_LOG_TO_FILE     1305
 #define IDC_LOAD        1101
 #define IDC_QUALITIES   1102
 #define IDC_WATCH       1103
