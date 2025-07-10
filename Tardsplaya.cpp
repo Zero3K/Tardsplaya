@@ -193,6 +193,9 @@ void LoadSettings() {
     
     // Load file logging setting
     g_logToFile = GetPrivateProfileIntW(L"Settings", L"LogToFile", 0, iniPath.c_str()) != 0;
+    
+    // Load verbose debug setting
+    g_verboseDebug = GetPrivateProfileIntW(L"Settings", L"VerboseDebug", 0, iniPath.c_str()) != 0;
 }
 
 void SaveSettings() {
@@ -217,6 +220,9 @@ void SaveSettings() {
     
     // Save file logging setting
     WritePrivateProfileStringW(L"Settings", L"LogToFile", g_logToFile ? L"1" : L"0", iniPath.c_str());
+    
+    // Save verbose debug setting
+    WritePrivateProfileStringW(L"Settings", L"VerboseDebug", g_verboseDebug ? L"1" : L"0", iniPath.c_str());
 }
 
 void AddLog(const std::wstring& msg) {
@@ -1211,6 +1217,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SetDlgItemTextW(hDlg, IDC_PLAYERPATH, g_playerPath.c_str());
         SetDlgItemTextW(hDlg, IDC_PLAYERARGS, g_playerArg.c_str());
         CheckDlgButton(hDlg, IDC_MINIMIZETOTRAY, g_minimizeToTray ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_VERBOSE_DEBUG, g_verboseDebug ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_LOG_TO_FILE, g_logToFile ? BST_CHECKED : BST_UNCHECKED);
         return TRUE;
 
     case WM_COMMAND:
@@ -1247,6 +1255,8 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_playerArg = buffer;
             
             g_minimizeToTray = IsDlgButtonChecked(hDlg, IDC_MINIMIZETOTRAY) == BST_CHECKED;
+            g_verboseDebug = IsDlgButtonChecked(hDlg, IDC_VERBOSE_DEBUG) == BST_CHECKED;
+            g_logToFile = IsDlgButtonChecked(hDlg, IDC_LOG_TO_FILE) == BST_CHECKED;
             
             // Save settings to INI file
             SaveSettings();
@@ -1368,14 +1378,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             break;
         case IDM_SETTINGS:
             ShowSettingsDialog();
-            break;
-        case IDM_TOGGLE_DEBUG:
-            g_verboseDebug = !g_verboseDebug;
-            AddLog(g_verboseDebug ? L"Verbose debug enabled" : L"Verbose debug disabled");
-            break;
-        case IDM_TOGGLE_FILE_LOG:
-            g_logToFile = !g_logToFile;
-            AddLog(g_logToFile ? L"File logging enabled (debug.log)" : L"File logging disabled");
             break;
         case IDC_FAVORITES_ADD:
             AddFavorite();
