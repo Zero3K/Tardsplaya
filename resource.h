@@ -1,6 +1,7 @@
 #pragma once
 
 #define IDR_MYMENU          200
+#define IDR_MYACCEL         210
 #define IDM_NEWSTREAM       201
 #define IDM_CLOSEACTIVE     202
 #define IDM_CLOSEALL        203
