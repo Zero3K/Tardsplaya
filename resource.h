@@ -9,6 +9,7 @@
 #define IDM_SETTINGS        206
 #define IDM_ABOUT           207
 #define IDM_TOGGLE_DEBUG    208
+#define IDM_TOGGLE_FILE_LOG 209
 
 #define IDD_SETTINGS        300
 

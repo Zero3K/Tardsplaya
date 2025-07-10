@@ -12,6 +12,7 @@
 #include <map>
 #include <sstream>
 #include <ctime>
+#include <cstdio>
 #include <regex>
 #include <thread>
 #include <atomic>
@@ -115,6 +116,7 @@ bool g_enableLogging = true;
 bool g_verboseDebug = false; // Enable verbose debug output for troubleshooting
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
+bool g_logToFile = false; // Enable logging to debug.log file
 
 
 
@@ -174,6 +176,9 @@ void LoadSettings() {
     
     // Load minimize to tray setting
     g_minimizeToTray = GetPrivateProfileIntW(L"Settings", L"MinimizeToTray", 0, iniPath.c_str()) != 0;
+    
+    // Load file logging setting
+    g_logToFile = GetPrivateProfileIntW(L"Settings", L"LogToFile", 0, iniPath.c_str()) != 0;
 }
 
 void SaveSettings() {
@@ -195,22 +200,41 @@ void SaveSettings() {
     
     // Save minimize to tray setting
     WritePrivateProfileStringW(L"Settings", L"MinimizeToTray", g_minimizeToTray ? L"1" : L"0", iniPath.c_str());
+    
+    // Save file logging setting
+    WritePrivateProfileStringW(L"Settings", L"LogToFile", g_logToFile ? L"1" : L"0", iniPath.c_str());
 }
 
 void AddLog(const std::wstring& msg) {
     if (!g_enableLogging) return;
-    LVITEM item = { 0 };
-    item.mask = LVIF_TEXT;
-    item.iItem = ListView_GetItemCount(g_hLogList);
+    
+    // Get timestamp for both UI and file logging
     wchar_t timebuf[32];
     time_t now = time(0);
     struct tm tmval;
     localtime_s(&tmval, &now);
     wcsftime(timebuf, 32, L"%H:%M:%S", &tmval);
+    
+    // Add to UI log list
+    LVITEM item = { 0 };
+    item.mask = LVIF_TEXT;
+    item.iItem = ListView_GetItemCount(g_hLogList);
     item.pszText = timebuf;
     ListView_InsertItem(g_hLogList, &item);
     ListView_SetItemText(g_hLogList, item.iItem, 1, const_cast<LPWSTR>(msg.c_str()));
     if (g_logAutoScroll) ListView_EnsureVisible(g_hLogList, item.iItem, FALSE);
+    
+    // Write to file if enabled
+    if (g_logToFile) {
+        FILE* logFile = nullptr;
+        if (_wfopen_s(&logFile, L"debug.log", L"a") == 0 && logFile) {
+            // Get full timestamp for file
+            wchar_t fullTimeBuf[64];
+            wcsftime(fullTimeBuf, 64, L"%Y-%m-%d %H:%M:%S", &tmval);
+            fwprintf(logFile, L"[%s] %s\n", fullTimeBuf, msg.c_str());
+            fclose(logFile);
+        }
+    }
 }
 
 // Add verbose debug logging function
@@ -1322,6 +1346,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             g_verboseDebug = !g_verboseDebug;
             AddLog(g_verboseDebug ? L"Verbose debug enabled" : L"Verbose debug disabled");
             break;
+        case IDM_TOGGLE_FILE_LOG:
+            g_logToFile = !g_logToFile;
+            AddLog(g_logToFile ? L"File logging enabled (debug.log)" : L"File logging disabled");
+            break;
         case IDC_FAVORITES_ADD:
             AddFavorite();
             break;
@@ -1407,6 +1435,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_DESTROY:
         CloseAllTabs();
         RemoveTrayIcon();
+        SaveSettings(); // Save settings including file logging preference
         if (g_hFont) {
             DeleteObject(g_hFont);
             g_hFont = nullptr;
