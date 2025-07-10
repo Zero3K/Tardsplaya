@@ -59,13 +59,19 @@ struct StreamTab {
         , qualityToUrl(std::move(other.qualityToUrl))
         , standardToOriginalQuality(std::move(other.standardToOriginalQuality))
         , streamThread(std::move(other.streamThread))
-        , cancelToken(other.cancelToken.load())
-        , userRequestedStop(other.userRequestedStop.load())
+        , cancelToken(false)  // Reset to false to prevent cancel token propagation
+        , userRequestedStop(false)  // Reset to false
         , isStreaming(other.isStreaming)
         , playerStarted(other.playerStarted)
         , playerProcess(other.playerProcess)
         , chunkCount(other.chunkCount.load())
     {
+        // Debug: Log move constructor usage to track vector reallocations
+        std::wstring debug_msg = L"StreamTab move constructor called for channel: " + channel + 
+                                L", old_cancelToken=" + std::to_wstring(other.cancelToken.load()) + 
+                                L", new_cancelToken=false (reset)";
+        OutputDebugStringW(debug_msg.c_str());
+        
         other.hChild = nullptr;
         other.hQualities = nullptr;
         other.hWatchBtn = nullptr;
@@ -75,6 +81,12 @@ struct StreamTab {
     }
     StreamTab& operator=(StreamTab&& other) noexcept {
         if (this != &other) {
+            // Debug: Log move assignment usage
+            std::wstring debug_msg = L"StreamTab move assignment called from " + other.channel + 
+                                    L" to " + channel + L", old_cancelToken=" + 
+                                    std::to_wstring(other.cancelToken.load()) + L", will reset to false";
+            OutputDebugStringW(debug_msg.c_str());
+            
             channel = std::move(other.channel);
             hChild = other.hChild;
             hQualities = other.hQualities;
@@ -84,8 +96,8 @@ struct StreamTab {
             qualityToUrl = std::move(other.qualityToUrl);
             standardToOriginalQuality = std::move(other.standardToOriginalQuality);
             streamThread = std::move(other.streamThread);
-            cancelToken = other.cancelToken.load();
-            userRequestedStop = other.userRequestedStop.load();
+            cancelToken = false;  // Reset to false to prevent cancel token propagation
+            userRequestedStop = false;  // Reset to false
             isStreaming = other.isStreaming;
             playerStarted = other.playerStarted;
             playerProcess = other.playerProcess;
@@ -1078,7 +1090,15 @@ void AddStreamTab(const std::wstring& channel = L"") {
     TabCtrl_InsertItem(g_hTab, idx, &tie);
     
     // Create the tab in-place to avoid copying
+    size_t old_capacity = g_streams.capacity();
+    AddDebugLog(L"AddStreamTab: Before emplace_back - size=" + std::to_wstring(g_streams.size()) + 
+               L", capacity=" + std::to_wstring(old_capacity) + L" for " + channel);
     g_streams.emplace_back();
+    size_t new_capacity = g_streams.capacity();
+    if (new_capacity != old_capacity) {
+        AddDebugLog(L"AddStreamTab: VECTOR REALLOCATED - old_capacity=" + std::to_wstring(old_capacity) + 
+                   L", new_capacity=" + std::to_wstring(new_capacity) + L", vector move operations occurred");
+    }
     StreamTab& tab = g_streams.back();
     HWND hChild = CreateStreamChild(g_hTab, tab, channel.c_str());
     
