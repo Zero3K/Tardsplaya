@@ -85,6 +85,8 @@ public:
         std::lock_guard<std::mutex> lock(queue_mutex);
         data_queue.push(data);
         buffer_size += data.size();
+        // AddDebugLog for excessive logging can be enabled if needed
+        // AddDebugLog(L"[HTTP] Added " + std::to_wstring(data.size()) + L" bytes, queue=" + std::to_wstring(data_queue.size()));
     }
     
     size_t GetBufferSize() const {
@@ -147,6 +149,7 @@ private:
         send(client_socket, response.c_str(), (int)response.length(), 0);
         
         // Stream data from queue with better buffering
+        int segments_sent = 0;
         while (running && !stream_ended) {
             std::vector<char> data;
             {
@@ -160,13 +163,18 @@ private:
             
             if (!data.empty()) {
                 int sent = send(client_socket, data.data(), (int)data.size(), 0);
-                if (sent <= 0) break; // Client disconnected
+                if (sent <= 0) {
+                    AddDebugLog(L"[HTTP] Client disconnected after " + std::to_wstring(segments_sent) + L" segments");
+                    break; // Client disconnected
+                }
+                segments_sent++;
             } else {
                 // No data available, wait a bit
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
         
+        AddDebugLog(L"[HTTP] Client session ended, sent " + std::to_wstring(segments_sent) + L" segments");
         closesocket(client_socket);
     }
 };
@@ -254,7 +262,7 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
 static bool ProcessStillRunning(HANDLE hProcess, const std::wstring& debug_context = L"", DWORD pid = 0) {
     if (hProcess == INVALID_HANDLE_VALUE || hProcess == nullptr) {
         if (!debug_context.empty()) {
-            AddDebugLog(L"ProcessStillRunning: Invalid handle for " + debug_context);
+            AddDebugLog(L"[PROCESS] Invalid handle for " + debug_context);
         }
         return false;
     }
@@ -273,20 +281,25 @@ static bool ProcessStillRunning(HANDLE hProcess, const std::wstring& debug_conte
             CloseHandle(pidHandle);
             
             if (pidActive && !still_active) {
-                AddDebugLog(L"ProcessStillRunning: Handle check failed but PID check succeeded for " + debug_context +
+                AddDebugLog(L"[PROCESS] Handle check failed but PID check succeeded for " + debug_context +
                            L", may be handle corruption");
                 return true; // Trust PID check over handle check
             }
         }
     }
     
-    if (!debug_context.empty() && !still_active) {
-        AddDebugLog(L"ProcessStillRunning: Process NOT running for " + debug_context + 
-                   L", GetExitCodeProcess=" + std::to_wstring(result) + 
-                   L", ExitCode=" + std::to_wstring(code) + 
-                   L", STILL_ACTIVE=" + std::to_wstring(STILL_ACTIVE) +
-                   L", LastError=" + std::to_wstring(GetLastError()) +
-                   L", PID=" + std::to_wstring(pid));
+    // Log more details for debugging
+    if (!debug_context.empty()) {
+        if (still_active) {
+            AddDebugLog(L"[PROCESS] Process ALIVE for " + debug_context);
+        } else {
+            AddDebugLog(L"[PROCESS] Process DEAD for " + debug_context + 
+                       L", GetExitCodeProcess=" + std::to_wstring(result) + 
+                       L", ExitCode=" + std::to_wstring(code) + 
+                       L", STILL_ACTIVE=" + std::to_wstring(STILL_ACTIVE) +
+                       L", LastError=" + std::to_wstring(GetLastError()) +
+                       L", PID=" + std::to_wstring(pid));
+        }
     }
     
     return still_active;
@@ -447,36 +460,78 @@ bool BufferAndPipeStreamToPlayer(
         int consecutive_errors = 0;
         const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
         
-        while (download_running && !cancel_token.load() && 
-               ProcessStillRunning(pi.hProcess, channel_name + L" download_thread", pi.dwProcessId) && 
-               consecutive_errors < max_consecutive_errors) {
+        AddDebugLog(L"[DOWNLOAD] Starting download thread for " + channel_name);
+        
+        while (true) {
+            // Check all exit conditions individually for detailed logging
+            bool download_running_check = download_running.load();
+            bool cancel_token_check = cancel_token.load();
+            bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" download_thread", pi.dwProcessId);
+            bool error_limit_check = consecutive_errors < max_consecutive_errors;
+            
+            if (!download_running_check) {
+                AddDebugLog(L"[DOWNLOAD] Exit condition: download_running=false for " + channel_name);
+                break;
+            }
+            if (cancel_token_check) {
+                AddDebugLog(L"[DOWNLOAD] Exit condition: cancel_token=true for " + channel_name);
+                break;
+            }
+            if (!process_running_check) {
+                AddDebugLog(L"[DOWNLOAD] Exit condition: process died for " + channel_name);
+                break;
+            }
+            if (!error_limit_check) {
+                AddDebugLog(L"[DOWNLOAD] Exit condition: too many consecutive errors (" + 
+                           std::to_wstring(consecutive_errors) + L") for " + channel_name);
+                break;
+            }
+               
+            AddDebugLog(L"[DOWNLOAD] Loop iteration for " + channel_name + 
+                       L", consecutive_errors=" + std::to_wstring(consecutive_errors));
             
             // Download current playlist
             std::string playlist;
+            AddDebugLog(L"[DOWNLOAD] Fetching playlist for " + channel_name);
             if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
                 consecutive_errors++;
-                AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread playlist error " + 
-                           std::to_wstring(consecutive_errors) + L"/" + 
-                           std::to_wstring(max_consecutive_errors) + L" for " + channel_name);
+                AddDebugLog(L"[DOWNLOAD] Playlist fetch FAILED for " + channel_name + 
+                           L", error " + std::to_wstring(consecutive_errors) + L"/" + 
+                           std::to_wstring(max_consecutive_errors));
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
             }
             consecutive_errors = 0;
+            AddDebugLog(L"[DOWNLOAD] Playlist fetch SUCCESS for " + channel_name + 
+                       L", size=" + std::to_wstring(playlist.size()) + L" bytes");
 
             // Check for stream end
             if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
-                AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread found stream end for " + channel_name);
+                AddDebugLog(L"[DOWNLOAD] Found #EXT-X-ENDLIST - stream actually ended for " + channel_name);
                 stream_ended_normally = true;
                 break;
             }
 
             auto segments = ParseSegments(playlist);
-            AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread found " + std::to_wstring(segments.size()) + 
-                       L" segments for " + channel_name);
+            AddDebugLog(L"[DOWNLOAD] Parsed " + std::to_wstring(segments.size()) + 
+                       L" segments from playlist for " + channel_name);
             
             // Download new segments
+            int new_segments_downloaded = 0;
             for (auto& seg : segments) {
-                if (!download_running || cancel_token.load() || !ProcessStillRunning(pi.hProcess, channel_name + L" segment_download", pi.dwProcessId)) break;
+                if (!download_running || cancel_token.load()) {
+                    AddDebugLog(L"[DOWNLOAD] Breaking segment loop - download_running=" + 
+                               std::to_wstring(download_running.load()) + L", cancel=" + 
+                               std::to_wstring(cancel_token.load()) + L" for " + channel_name);
+                    break;
+                }
+                
+                bool process_still_running = ProcessStillRunning(pi.hProcess, channel_name + L" segment_download", pi.dwProcessId);
+                if (!process_still_running) {
+                    AddDebugLog(L"[DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
+                    break;
+                }
+                
                 if (seen_urls.count(seg)) continue;
                 
                 // Check buffer size before downloading more
@@ -514,31 +569,62 @@ bool BufferAndPipeStreamToPlayer(
                         std::lock_guard<std::mutex> lock(buffer_mutex);
                         buffer_queue.push(std::move(seg_data));
                     }
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Downloaded segment, buffer=" + 
-                               std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
+                    new_segments_downloaded++;
+                    AddDebugLog(L"[DOWNLOAD] Downloaded segment " + std::to_wstring(new_segments_downloaded) + 
+                               L", buffer=" + std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
                 } else {
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to download segment for " + channel_name);
+                    AddDebugLog(L"[DOWNLOAD] FAILED to download segment after retries for " + channel_name);
                 }
             }
             
+            AddDebugLog(L"[DOWNLOAD] Segment batch complete - downloaded " + std::to_wstring(new_segments_downloaded) + 
+                       L" new segments for " + channel_name);
+            
             // Poll playlist more frequently for live streams
+            AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
         
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Download thread ending for " + channel_name + 
-                   L", download_running=" + std::to_wstring(download_running.load()) +
+        // Log exactly why the download loop ended
+        AddDebugLog(L"[DOWNLOAD] *** DOWNLOAD THREAD ENDING *** for " + channel_name);
+        AddDebugLog(L"[DOWNLOAD] Exit conditions: download_running=" + std::to_wstring(download_running.load()) +
                    L", cancel_token=" + std::to_wstring(cancel_token.load()) +
                    L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" final_check", pi.dwProcessId)) +
-                   L", consecutive_errors=" + std::to_wstring(consecutive_errors) + L"/" + std::to_wstring(max_consecutive_errors));
+                   L", consecutive_errors=" + std::to_wstring(consecutive_errors) + L"/" + std::to_wstring(max_consecutive_errors) +
+                   L", stream_ended_normally=" + std::to_wstring(stream_ended_normally.load()));
+        
+        // Additional detailed process checking
+        DWORD exit_code = 0;
+        BOOL got_exit_code = GetExitCodeProcess(pi.hProcess, &exit_code);
+        AddDebugLog(L"[DOWNLOAD] Process details: GetExitCodeProcess=" + std::to_wstring(got_exit_code) +
+                   L", ExitCode=" + std::to_wstring(exit_code) + 
+                   L", STILL_ACTIVE=" + std::to_wstring(STILL_ACTIVE) +
+                   L", PID=" + std::to_wstring(pi.dwProcessId));
     });
 
     // Main buffer feeding thread - keeps HTTP server well-fed
     std::thread feeder_thread([&]() {
         bool started = false;
+        AddDebugLog(L"[FEEDER] Starting feeder thread for " + channel_name);
         
-        while (!cancel_token.load() && 
-               ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId) && 
-               (download_running || !buffer_queue.empty())) {
+        while (true) {
+            // Check all exit conditions individually for detailed logging  
+            bool cancel_token_check = cancel_token.load();
+            bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId);
+            bool data_available_check = (download_running.load() || !buffer_queue.empty());
+            
+            if (cancel_token_check) {
+                AddDebugLog(L"[FEEDER] Exit condition: cancel_token=true for " + channel_name);
+                break;
+            }
+            if (!process_running_check) {
+                AddDebugLog(L"[FEEDER] Exit condition: process died for " + channel_name);
+                break;
+            }
+            if (!data_available_check) {
+                AddDebugLog(L"[FEEDER] Exit condition: no more data available (download stopped and buffer empty) for " + channel_name);
+                break;
+            }
             
             size_t buffer_size;
             {
@@ -550,9 +636,11 @@ bool BufferAndPipeStreamToPlayer(
             if (!started) {
                 if (buffer_size >= target_buffer_segments) {
                     started = true;
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Initial buffer ready (" + 
+                    AddDebugLog(L"[FEEDER] Initial buffer ready (" + 
                                std::to_wstring(buffer_size) + L" segments), starting feed for " + channel_name);
                 } else {
+                    AddDebugLog(L"[FEEDER] Waiting for initial buffer (" + std::to_wstring(buffer_size) + L"/" +
+                               std::to_wstring(target_buffer_segments) + L") for " + channel_name);
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
                 }
@@ -571,7 +659,7 @@ bool BufferAndPipeStreamToPlayer(
             if (!segment_data.empty()) {
                 http_server.AddData(segment_data);
                 size_t http_buffer = http_server.GetQueueLength();
-                AddDebugLog(L"BufferAndPipeStreamToPlayer: Fed segment to HTTP server, local_buffer=" + 
+                AddDebugLog(L"[FEEDER] Fed segment to HTTP server, local_buffer=" + 
                            std::to_wstring(buffer_size - 1) + L", http_buffer=" + 
                            std::to_wstring(http_buffer) + L" for " + channel_name);
                 
@@ -580,11 +668,17 @@ bool BufferAndPipeStreamToPlayer(
                 }
             } else {
                 // No segments available, wait
+                AddDebugLog(L"[FEEDER] No segments available, waiting... (download_running=" + 
+                           std::to_wstring(download_running.load()) + L") for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         }
         
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Feeder thread ending for " + channel_name);
+        AddDebugLog(L"[FEEDER] *** FEEDER THREAD ENDING *** for " + channel_name +
+                   L", cancel=" + std::to_wstring(cancel_token.load()) + 
+                   L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" feeder_final", pi.dwProcessId)) +
+                   L", download_running=" + std::to_wstring(download_running.load()) +
+                   L", buffer_queue_empty=" + std::to_wstring(buffer_queue.empty()));
     });
 
     // Wait for download and feeder threads to complete
