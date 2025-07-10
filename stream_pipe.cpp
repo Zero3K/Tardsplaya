@@ -250,35 +250,73 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
 }
 
 // Parse media segment URLs from m3u8 playlist, filtering out ad segments
+// Based on Twitch HLS AdBlock extension logic
 static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
     std::vector<std::wstring> segs;
     std::istringstream ss(playlist);
     std::string line;
+    bool in_scte35_out = false;
     bool skip_next_segment = false;
     
     while (std::getline(ss, line)) {
         if (line.empty()) continue;
         
         if (line[0] == '#') {
-            // Check for ad markers - based on TwitchAdSolutions approach
-            // Look for "stitched" identifier which marks ad segments
-            if (line.find("stitched") != std::string::npos ||
-                line.find("STITCHED") != std::string::npos) {
+            // SCTE-35 ad marker detection (start of ad block)
+            if (line.find("#EXT-X-SCTE35-OUT") == 0) {
+                in_scte35_out = true;
                 skip_next_segment = true;
+                AddDebugLog(L"[FILTER] Found SCTE35-OUT marker, entering ad block");
+                continue;
             }
-            // Also check for explicit ad-related markers
+            // SCTE-35 ad marker detection (end of ad block)
+            else if (line.find("#EXT-X-SCTE35-IN") == 0) {
+                in_scte35_out = false;
+                AddDebugLog(L"[FILTER] Found SCTE35-IN marker, exiting ad block");
+                continue;
+            }
+            // Discontinuity markers (often used with ads)
+            else if (line.find("#EXT-X-DISCONTINUITY") == 0 && in_scte35_out) {
+                AddDebugLog(L"[FILTER] Skipping discontinuity marker in ad block");
+                continue;
+            }
+            // Stitched ad segments
+            else if (line.find("stitched-ad") != std::string::npos) {
+                skip_next_segment = true;
+                AddDebugLog(L"[FILTER] Found stitched-ad marker");
+            }
+            // EXTINF tags with specific durations that indicate ads (2.001, 2.002 seconds)
+            else if (line.find("#EXTINF:2.00") == 0 && 
+                     (line.find("2.001") != std::string::npos || 
+                      line.find("2.002") != std::string::npos)) {
+                skip_next_segment = true;
+                AddDebugLog(L"[FILTER] Found ad-duration EXTINF marker");
+            }
+            // DATERANGE markers for stitched ads
+            else if (line.find("#EXT-X-DATERANGE:ID=\"stitched-ad") == 0) {
+                skip_next_segment = true;
+                AddDebugLog(L"[FILTER] Found stitched-ad DATERANGE marker");
+            }
+            // General stitched content detection
+            else if (line.find("stitched") != std::string::npos ||
+                     line.find("STITCHED") != std::string::npos) {
+                skip_next_segment = true;
+                AddDebugLog(L"[FILTER] Found general stitched content marker");
+            }
+            // MIDROLL ad markers
             else if (line.find("EXT-X-DATERANGE") != std::string::npos && 
-                     (line.find("stitched-ad-") != std::string::npos ||
-                      line.find("MIDROLL") != std::string::npos ||
+                     (line.find("MIDROLL") != std::string::npos ||
                       line.find("midroll") != std::string::npos)) {
                 skip_next_segment = true;
+                AddDebugLog(L"[FILTER] Found MIDROLL ad marker");
             }
             continue;
         }
         
         // This is a segment URL
-        if (skip_next_segment) {
+        if (skip_next_segment || in_scte35_out) {
             // Skip this segment as it contains ad content
+            AddDebugLog(L"[FILTER] Skipping ad segment: " + std::wstring(line.begin(), line.end()));
             skip_next_segment = false;
             continue;
         }
