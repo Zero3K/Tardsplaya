@@ -3,6 +3,14 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_
+#define NOMINMAX  // Prevent min/max macro conflicts
+#include <windows.h>
+
+// Forward declarations for debug logging
+extern bool g_verboseDebug;
+void AddDebugLog(const std::wstring& msg);
 
 // Launches a thread to buffer and pipe the stream.
 // The callback is called with a log/status message (can be nullptr).
@@ -14,5 +22,8 @@ std::thread StartStreamThread(
     std::function<void(const std::wstring&)> log_callback = nullptr,
     int buffer_segments = 3,
     const std::wstring& channel_name = L"",
-    std::atomic<int>* chunk_count = nullptr
+    std::atomic<int>* chunk_count = nullptr,
+    std::atomic<bool>* user_requested_stop = nullptr,
+    HWND main_window = nullptr,
+    size_t tab_index = 0
 );

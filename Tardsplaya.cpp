@@ -1,3 +1,5 @@
+#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -10,6 +12,7 @@
 #include <map>
 #include <sstream>
 #include <ctime>
+#include <cstdio>
 #include <regex>
 #include <thread>
 #include <atomic>
@@ -36,6 +39,7 @@ struct StreamTab {
     std::map<std::wstring, std::wstring> standardToOriginalQuality;
     std::thread streamThread;
     std::atomic<bool> cancelToken{false};
+    std::atomic<bool> userRequestedStop{false}; // Track if user explicitly requested stop
     bool isStreaming = false;
     bool playerStarted = false; // Track if player has started successfully
     HANDLE playerProcess = nullptr; // Store player process handle for cleanup
@@ -55,12 +59,20 @@ struct StreamTab {
         , qualityToUrl(std::move(other.qualityToUrl))
         , standardToOriginalQuality(std::move(other.standardToOriginalQuality))
         , streamThread(std::move(other.streamThread))
-        , cancelToken(other.cancelToken.load())
+        , cancelToken(other.cancelToken.load())  // Preserve cancel state (moves should not happen with reserved capacity)
+        , userRequestedStop(other.userRequestedStop.load())  // Preserve user stop state
         , isStreaming(other.isStreaming)
         , playerStarted(other.playerStarted)
         , playerProcess(other.playerProcess)
         , chunkCount(other.chunkCount.load())
     {
+        // Note: With vector capacity reservation, moves should not happen during normal operation
+        // This move constructor exists for completeness but should not be called for active streams
+        std::wstring debug_msg = L"StreamTab move constructor called for channel: " + channel + 
+                                L", cancelToken=" + std::to_wstring(cancelToken.load()) + 
+                                L" (WARNING: move during active streaming should not happen with reserved capacity)";
+        OutputDebugStringW(debug_msg.c_str());
+        
         other.hChild = nullptr;
         other.hQualities = nullptr;
         other.hWatchBtn = nullptr;
@@ -70,6 +82,12 @@ struct StreamTab {
     }
     StreamTab& operator=(StreamTab&& other) noexcept {
         if (this != &other) {
+            // Debug: Log move assignment usage
+            std::wstring debug_msg = L"StreamTab move assignment called from " + other.channel + 
+                                    L" to " + channel + L", cancelToken=" + 
+                                    std::to_wstring(other.cancelToken.load()) + L" (WARNING: should not happen with reserved capacity)";
+            OutputDebugStringW(debug_msg.c_str());
+            
             channel = std::move(other.channel);
             hChild = other.hChild;
             hQualities = other.hQualities;
@@ -79,7 +97,8 @@ struct StreamTab {
             qualityToUrl = std::move(other.qualityToUrl);
             standardToOriginalQuality = std::move(other.standardToOriginalQuality);
             streamThread = std::move(other.streamThread);
-            cancelToken = other.cancelToken.load();
+            cancelToken = other.cancelToken.load();  // Preserve cancel state (moves should not happen)
+            userRequestedStop = other.userRequestedStop.load();  // Preserve user stop state
             isStreaming = other.isStreaming;
             playerStarted = other.playerStarted;
             playerProcess = other.playerProcess;
@@ -107,8 +126,12 @@ std::vector<std::wstring> g_favorites;
 std::wstring g_playerPath = L"mpv.exe";
 std::wstring g_playerArg = L"-";
 bool g_enableLogging = true;
+bool g_verboseDebug = false; // Enable verbose debug output for troubleshooting
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
+bool g_logToFile = false; // Enable logging to debug.log file
+
+
 
 // Tray icon support
 NOTIFYICONDATA g_nid = {};
@@ -166,6 +189,9 @@ void LoadSettings() {
     
     // Load minimize to tray setting
     g_minimizeToTray = GetPrivateProfileIntW(L"Settings", L"MinimizeToTray", 0, iniPath.c_str()) != 0;
+    
+    // Load file logging setting
+    g_logToFile = GetPrivateProfileIntW(L"Settings", L"LogToFile", 0, iniPath.c_str()) != 0;
 }
 
 void SaveSettings() {
@@ -187,22 +213,47 @@ void SaveSettings() {
     
     // Save minimize to tray setting
     WritePrivateProfileStringW(L"Settings", L"MinimizeToTray", g_minimizeToTray ? L"1" : L"0", iniPath.c_str());
+    
+    // Save file logging setting
+    WritePrivateProfileStringW(L"Settings", L"LogToFile", g_logToFile ? L"1" : L"0", iniPath.c_str());
 }
 
 void AddLog(const std::wstring& msg) {
     if (!g_enableLogging) return;
-    LVITEM item = { 0 };
-    item.mask = LVIF_TEXT;
-    item.iItem = ListView_GetItemCount(g_hLogList);
+    
+    // Get timestamp for both UI and file logging
     wchar_t timebuf[32];
     time_t now = time(0);
     struct tm tmval;
     localtime_s(&tmval, &now);
     wcsftime(timebuf, 32, L"%H:%M:%S", &tmval);
+    
+    // Add to UI log list
+    LVITEM item = { 0 };
+    item.mask = LVIF_TEXT;
+    item.iItem = ListView_GetItemCount(g_hLogList);
     item.pszText = timebuf;
     ListView_InsertItem(g_hLogList, &item);
     ListView_SetItemText(g_hLogList, item.iItem, 1, const_cast<LPWSTR>(msg.c_str()));
     if (g_logAutoScroll) ListView_EnsureVisible(g_hLogList, item.iItem, FALSE);
+    
+    // Write to file if enabled
+    if (g_logToFile) {
+        FILE* logFile = nullptr;
+        if (_wfopen_s(&logFile, L"debug.log", L"a") == 0 && logFile) {
+            // Get full timestamp for file
+            wchar_t fullTimeBuf[64];
+            wcsftime(fullTimeBuf, 64, L"%Y-%m-%d %H:%M:%S", &tmval);
+            fwprintf(logFile, L"[%s] %s\n", fullTimeBuf, msg.c_str());
+            fclose(logFile);
+        }
+    }
+}
+
+// Add verbose debug logging function
+void AddDebugLog(const std::wstring& msg) {
+    if (!g_verboseDebug) return;
+    AddLog(L"[DEBUG] " + msg);
 }
 
 void LoadFavorites() {
@@ -743,14 +794,26 @@ void LoadChannel(StreamTab& tab) {
     }
 }
 
-void StopStream(StreamTab& tab) {
+void StopStream(StreamTab& tab, bool userInitiated = false) {
+    AddDebugLog(L"StopStream: Starting for channel=" + tab.channel + 
+               L", userInitiated=" + std::to_wstring(userInitiated) + 
+               L", isStreaming=" + std::to_wstring(tab.isStreaming));
+    
     if (tab.isStreaming) {
+        AddDebugLog(L"StopStream: Setting cancel token for " + tab.channel);
         tab.cancelToken = true;
+        if (userInitiated) {
+            tab.userRequestedStop = true;
+            AddDebugLog(L"StopStream: User requested stop set for " + tab.channel);
+        }
         if (tab.streamThread.joinable()) {
+            AddDebugLog(L"StopStream: Joining stream thread for " + tab.channel);
             tab.streamThread.join();
+            AddDebugLog(L"StopStream: Stream thread joined for " + tab.channel);
         }
         tab.isStreaming = false;
         tab.playerStarted = false;
+        
         EnableWindow(tab.hWatchBtn, TRUE);
         EnableWindow(tab.hStopBtn, FALSE);
         SetWindowTextW(tab.hWatchBtn, L"2. Watch");
@@ -772,11 +835,17 @@ void StopStream(StreamTab& tab) {
     }
 }
 
-void WatchStream(StreamTab& tab) {
+void WatchStream(StreamTab& tab, size_t tabIndex) {
+    AddDebugLog(L"WatchStream: Starting for tab " + std::to_wstring(tabIndex) + 
+               L", channel=" + tab.channel + L", isStreaming=" + std::to_wstring(tab.isStreaming));
+    
     if (tab.isStreaming) {
-        StopStream(tab);
+        AddDebugLog(L"WatchStream: Stream already running, stopping first for tab " + std::to_wstring(tabIndex));
+        StopStream(tab, true); // User clicked watch to stop current stream
         return;
     }
+
+
 
     // Check if player path exists
     DWORD dwAttrib = GetFileAttributesW(g_playerPath.c_str());
@@ -812,8 +881,30 @@ void WatchStream(StreamTab& tab) {
     std::wstring url = it->second;
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L")");
     
-    // Reset cancel token
+    // Log current stream status for debugging multi-stream issues
+    int active_streams = 0;
+    std::wstring active_channels;
+    for (size_t i = 0; i < g_streams.size(); i++) {
+        if (g_streams[i].isStreaming) {
+            active_streams++;
+            active_channels += L" [" + std::to_wstring(i) + L"]:" + g_streams[i].channel;
+        }
+    }
+    AddDebugLog(L"WatchStream: Starting new stream " + tab.channel + L" when " + std::to_wstring(active_streams) + 
+               L" streams already active:" + active_channels);
+    
+    // Add small delay between stream starts to reduce resource contention
+    if (active_streams > 0) {
+        AddDebugLog(L"WatchStream: Adding startup delay for multi-stream scenario");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000 + active_streams * 500));
+    }
+    
+    // Reset cancel token and user requested stop flag
     tab.cancelToken = false;
+    tab.userRequestedStop = false;
+    
+    AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
+               L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -826,8 +917,13 @@ void WatchStream(StreamTab& tab) {
         },
         3, // buffer 3 segments
         tab.channel, // channel name for player window title
-        &tab.chunkCount // chunk count for status display
+        &tab.chunkCount, // chunk count for status display
+        &tab.userRequestedStop, // user requested stop flag
+        g_hMainWnd, // main window handle for auto-stop messages
+        tabIndex // tab index for identifying which stream to auto-stop
     );
+    
+    AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));
     
     tab.isStreaming = true;
     tab.playerStarted = false;
@@ -836,14 +932,15 @@ void WatchStream(StreamTab& tab) {
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
     UpdateStatusBar(L"Chunk Queue: Buffering...");
     
+    AddDebugLog(L"WatchStream: UI updated, stream starting for tab " + std::to_wstring(tabIndex));
+    
     // Set a timer to update the button text after 3 seconds (player should be started by then)
     SetTimer(g_hMainWnd, TIMER_PLAYER_CHECK, 3000, nullptr);
     
     // Set a timer to periodically update chunk queue status
     SetTimer(g_hMainWnd, TIMER_CHUNK_UPDATE, 2000, nullptr);
     
-    // Detach the thread so it runs independently
-    tab.streamThread.detach();
+    // Don't detach the thread - keep it joinable for proper synchronization
 }
 
 LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -862,10 +959,10 @@ LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             LoadChannel(tab);
             break;
         case IDC_WATCH:
-            WatchStream(tab);
+            WatchStream(tab, tabIndex);
             break;
         case IDC_STOP:
-            StopStream(tab);
+            StopStream(tab, true); // User clicked stop button
             break;
         case IDC_CHANNEL:
             if (HIWORD(wParam) == EN_CHANGE) {
@@ -994,7 +1091,17 @@ void AddStreamTab(const std::wstring& channel = L"") {
     TabCtrl_InsertItem(g_hTab, idx, &tie);
     
     // Create the tab in-place to avoid copying
+    size_t old_capacity = g_streams.capacity();
+    AddDebugLog(L"AddStreamTab: Before emplace_back - size=" + std::to_wstring(g_streams.size()) + 
+               L", capacity=" + std::to_wstring(old_capacity) + L" for " + channel);
     g_streams.emplace_back();
+    size_t new_capacity = g_streams.capacity();
+    if (new_capacity != old_capacity) {
+        AddDebugLog(L"AddStreamTab: *** CRITICAL *** VECTOR REALLOCATED - old_capacity=" + std::to_wstring(old_capacity) + 
+                   L", new_capacity=" + std::to_wstring(new_capacity) + L", this will cause cancelToken use-after-free!");
+    } else {
+        AddDebugLog(L"AddStreamTab: No reallocation - capacity stable at " + std::to_wstring(new_capacity));
+    }
     StreamTab& tab = g_streams.back();
     HWND hChild = CreateStreamChild(g_hTab, tab, channel.c_str());
     
@@ -1258,6 +1365,14 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         case IDM_SETTINGS:
             ShowSettingsDialog();
             break;
+        case IDM_TOGGLE_DEBUG:
+            g_verboseDebug = !g_verboseDebug;
+            AddLog(g_verboseDebug ? L"Verbose debug enabled" : L"Verbose debug disabled");
+            break;
+        case IDM_TOGGLE_FILE_LOG:
+            g_logToFile = !g_logToFile;
+            AddLog(g_logToFile ? L"File logging enabled (debug.log)" : L"File logging disabled");
+            break;
         case IDC_FAVORITES_ADD:
             AddFavorite();
             break;
@@ -1288,19 +1403,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         std::wstring* msg = reinterpret_cast<std::wstring*>(lParam);
         if (msg) {
             AddLog(*msg);
-            
-            // Check if this message indicates the player exited normally (user closed it)
-            if (*msg == L"Player exited normally.") {
-                // Find the streaming tab and stop it
-                for (size_t i = 0; i < g_streams.size(); ++i) {
-                    if (g_streams[i].isStreaming) {
-                        // Post a message to stop this stream using the index
-                        PostMessage(hwnd, WM_USER + 2, (WPARAM)i, 0);
-                        break; // Assume only one stream can be "exiting" at a time
-                    }
-                }
-            }
-            
             delete msg;
         }
         break;
@@ -1308,9 +1410,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_USER + 2: {
         // Auto-stop stream when player exits
         size_t tabIndex = (size_t)wParam;
+        AddDebugLog(L"WM_USER + 2: Auto-stop request for tab " + std::to_wstring(tabIndex) + 
+                   L", streams.size=" + std::to_wstring(g_streams.size()));
         if (tabIndex < g_streams.size() && g_streams[tabIndex].isStreaming) {
-            StopStream(g_streams[tabIndex]);
-            AddLog(L"Stream stopped automatically (player closed).");
+            AddDebugLog(L"WM_USER + 2: Auto-stopping tab " + std::to_wstring(tabIndex) + 
+                       L", channel=" + g_streams[tabIndex].channel);
+            StopStream(g_streams[tabIndex]); // Auto-stop, not user-initiated
+            AddLog(L"Stream stopped automatically (stream ended).");
+        } else {
+            AddDebugLog(L"WM_USER + 2: Invalid auto-stop request - tab " + std::to_wstring(tabIndex) + 
+                       L" not streaming or out of range");
         }
         break;
     }
@@ -1349,6 +1458,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_DESTROY:
         CloseAllTabs();
         RemoveTrayIcon();
+        SaveSettings(); // Save settings including file logging preference
         if (g_hFont) {
             DeleteObject(g_hFont);
             g_hFont = nullptr;
@@ -1366,6 +1476,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     
     // Load settings from INI file
     LoadSettings();
+    
+    // Reserve sufficient capacity for streams vector to prevent reallocation
+    // This prevents use-after-free bugs when running threads reference cancelToken
+    g_streams.reserve(20);  // Support up to 20 concurrent streams without reallocation
     
     // Initialize TLS client system for fallback support
     TLSClientHTTP::Initialize();
