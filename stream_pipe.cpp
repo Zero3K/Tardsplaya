@@ -3,6 +3,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <tlhelp32.h>
 #include <string>
 #include <vector>
 #include <set>
@@ -15,6 +16,10 @@
 #include <queue>
 #include <mutex>
 #include "tlsclient/tlsclient.h"
+
+// Global stream tracking for multi-stream debugging
+static std::atomic<int> g_active_streams(0);
+static std::mutex g_stream_mutex;
 
 // Robust HTTP server for localhost streaming with persistent buffering
 class StreamHttpServer {
@@ -271,6 +276,20 @@ static bool ProcessStillRunning(HANDLE hProcess, const std::wstring& debug_conte
     BOOL result = GetExitCodeProcess(hProcess, &code);
     bool still_active = result && (code == STILL_ACTIVE);
     
+    // Additional detailed logging for process state
+    if (!debug_context.empty()) {
+        DWORD wait_result = WaitForSingleObject(hProcess, 0);
+        bool wait_timeout = (wait_result == WAIT_TIMEOUT);
+        
+        AddDebugLog(L"[PROCESS] Detailed check for " + debug_context + 
+                   L": GetExitCodeProcess=" + std::to_wstring(result) +
+                   L", ExitCode=" + std::to_wstring(code) + 
+                   L", STILL_ACTIVE=" + std::to_wstring(STILL_ACTIVE) +
+                   L", WaitResult=" + std::to_wstring(wait_result) +
+                   L", WaitTimeout=" + std::to_wstring(wait_timeout) +
+                   L", LastError=" + std::to_wstring(GetLastError()));
+    }
+    
     // Double-check using PID if we have it
     if (!still_active && pid != 0) {
         HANDLE pidHandle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
@@ -282,23 +301,27 @@ static bool ProcessStillRunning(HANDLE hProcess, const std::wstring& debug_conte
             
             if (pidActive && !still_active) {
                 AddDebugLog(L"[PROCESS] Handle check failed but PID check succeeded for " + debug_context +
-                           L", may be handle corruption");
+                           L", may be handle corruption - using PID result");
                 return true; // Trust PID check over handle check
             }
+            
+            AddDebugLog(L"[PROCESS] PID verification for " + debug_context + 
+                       L": PIDResult=" + std::to_wstring(pidResult) +
+                       L", PIDCode=" + std::to_wstring(pidCode) + 
+                       L", PIDActive=" + std::to_wstring(pidActive));
+        } else {
+            AddDebugLog(L"[PROCESS] Could not open PID " + std::to_wstring(pid) + 
+                       L" for verification, Error=" + std::to_wstring(GetLastError()));
         }
     }
     
-    // Log more details for debugging
+    // Log final result
     if (!debug_context.empty()) {
         if (still_active) {
             AddDebugLog(L"[PROCESS] Process ALIVE for " + debug_context);
         } else {
             AddDebugLog(L"[PROCESS] Process DEAD for " + debug_context + 
-                       L", GetExitCodeProcess=" + std::to_wstring(result) + 
-                       L", ExitCode=" + std::to_wstring(code) + 
-                       L", STILL_ACTIVE=" + std::to_wstring(STILL_ACTIVE) +
-                       L", LastError=" + std::to_wstring(GetLastError()) +
-                       L", PID=" + std::to_wstring(pid));
+                       L" (ExitCode=" + std::to_wstring(code) + L")");
         }
     }
     
@@ -379,13 +402,53 @@ bool BufferAndPipeStreamToPlayer(
     const std::wstring& channel_name,
     std::atomic<int>* chunk_count
 ) {
+    // Track active streams for cross-stream interference detection
+    int current_stream_count;
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        current_stream_count = ++g_active_streams;
+    }
+    
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting robust HTTP streaming for " + channel_name + L", URL=" + playlist_url);
+    AddDebugLog(L"[STREAMS] This is stream #" + std::to_wstring(current_stream_count) + L" concurrently active");
+    
+    // Add startup delay for multi-stream scenarios to reduce resource contention
+    if (current_stream_count > 1) {
+        int delay_ms = (current_stream_count - 1) * 500; // 500ms per additional stream
+        AddDebugLog(L"[STREAMS] Adding " + std::to_wstring(delay_ms) + L"ms startup delay for stream " + 
+                   std::to_wstring(current_stream_count) + L" (" + channel_name + L")");
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+    }
+    
+    // Log system resource state before starting new stream
+    MEMORYSTATUSEX memInfo;
+    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+    GlobalMemoryStatusEx(&memInfo);
+    DWORD processCount = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32 pe32;
+        pe32.dwSize = sizeof(PROCESSENTRY32);
+        if (Process32First(snapshot, &pe32)) {
+            do {
+                processCount++;
+            } while (Process32Next(snapshot, &pe32));
+        }
+        CloseHandle(snapshot);
+    }
+    
+    AddDebugLog(L"[RESOURCE] System state before stream start: MemoryLoad=" + std::to_wstring(memInfo.dwMemoryLoad) + 
+               L"%, AvailPhysMB=" + std::to_wstring(memInfo.ullAvailPhys / (1024*1024)) + 
+               L", ProcessCount=" + std::to_wstring(processCount) + L" for " + channel_name);
     
     // 1. Download the master playlist and pick the first media playlist
     std::string master;
     if (cancel_token.load()) return false;
     if (!HttpGetText(playlist_url, master, &cancel_token)) {
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to download master playlist for " + channel_name);
+        // Decrement stream counter on early exit
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        --g_active_streams;
         return false;
     }
 
@@ -403,15 +466,25 @@ bool BufferAndPipeStreamToPlayer(
     }
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Using media playlist URL=" + media_playlist_url + L" for " + channel_name);
 
-    // 2. Create and start HTTP server
+    // 2. Create and start HTTP server with detailed port allocation logging
     StreamHttpServer http_server;
+    AddDebugLog(L"[HTTP] Attempting to start HTTP server for " + channel_name + L", preferred port=8080");
     if (!http_server.Start(8080)) {
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to start HTTP server for " + channel_name);
+        // Decrement stream counter on early exit
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        --g_active_streams;
         return false;
     }
     
     int server_port = http_server.GetPort();
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Started HTTP server on port " + std::to_wstring(server_port) + L" for " + channel_name);
+    
+    // Log if we got a different port than expected (indicates port conflicts)
+    if (server_port != 8080) {
+        AddDebugLog(L"[HTTP] Port conflict resolved - got port " + std::to_wstring(server_port) + 
+                   L" instead of 8080 for " + channel_name);
+    }
 
     // 3. Create media player process with localhost URL
     std::wstring localhost_url = L"http://localhost:" + std::to_wstring(server_port) + L"/";
@@ -423,18 +496,31 @@ bool BufferAndPipeStreamToPlayer(
     
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Launching player: " + cmd + L" for " + channel_name);
     
+    // Record timing for process creation
+    auto start_time = std::chrono::high_resolution_clock::now();
     BOOL success = CreateProcessW(
         nullptr, const_cast<LPWSTR>(cmd.c_str()), nullptr, nullptr, FALSE,
         CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi
     );
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
     if (!success) {
+        DWORD error = GetLastError();
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create process for " + channel_name + 
-                   L", Error=" + std::to_wstring(GetLastError()));
+                   L", Error=" + std::to_wstring(error) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
+        // Decrement stream counter on early exit
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        --g_active_streams;
         return false;
     }
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Process created successfully for " + channel_name + 
-               L", PID=" + std::to_wstring(pi.dwProcessId));
+               L", PID=" + std::to_wstring(pi.dwProcessId) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
+    
+    // Verify process is actually running immediately after creation
+    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Brief delay for process startup
+    bool initial_check = ProcessStillRunning(pi.hProcess, channel_name + L" initial_verification", pi.dwProcessId);
+    AddDebugLog(L"[PROCESS] Initial verification after 100ms: " + std::to_wstring(initial_check) + L" for " + channel_name);
 
     // 4. Start thread to maintain player window title with channel name
     std::thread title_thread([pi, channel_name]() {
@@ -455,12 +541,20 @@ bool BufferAndPipeStreamToPlayer(
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Target buffer: " + std::to_wstring(target_buffer_segments) + 
                L" segments, max: " + std::to_wstring(max_buffer_segments) + L" for " + channel_name);
 
+    // Log thread creation timing
+    auto thread_start_time = std::chrono::high_resolution_clock::now();
+    AddDebugLog(L"[THREAD] Creating download and feeder threads for " + channel_name);
+
     // Background playlist monitor and segment downloader thread
     std::thread download_thread([&]() {
+        auto thread_actual_start = std::chrono::high_resolution_clock::now();
+        auto startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(thread_actual_start - thread_start_time);
+        
         int consecutive_errors = 0;
         const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
         
-        AddDebugLog(L"[DOWNLOAD] Starting download thread for " + channel_name);
+        AddDebugLog(L"[DOWNLOAD] Starting download thread for " + channel_name + 
+                   L", startup_delay=" + std::to_wstring(startup_delay.count()) + L"ms");
         
         while (true) {
             // Check all exit conditions individually for detailed logging
@@ -604,8 +698,12 @@ bool BufferAndPipeStreamToPlayer(
 
     // Main buffer feeding thread - keeps HTTP server well-fed
     std::thread feeder_thread([&]() {
+        auto feeder_start_time = std::chrono::high_resolution_clock::now();
+        auto feeder_startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(feeder_start_time - thread_start_time);
+        
         bool started = false;
-        AddDebugLog(L"[FEEDER] Starting feeder thread for " + channel_name);
+        AddDebugLog(L"[FEEDER] Starting feeder thread for " + channel_name + 
+                   L", startup_delay=" + std::to_wstring(feeder_startup_delay.count()) + L"ms");
         
         while (true) {
             // Check all exit conditions individually for detailed logging  
@@ -708,6 +806,20 @@ bool BufferAndPipeStreamToPlayer(
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     
+    // Decrement active stream counter
+    int remaining_streams;
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        remaining_streams = --g_active_streams;
+    }
+    
+    bool normal_end = stream_ended_normally.load();
+    bool user_cancel = cancel_token.load();
+    
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Cleanup complete for " + channel_name);
-    return stream_ended_normally.load() || cancel_token.load();
+    AddDebugLog(L"[STREAMS] Stream ended - " + std::to_wstring(remaining_streams) + L" streams remain active");
+    AddDebugLog(L"[STREAMS] Exit reason: normal_end=" + std::to_wstring(normal_end) + 
+               L", user_cancel=" + std::to_wstring(user_cancel) + L" for " + channel_name);
+    
+    return normal_end || user_cancel;
 }
