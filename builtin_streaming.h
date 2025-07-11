@@ -18,6 +18,7 @@ bool BufferAndStreamToBuiltinPlayer(
     std::atomic<bool>& cancel_token,
     int buffer_segments,
     const std::wstring& channel_name,
+    const std::wstring& quality,  // Quality string for window sizing
     std::atomic<int>* chunk_count
 );
 

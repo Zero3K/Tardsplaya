@@ -170,9 +170,10 @@ bool BufferAndStreamToBuiltinPlayer(
     std::atomic<bool>& cancel_token,
     int buffer_segments,
     const std::wstring& channel_name,
+    const std::wstring& quality,
     std::atomic<int>* chunk_count
 ) {
-    AddDebugLog(L"[SIMPLE_PLAYER] Starting built-in streaming for " + channel_name + L", URL=" + playlist_url);
+    AddDebugLog(L"[SIMPLE_PLAYER] Starting built-in streaming for " + channel_name + L", URL=" + playlist_url + L", Quality=" + quality);
     
     // Get or create the built-in player instance
     SimpleBuiltinPlayer* player = nullptr;
@@ -212,8 +213,8 @@ bool BufferAndStreamToBuiltinPlayer(
     }
     AddDebugLog(L"[SIMPLE_PLAYER] Using media playlist URL=" + media_playlist_url + L" for " + channel_name);
 
-    // Start the stream in the built-in player
-    if (!player->StartStream(channel_name)) {
+    // Start the stream in the built-in player with quality info
+    if (!player->StartStream(channel_name, quality)) {
         AddDebugLog(L"[SIMPLE_PLAYER] Failed to start stream in built-in player");
         return false;
     }

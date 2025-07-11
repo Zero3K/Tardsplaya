@@ -934,6 +934,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
             },
             3, // buffer 3 segments
             tab.channel, // channel name for player window title
+            originalQuality, // quality string for window sizing
             &tab.chunkCount, // chunk count for status display
             &tab.userRequestedStop, // user requested stop flag
             g_hMainWnd, // main window handle for auto-stop messages

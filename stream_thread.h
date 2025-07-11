@@ -36,6 +36,7 @@ std::thread StartBuiltinStreamThread(
     std::function<void(const std::wstring&)> log_callback = nullptr,
     int buffer_segments = 3,
     const std::wstring& channel_name = L"",
+    const std::wstring& quality = L"",  // Quality string for window sizing
     std::atomic<int>* chunk_count = nullptr,
     std::atomic<bool>* user_requested_stop = nullptr,
     HWND main_window = nullptr,

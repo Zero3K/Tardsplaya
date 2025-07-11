@@ -23,8 +23,8 @@ public:
     // Initialize the player with a target window for status display
     bool Initialize(HWND hwndStatus);
     
-    // Start processing a stream internally
-    bool StartStream(const std::wstring& streamName);
+    // Start processing a stream internally with separate video window
+    bool StartStream(const std::wstring& streamName, const std::wstring& quality = L"");
     
     // Stop the stream
     void StopStream();
@@ -42,12 +42,18 @@ public:
     // Update display window with current status
     void UpdateStatus();
     
+    // Get the video window handle (for separate window mode)
+    HWND GetVideoWindow() const;
+    
     // Cleanup resources
     void Cleanup();
 
 private:
     // Window handle for status display
     HWND m_hwndStatus;
+    
+    // Separate video window for stream display
+    HWND m_hwndVideo;
     
     // Processing state
     std::atomic<bool> m_isPlaying;
@@ -63,9 +69,16 @@ private:
     std::atomic<size_t> m_totalBytesProcessed;
     std::atomic<size_t> m_segmentsProcessed;
     std::wstring m_currentStreamName;
+    std::wstring m_currentQuality;
     
     // Internal methods
     void ProcessThreadProc();
     void ProcessSegment(const std::vector<char>& data);
     std::wstring FormatStatus() const;
+    
+    // Video window management
+    bool CreateVideoWindow(const std::wstring& quality);
+    void DestroyVideoWindow();
+    std::pair<int, int> ParseQualitySize(const std::wstring& quality);
+    static LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 };

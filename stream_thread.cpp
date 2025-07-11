@@ -56,6 +56,7 @@ std::thread StartBuiltinStreamThread(
     std::function<void(const std::wstring&)> log_callback,
     int buffer_segments,
     const std::wstring& channel_name,
+    const std::wstring& quality,
     std::atomic<int>* chunk_count,
     std::atomic<bool>* user_requested_stop,
     HWND main_window,
@@ -66,10 +67,11 @@ std::thread StartBuiltinStreamThread(
             log_callback(L"Built-in streaming thread started.");
         
         AddDebugLog(L"StartBuiltinStreamThread: Channel=" + channel_name + 
+                   L", Quality=" + quality +
                    L", Tab=" + std::to_wstring(tab_index) + 
                    L", BufferSegs=" + std::to_wstring(buffer_segments));
         
-        bool ok = BufferAndStreamToBuiltinPlayer(hwndStatus, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count);
+        bool ok = BufferAndStreamToBuiltinPlayer(hwndStatus, playlist_url, cancel_token, buffer_segments, channel_name, quality, chunk_count);
         
         AddDebugLog(L"StartBuiltinStreamThread: Stream finished, ok=" + std::to_wstring(ok) + 
                    L", Channel=" + channel_name + L", Tab=" + std::to_wstring(tab_index));
