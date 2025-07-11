@@ -90,8 +90,13 @@ public:
         std::lock_guard<std::mutex> lock(queue_mutex);
         data_queue.push(data);
         buffer_size += data.size();
+        // Maintain minimum queue size to prevent freezing
         // AddDebugLog for excessive logging can be enabled if needed
         // AddDebugLog(L"[HTTP] Added " + std::to_wstring(data.size()) + L" bytes, queue=" + std::to_wstring(data_queue.size()));
+    }
+    
+    size_t GetMinQueueSize() const {
+        return 3; // Minimum 3 segments to prevent video freezing
     }
     
     size_t GetBufferSize() const {
@@ -153,8 +158,11 @@ private:
             "\r\n";
         send(client_socket, response.c_str(), (int)response.length(), 0);
         
-        // Stream data from queue with better buffering
+        // Stream data from queue with continuous flow to prevent freezing
         int segments_sent = 0;
+        int empty_queue_count = 0;
+        const int max_empty_waits = 100; // 5 seconds max wait for data (50ms * 100)
+        
         while (running && !stream_ended) {
             std::vector<char> data;
             {
@@ -163,6 +171,7 @@ private:
                     data = std::move(data_queue.front());
                     data_queue.pop();
                     buffer_size -= data.size();
+                    empty_queue_count = 0; // Reset counter when data is available
                 }
             }
             
@@ -174,8 +183,13 @@ private:
                 }
                 segments_sent++;
             } else {
-                // No data available, wait a bit
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                // No data available - use shorter wait to prevent video freezing
+                empty_queue_count++;
+                if (empty_queue_count >= max_empty_waits) {
+                    AddDebugLog(L"[HTTP] No data for too long, ending client session to prevent freeze");
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms
             }
         }
         
@@ -843,9 +857,25 @@ bool BufferAndPipeStreamToPlayer(
                 buffer_size = buffer_queue.size();
             }
             
-            // Wait for initial buffer before starting
+            // Wait for initial buffer before starting - increased for stability
             if (!started) {
                 if (buffer_size >= target_buffer_segments) {
+                    // Ensure HTTP server has adequate initial buffer to prevent freezing
+                    size_t http_buffer = http_server.GetQueueLength();
+                    if (http_buffer < 2) {
+                        // Pre-feed HTTP server with a couple segments
+                        int prefeed_count = 0;
+                        std::lock_guard<std::mutex> lock(buffer_mutex);
+                        while (!buffer_queue.empty() && prefeed_count < 3) {
+                            std::vector<char> prefeed_data = std::move(buffer_queue.front());
+                            buffer_queue.pop();
+                            http_server.AddData(prefeed_data);
+                            prefeed_count++;
+                        }
+                        AddDebugLog(L"[FEEDER] Pre-fed " + std::to_wstring(prefeed_count) + 
+                                   L" segments to HTTP server for startup stability for " + channel_name);
+                    }
+                    
                     started = true;
                     AddDebugLog(L"[FEEDER] Initial buffer ready (" + 
                                std::to_wstring(buffer_size) + L" segments), starting feed for " + channel_name);
@@ -857,26 +887,41 @@ bool BufferAndPipeStreamToPlayer(
                 }
             }
             
-            // Feed segments to HTTP server
-            std::vector<char> segment_data;
+            // Feed multiple segments to HTTP server to maintain continuous flow
+            std::vector<std::vector<char>> segments_to_feed;
+            size_t http_queue_size = http_server.GetQueueLength();
+            size_t min_queue_size = http_server.GetMinQueueSize();
+            
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
-                if (!buffer_queue.empty()) {
-                    segment_data = std::move(buffer_queue.front());
+                // Feed segments based on HTTP server queue size to maintain minimum
+                int max_segments_to_feed = std::max(1, (int)(min_queue_size - http_queue_size + 1));
+                int segments_fed = 0;
+                
+                while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
+                    segments_to_feed.push_back(std::move(buffer_queue.front()));
                     buffer_queue.pop();
+                    segments_fed++;
                 }
             }
             
-            if (!segment_data.empty()) {
-                http_server.AddData(segment_data);
-                size_t http_buffer = http_server.GetQueueLength();
-                AddDebugLog(L"[FEEDER] Fed segment to HTTP server, local_buffer=" + 
-                           std::to_wstring(buffer_size - 1) + L", http_buffer=" + 
-                           std::to_wstring(http_buffer) + L" for " + channel_name);
+            if (!segments_to_feed.empty()) {
+                for (auto& segment_data : segments_to_feed) {
+                    http_server.AddData(segment_data);
+                }
+                
+                size_t new_http_buffer = http_server.GetQueueLength();
+                size_t current_buffer = buffer_size - segments_to_feed.size();
+                AddDebugLog(L"[FEEDER] Fed " + std::to_wstring(segments_to_feed.size()) + 
+                           L" segments to HTTP server, local_buffer=" + std::to_wstring(current_buffer) + 
+                           L", http_buffer=" + std::to_wstring(new_http_buffer) + L" for " + channel_name);
                 
                 if (chunk_count) {
-                    *chunk_count = (int)buffer_size - 1;
+                    *chunk_count = (int)current_buffer;
                 }
+                
+                // Shorter wait when actively feeding
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             } else {
                 // No segments available, wait
                 AddDebugLog(L"[FEEDER] No segments available, waiting... (download_running=" + 
