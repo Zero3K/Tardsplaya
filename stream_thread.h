@@ -30,7 +30,7 @@ std::thread StartStreamThread(
 
 // Launches a thread to stream to the built-in player
 std::thread StartBuiltinStreamThread(
-    HWND hwndVideo,
+    HWND hwndStatus,
     const std::wstring& playlist_url,
     std::atomic<bool>& cancel_token,
     std::function<void(const std::wstring&)> log_callback = nullptr,

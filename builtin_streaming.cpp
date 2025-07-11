@@ -10,7 +10,7 @@
 #include <mutex>
 
 // Global built-in player instance
-static BuiltinMediaPlayer* g_builtinPlayer = nullptr;
+static SimpleBuiltinPlayer* g_builtinPlayer = nullptr;
 static std::mutex g_builtinPlayerMutex;
 
 // Utility: HTTP GET (returns as binary), with error retries
@@ -94,49 +94,49 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
             if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 in_scte35_out = true;
                 skip_next_segment = true;
-                AddDebugLog(L"[BUILTIN] Found SCTE35-OUT marker, entering ad block");
+                AddDebugLog(L"[SIMPLE_PLAYER] Found SCTE35-OUT marker, entering ad block");
                 continue;
             }
             // SCTE-35 ad marker detection (end of ad block)
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
                 in_scte35_out = false;
-                AddDebugLog(L"[BUILTIN] Found SCTE35-IN marker, exiting ad block");
+                AddDebugLog(L"[SIMPLE_PLAYER] Found SCTE35-IN marker, exiting ad block");
                 continue;
             }
             // Discontinuity markers (often used with ads)
             else if (line.find("#EXT-X-DISCONTINUITY") == 0 && in_scte35_out) {
-                AddDebugLog(L"[BUILTIN] Skipping discontinuity marker in ad block");
+                AddDebugLog(L"[SIMPLE_PLAYER] Skipping discontinuity marker in ad block");
                 continue;
             }
             // Stitched ad segments
             else if (line.find("stitched-ad") != std::string::npos) {
                 skip_next_segment = true;
-                AddDebugLog(L"[BUILTIN] Found stitched-ad marker");
+                AddDebugLog(L"[SIMPLE_PLAYER] Found stitched-ad marker");
             }
             // EXTINF tags with specific durations that indicate ads (2.001, 2.002 seconds)
             else if (line.find("#EXTINF:2.00") == 0 && 
                      (line.find("2.001") != std::string::npos || 
                       line.find("2.002") != std::string::npos)) {
                 skip_next_segment = true;
-                AddDebugLog(L"[BUILTIN] Found ad-duration EXTINF marker");
+                AddDebugLog(L"[SIMPLE_PLAYER] Found ad-duration EXTINF marker");
             }
             // DATERANGE markers for stitched ads
             else if (line.find("#EXT-X-DATERANGE:ID=\"stitched-ad") == 0) {
                 skip_next_segment = true;
-                AddDebugLog(L"[BUILTIN] Found stitched-ad DATERANGE marker");
+                AddDebugLog(L"[SIMPLE_PLAYER] Found stitched-ad DATERANGE marker");
             }
             // General stitched content detection
             else if (line.find("stitched") != std::string::npos ||
                      line.find("STITCHED") != std::string::npos) {
                 skip_next_segment = true;
-                AddDebugLog(L"[BUILTIN] Found general stitched content marker");
+                AddDebugLog(L"[SIMPLE_PLAYER] Found general stitched content marker");
             }
             // MIDROLL ad markers
             else if (line.find("EXT-X-DATERANGE") != std::string::npos && 
                      (line.find("MIDROLL") != std::string::npos ||
                       line.find("midroll") != std::string::npos)) {
                 skip_next_segment = true;
-                AddDebugLog(L"[BUILTIN] Found MIDROLL ad marker");
+                AddDebugLog(L"[SIMPLE_PLAYER] Found MIDROLL ad marker");
             }
             continue;
         }
@@ -144,7 +144,7 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         // This is a segment URL
         if (skip_next_segment || in_scte35_out) {
             // Skip this segment as it contains ad content
-            AddDebugLog(L"[BUILTIN] Skipping ad segment: " + std::wstring(line.begin(), line.end()));
+            AddDebugLog(L"[SIMPLE_PLAYER] Skipping ad segment: " + std::wstring(line.begin(), line.end()));
             skip_next_segment = false;
             continue;
         }
@@ -157,23 +157,23 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
 }
 
 bool BufferAndStreamToBuiltinPlayer(
-    HWND hwndVideo,
+    HWND hwndStatus,
     const std::wstring& playlist_url,
     std::atomic<bool>& cancel_token,
     int buffer_segments,
     const std::wstring& channel_name,
     std::atomic<int>* chunk_count
 ) {
-    AddDebugLog(L"[BUILTIN] Starting built-in streaming for " + channel_name + L", URL=" + playlist_url);
+    AddDebugLog(L"[SIMPLE_PLAYER] Starting built-in streaming for " + channel_name + L", URL=" + playlist_url);
     
     // Get or create the built-in player instance
-    BuiltinMediaPlayer* player = nullptr;
+    SimpleBuiltinPlayer* player = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_builtinPlayerMutex);
         if (!g_builtinPlayer) {
-            g_builtinPlayer = new BuiltinMediaPlayer();
-            if (!g_builtinPlayer->Initialize(hwndVideo)) {
-                AddDebugLog(L"[BUILTIN] Failed to initialize built-in player");
+            g_builtinPlayer = new SimpleBuiltinPlayer();
+            if (!g_builtinPlayer->Initialize(hwndStatus)) {
+                AddDebugLog(L"[SIMPLE_PLAYER] Failed to initialize built-in player");
                 delete g_builtinPlayer;
                 g_builtinPlayer = nullptr;
                 return false;
@@ -186,7 +186,7 @@ bool BufferAndStreamToBuiltinPlayer(
     std::string master;
     if (cancel_token.load()) return false;
     if (!HttpGetText(playlist_url, master, &cancel_token)) {
-        AddDebugLog(L"[BUILTIN] Failed to download master playlist for " + channel_name);
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to download master playlist for " + channel_name);
         return false;
     }
 
@@ -202,15 +202,15 @@ bool BufferAndStreamToBuiltinPlayer(
             break;
         }
     }
-    AddDebugLog(L"[BUILTIN] Using media playlist URL=" + media_playlist_url + L" for " + channel_name);
+    AddDebugLog(L"[SIMPLE_PLAYER] Using media playlist URL=" + media_playlist_url + L" for " + channel_name);
 
     // Start the stream in the built-in player
     if (!player->StartStream(channel_name)) {
-        AddDebugLog(L"[BUILTIN] Failed to start stream in built-in player");
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to start stream in built-in player");
         return false;
     }
     
-    AddDebugLog(L"[BUILTIN] Stream started in built-in player for " + channel_name);
+    AddDebugLog(L"[SIMPLE_PLAYER] Stream started in built-in player for " + channel_name);
 
     // Streaming loop with background download
     std::queue<std::vector<char>> buffer_queue;
@@ -222,7 +222,7 @@ bool BufferAndStreamToBuiltinPlayer(
     const int target_buffer_segments = std::max(buffer_segments, 5); // Minimum 5 segments
     const int max_buffer_segments = target_buffer_segments * 2; // Don't over-buffer
     
-    AddDebugLog(L"[BUILTIN] Target buffer: " + std::to_wstring(target_buffer_segments) + 
+    AddDebugLog(L"[SIMPLE_PLAYER] Target buffer: " + std::to_wstring(target_buffer_segments) + 
                L" segments, max: " + std::to_wstring(max_buffer_segments) + L" for " + channel_name);
 
     // Background playlist monitor and segment downloader thread
@@ -230,7 +230,7 @@ bool BufferAndStreamToBuiltinPlayer(
         int consecutive_errors = 0;
         const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
         
-        AddDebugLog(L"[BUILTIN] Starting download thread for " + channel_name);
+        AddDebugLog(L"[SIMPLE_PLAYER] Starting download thread for " + channel_name);
         
         while (true) {
             // Check all exit conditions
@@ -240,61 +240,61 @@ bool BufferAndStreamToBuiltinPlayer(
             bool error_limit_check = consecutive_errors < max_consecutive_errors;
             
             if (!download_running_check) {
-                AddDebugLog(L"[BUILTIN] Exit condition: download_running=false for " + channel_name);
+                AddDebugLog(L"[SIMPLE_PLAYER] Exit condition: download_running=false for " + channel_name);
                 break;
             }
             if (cancel_token_check) {
-                AddDebugLog(L"[BUILTIN] Exit condition: cancel_token=true for " + channel_name);
+                AddDebugLog(L"[SIMPLE_PLAYER] Exit condition: cancel_token=true for " + channel_name);
                 break;
             }
             if (!player_playing_check) {
-                AddDebugLog(L"[BUILTIN] Exit condition: player not playing for " + channel_name);
+                AddDebugLog(L"[SIMPLE_PLAYER] Exit condition: player not playing for " + channel_name);
                 break;
             }
             if (!error_limit_check) {
-                AddDebugLog(L"[BUILTIN] Exit condition: too many consecutive errors (" + 
+                AddDebugLog(L"[SIMPLE_PLAYER] Exit condition: too many consecutive errors (" + 
                            std::to_wstring(consecutive_errors) + L") for " + channel_name);
                 break;
             }
             
             // Download current playlist
             std::string playlist;
-            AddDebugLog(L"[BUILTIN] Fetching playlist for " + channel_name);
+            AddDebugLog(L"[SIMPLE_PLAYER] Fetching playlist for " + channel_name);
             if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
                 consecutive_errors++;
-                AddDebugLog(L"[BUILTIN] Playlist fetch FAILED for " + channel_name + 
+                AddDebugLog(L"[SIMPLE_PLAYER] Playlist fetch FAILED for " + channel_name + 
                            L", error " + std::to_wstring(consecutive_errors) + L"/" + 
                            std::to_wstring(max_consecutive_errors));
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 continue;
             }
             consecutive_errors = 0;
-            AddDebugLog(L"[BUILTIN] Playlist fetch SUCCESS for " + channel_name + 
+            AddDebugLog(L"[SIMPLE_PLAYER] Playlist fetch SUCCESS for " + channel_name + 
                        L", size=" + std::to_wstring(playlist.size()) + L" bytes");
 
             // Check for stream end
             if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
-                AddDebugLog(L"[BUILTIN] Found #EXT-X-ENDLIST - stream actually ended for " + channel_name);
+                AddDebugLog(L"[SIMPLE_PLAYER] Found #EXT-X-ENDLIST - stream actually ended for " + channel_name);
                 stream_ended_normally = true;
                 break;
             }
 
             auto segments = ParseSegments(playlist);
-            AddDebugLog(L"[BUILTIN] Parsed " + std::to_wstring(segments.size()) + 
+            AddDebugLog(L"[SIMPLE_PLAYER] Parsed " + std::to_wstring(segments.size()) + 
                        L" segments from playlist for " + channel_name);
             
             // Download new segments
             int new_segments_downloaded = 0;
             for (auto& seg : segments) {
                 if (!download_running || cancel_token.load()) {
-                    AddDebugLog(L"[BUILTIN] Breaking segment loop - download_running=" + 
+                    AddDebugLog(L"[SIMPLE_PLAYER] Breaking segment loop - download_running=" + 
                                std::to_wstring(download_running.load()) + L", cancel=" + 
                                std::to_wstring(cancel_token.load()) + L" for " + channel_name);
                     break;
                 }
                 
                 if (!player->IsPlaying()) {
-                    AddDebugLog(L"[BUILTIN] Breaking segment loop - player stopped for " + channel_name);
+                    AddDebugLog(L"[SIMPLE_PLAYER] Breaking segment loop - player stopped for " + channel_name);
                     break;
                 }
                 
@@ -308,7 +308,7 @@ bool BufferAndStreamToBuiltinPlayer(
                 }
                 
                 if (current_buffer_size >= max_buffer_segments) {
-                    AddDebugLog(L"[BUILTIN] Buffer full (" + std::to_wstring(current_buffer_size) + 
+                    AddDebugLog(L"[SIMPLE_PLAYER] Buffer full (" + std::to_wstring(current_buffer_size) + 
                                L"), waiting for " + channel_name);
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
@@ -336,28 +336,28 @@ bool BufferAndStreamToBuiltinPlayer(
                         buffer_queue.push(std::move(seg_data));
                     }
                     new_segments_downloaded++;
-                    AddDebugLog(L"[BUILTIN] Downloaded segment " + std::to_wstring(new_segments_downloaded) + 
+                    AddDebugLog(L"[SIMPLE_PLAYER] Downloaded segment " + std::to_wstring(new_segments_downloaded) + 
                                L", buffer=" + std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
                 } else {
-                    AddDebugLog(L"[BUILTIN] FAILED to download segment after retries for " + channel_name);
+                    AddDebugLog(L"[SIMPLE_PLAYER] FAILED to download segment after retries for " + channel_name);
                 }
             }
             
-            AddDebugLog(L"[BUILTIN] Segment batch complete - downloaded " + std::to_wstring(new_segments_downloaded) + 
+            AddDebugLog(L"[SIMPLE_PLAYER] Segment batch complete - downloaded " + std::to_wstring(new_segments_downloaded) + 
                        L" new segments for " + channel_name);
             
             // Poll playlist more frequently for live streams
-            AddDebugLog(L"[BUILTIN] Sleeping 1.5s before next playlist fetch for " + channel_name);
+            AddDebugLog(L"[SIMPLE_PLAYER] Sleeping 1.5s before next playlist fetch for " + channel_name);
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
         
-        AddDebugLog(L"[BUILTIN] *** DOWNLOAD THREAD ENDING *** for " + channel_name);
+        AddDebugLog(L"[SIMPLE_PLAYER] *** DOWNLOAD THREAD ENDING *** for " + channel_name);
     });
 
     // Main buffer feeding thread - feeds data to built-in player
     std::thread feeder_thread([&]() {
         bool started = false;
-        AddDebugLog(L"[BUILTIN] Starting feeder thread for " + channel_name);
+        AddDebugLog(L"[SIMPLE_PLAYER] Starting feeder thread for " + channel_name);
         
         while (true) {
             // Check all exit conditions
@@ -366,15 +366,15 @@ bool BufferAndStreamToBuiltinPlayer(
             bool data_available_check = (download_running.load() || !buffer_queue.empty());
             
             if (cancel_token_check) {
-                AddDebugLog(L"[BUILTIN] Exit condition: cancel_token=true for " + channel_name);
+                AddDebugLog(L"[SIMPLE_PLAYER] Exit condition: cancel_token=true for " + channel_name);
                 break;
             }
             if (!player_playing_check) {
-                AddDebugLog(L"[BUILTIN] Exit condition: player not playing for " + channel_name);
+                AddDebugLog(L"[SIMPLE_PLAYER] Exit condition: player not playing for " + channel_name);
                 break;
             }
             if (!data_available_check) {
-                AddDebugLog(L"[BUILTIN] Exit condition: no more data available (download stopped and buffer empty) for " + channel_name);
+                AddDebugLog(L"[SIMPLE_PLAYER] Exit condition: no more data available (download stopped and buffer empty) for " + channel_name);
                 break;
             }
             
@@ -388,10 +388,10 @@ bool BufferAndStreamToBuiltinPlayer(
             if (!started) {
                 if (buffer_size >= target_buffer_segments) {
                     started = true;
-                    AddDebugLog(L"[BUILTIN] Initial buffer ready (" + 
+                    AddDebugLog(L"[SIMPLE_PLAYER] Initial buffer ready (" + 
                                std::to_wstring(buffer_size) + L" segments), starting feed for " + channel_name);
                 } else {
-                    AddDebugLog(L"[BUILTIN] Waiting for initial buffer (" + std::to_wstring(buffer_size) + L"/" +
+                    AddDebugLog(L"[SIMPLE_PLAYER] Waiting for initial buffer (" + std::to_wstring(buffer_size) + L"/" +
                                std::to_wstring(target_buffer_segments) + L") for " + channel_name);
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
@@ -411,7 +411,7 @@ bool BufferAndStreamToBuiltinPlayer(
             if (!segment_data.empty()) {
                 if (player->FeedData(segment_data.data(), segment_data.size())) {
                     size_t current_buffer = buffer_size - 1;
-                    AddDebugLog(L"[BUILTIN] Fed segment to built-in player, local_buffer=" + 
+                    AddDebugLog(L"[SIMPLE_PLAYER] Fed segment to built-in player, local_buffer=" + 
                                std::to_wstring(current_buffer) + L" for " + channel_name);
                     
                     if (chunk_count) {
@@ -421,18 +421,18 @@ bool BufferAndStreamToBuiltinPlayer(
                     // Shorter wait when actively feeding
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 } else {
-                    AddDebugLog(L"[BUILTIN] Failed to feed data to built-in player for " + channel_name);
+                    AddDebugLog(L"[SIMPLE_PLAYER] Failed to feed data to built-in player for " + channel_name);
                     break;
                 }
             } else {
                 // No segments available, wait
-                AddDebugLog(L"[BUILTIN] No segments available, waiting... (download_running=" + 
+                AddDebugLog(L"[SIMPLE_PLAYER] No segments available, waiting... (download_running=" + 
                            std::to_wstring(download_running.load()) + L") for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         }
         
-        AddDebugLog(L"[BUILTIN] *** FEEDER THREAD ENDING *** for " + channel_name);
+        AddDebugLog(L"[SIMPLE_PLAYER] *** FEEDER THREAD ENDING *** for " + channel_name);
     });
 
     // Wait for download and feeder threads to complete
@@ -440,7 +440,7 @@ bool BufferAndStreamToBuiltinPlayer(
     download_running = false;
     feeder_thread.join();
 
-    AddDebugLog(L"[BUILTIN] Cleanup starting for " + channel_name + 
+    AddDebugLog(L"[SIMPLE_PLAYER] Cleanup starting for " + channel_name + 
                L", cancel=" + std::to_wstring(cancel_token.load()) + 
                L", player_playing=" + std::to_wstring(player->IsPlaying()) +
                L", stream_ended_normally=" + std::to_wstring(stream_ended_normally.load()));
@@ -451,26 +451,25 @@ bool BufferAndStreamToBuiltinPlayer(
     bool normal_end = stream_ended_normally.load();
     bool user_cancel = cancel_token.load();
     
-    AddDebugLog(L"[BUILTIN] Cleanup complete for " + channel_name);
-    AddDebugLog(L"[BUILTIN] Exit reason: normal_end=" + std::to_wstring(normal_end) + 
+    AddDebugLog(L"[SIMPLE_PLAYER] Cleanup complete for " + channel_name);
+    AddDebugLog(L"[SIMPLE_PLAYER] Exit reason: normal_end=" + std::to_wstring(normal_end) + 
                L", user_cancel=" + std::to_wstring(user_cancel) + L" for " + channel_name);
     
     return normal_end || user_cancel;
 }
 
 bool InitializeBuiltinPlayerSystem() {
-    AddDebugLog(L"[BUILTIN] Initializing built-in player system");
-    return MediaFoundationUtils::InitializeMediaFoundation();
+    AddDebugLog(L"[SIMPLE_PLAYER] Initializing simple built-in player system");
+    // No complex initialization needed for simple player
+    return true;
 }
 
 void ShutdownBuiltinPlayerSystem() {
-    AddDebugLog(L"[BUILTIN] Shutting down built-in player system");
+    AddDebugLog(L"[SIMPLE_PLAYER] Shutting down simple built-in player system");
     
     std::lock_guard<std::mutex> lock(g_builtinPlayerMutex);
     if (g_builtinPlayer) {
         delete g_builtinPlayer;
         g_builtinPlayer = nullptr;
     }
-    
-    MediaFoundationUtils::ShutdownMediaFoundation();
 }
