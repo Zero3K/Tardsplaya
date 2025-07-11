@@ -920,7 +920,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     
     // Start the appropriate streaming thread based on player type
     if (tab.useBuiltinPlayer) {
-        // Use built-in player
+        // Use built-in player with memory-mapped streaming  
+        AddDebugLog(L"WatchStream: Using builtin player with memory maps, channel=" + tab.channel);
         tab.streamThread = StartBuiltinStreamThread(
             nullptr, // No status window needed - separate video window will handle display
             url,

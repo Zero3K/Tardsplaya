@@ -13,6 +13,7 @@
 #include <vector>
 #include <queue>
 #include <mutex>
+#include "stream_memory_map.h"
 
 // Media Foundation headers for video playback
 #include <mfapi.h>
@@ -46,6 +47,9 @@ public:
     
     // Feed raw stream data (TS segments) to the player for processing
     bool FeedData(const char* data, size_t size);
+    
+    // Read stream data from memory map and feed to player (for memory-mapped streaming)
+    bool ReadFromMemoryMap(const std::wstring& stream_name, std::atomic<bool>& cancel_token);
     
     // Check if player is currently processing
     bool IsPlaying() const;

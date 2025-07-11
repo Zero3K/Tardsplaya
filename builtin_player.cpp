@@ -583,3 +583,93 @@ bool SimpleBuiltinPlayer::StartVideoPlayback() {
     AddDebugLog(L"[SIMPLE_PLAYER] Video playback started (visual mode)");
     return true;
 }
+
+bool SimpleBuiltinPlayer::ReadFromMemoryMap(const std::wstring& stream_name, std::atomic<bool>& cancel_token) {
+    AddDebugLog(L"[BUILTIN_MEMORY] Starting memory map reader for stream: " + stream_name);
+    
+    // Create memory map reader
+    StreamMemoryMap memory_map;
+    
+    // Try to open the memory map (with retries for startup timing)
+    bool connected = false;
+    for (int attempts = 0; attempts < 60; ++attempts) {  // Increased retries for memory map creation
+        if (memory_map.OpenAsReader(stream_name)) {
+            connected = true;
+            AddDebugLog(L"[BUILTIN_MEMORY] Successfully connected to memory map: " + stream_name);
+            break;
+        }
+        
+        if (cancel_token.load()) {
+            AddDebugLog(L"[BUILTIN_MEMORY] Cancelled during memory map connection");
+            return false;
+        }
+        
+        AddDebugLog(L"[BUILTIN_MEMORY] Attempt " + std::to_wstring(attempts + 1) + L" to connect to memory map failed, retrying...");
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    
+    if (!connected) {
+        AddDebugLog(L"[BUILTIN_MEMORY] Failed to connect to memory map after retries");
+        return false;
+    }
+
+    // Buffer for reading data
+    const size_t BUFFER_SIZE = 64 * 1024; // 64KB buffer
+    std::vector<char> buffer(BUFFER_SIZE);
+    
+    size_t total_bytes_read = 0;
+    int consecutive_empty_reads = 0;
+    const int MAX_EMPTY_READS = 200; // 10 seconds at 50ms intervals
+    
+    AddDebugLog(L"[BUILTIN_MEMORY] Starting data reading from memory map for stream: " + stream_name);
+    
+    while (!cancel_token.load() && m_isPlaying.load()) {
+        // Read data from memory map
+        size_t bytes_read = memory_map.ReadData(buffer.data(), BUFFER_SIZE);
+        
+        if (bytes_read > 0) {
+            // Feed data to player
+            if (!FeedData(buffer.data(), bytes_read)) {
+                AddDebugLog(L"[BUILTIN_MEMORY] Failed to feed data to player");
+                break;
+            }
+            
+            total_bytes_read += bytes_read;
+            consecutive_empty_reads = 0;
+            
+            // Log periodically
+            if (total_bytes_read % (1024 * 1024) == 0) { // Every MB
+                AddDebugLog(L"[BUILTIN_MEMORY] Read " + std::to_wstring(total_bytes_read / 1024) + L" KB from memory map");
+            }
+        } else {
+            consecutive_empty_reads++;
+            
+            // Check if stream has ended
+            if (memory_map.IsStreamEnded()) {
+                AddDebugLog(L"[BUILTIN_MEMORY] Stream ended normally, total bytes read: " + std::to_wstring(total_bytes_read));
+                break;
+            }
+            
+            // Check if writer is still active
+            if (!memory_map.IsWriterActive()) {
+                AddDebugLog(L"[BUILTIN_MEMORY] Writer no longer active, ending stream");
+                break;
+            }
+            
+            // Too many empty reads - might indicate a problem
+            if (consecutive_empty_reads >= MAX_EMPTY_READS) {
+                AddDebugLog(L"[BUILTIN_MEMORY] Too many consecutive empty reads (" + 
+                           std::to_wstring(consecutive_empty_reads) + L"), ending stream");
+                break;
+            }
+            
+            // Brief pause before retry
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    
+    AddDebugLog(L"[BUILTIN_MEMORY] Memory map reading completed for stream: " + stream_name + 
+               L", total bytes read: " + std::to_wstring(total_bytes_read));
+    
+    return total_bytes_read > 0;
+}

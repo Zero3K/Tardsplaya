@@ -18,11 +18,20 @@ std::thread StartStreamThread(
         if (log_callback)
             log_callback(L"Streaming thread started.");
         
+        bool is_builtin_player = (player_path == L"builtin");
         AddDebugLog(L"StartStreamThread: Channel=" + channel_name + 
                    L", Tab=" + std::to_wstring(tab_index) + 
-                   L", BufferSegs=" + std::to_wstring(buffer_segments));
+                   L", BufferSegs=" + std::to_wstring(buffer_segments) +
+                   L", IsBuiltin=" + std::to_wstring(is_builtin_player));
         
-        bool ok = BufferAndPipeStreamToPlayer(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count);
+        bool ok = false;
+        if (is_builtin_player) {
+            // For builtin player, start both memory streaming and builtin player
+            ok = BufferAndPipeStreamToPlayer(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count);
+        } else {
+            // For external players, use normal memory-mapped streaming
+            ok = BufferAndPipeStreamToPlayer(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count);
+        }
         
         AddDebugLog(L"StartStreamThread: Stream finished, ok=" + std::to_wstring(ok) + 
                    L", Channel=" + channel_name + L", Tab=" + std::to_wstring(tab_index));

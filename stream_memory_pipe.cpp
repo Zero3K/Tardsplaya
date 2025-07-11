@@ -239,22 +239,70 @@ bool BufferAndStreamToPlayerViaMemoryMap(
     
     AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Created memory map for " + channel_name);
 
-    // 3. Launch media player with memory map helper
+    // 3. Launch media player with memory map helper (unless using builtin player)
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi = {};
+    bool is_builtin_player = (player_path == L"builtin");
     
-    if (!StreamMemoryMapUtils::LaunchPlayerWithMemoryMap(player_path, channel_name, &pi, channel_name)) {
-        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to launch player for " + channel_name);
-        memory_map.Close();
-        // Decrement stream counter on early exit
-        std::lock_guard<std::mutex> lock(g_memory_stream_mutex);
-        --g_memory_active_streams;
-        return false;
+    if (is_builtin_player) {
+        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Using builtin player for " + channel_name + L", skipping external player launch");
+        // For builtin player, we don't launch an external process
+        // The builtin player will connect to the memory map directly
+        memset(&pi, 0, sizeof(pi));
+        
+        // Start the builtin player to read from this memory map
+        // This will be done in a separate thread so the memory streaming can continue
+        std::thread builtin_player_thread([channel_name]() {
+            AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Starting builtin player thread for " + channel_name);
+            
+            // Get or create the built-in player instance
+            // Forward declarations to avoid circular dependencies
+            class SimpleBuiltinPlayer;
+            extern SimpleBuiltinPlayer* g_builtinPlayer;
+            extern std::mutex g_builtinPlayerMutex;
+            
+            SimpleBuiltinPlayer* player = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(g_builtinPlayerMutex);
+                if (!g_builtinPlayer) {
+                    g_builtinPlayer = new SimpleBuiltinPlayer();
+                    if (!g_builtinPlayer->Initialize(nullptr)) {
+                        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to initialize built-in player for " + channel_name);
+                        return;
+                    }
+                }
+                player = g_builtinPlayer;
+            }
+            
+            // Start the stream in the built-in player
+            if (!player->StartStream(channel_name, L"")) {
+                AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to start stream in built-in player for " + channel_name);
+                return;
+            }
+            
+            // Create a local cancel token for the builtin player
+            std::atomic<bool> local_cancel(false);
+            
+            // Read from memory map and feed to player
+            bool read_success = player->ReadFromMemoryMap(channel_name, local_cancel);
+            AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Builtin player finished for " + channel_name + 
+                       L", read_success=" + std::to_wstring(read_success));
+        });
+        builtin_player_thread.detach(); // Let it run independently
+    } else {
+        if (!StreamMemoryMapUtils::LaunchPlayerWithMemoryMap(player_path, channel_name, &pi, channel_name)) {
+            AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to launch player for " + channel_name);
+            memory_map.Close();
+            // Decrement stream counter on early exit
+            std::lock_guard<std::mutex> lock(g_memory_stream_mutex);
+            --g_memory_active_streams;
+            return false;
+        }
+        
+        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Launched player for " + channel_name + 
+                   L", PID=" + std::to_wstring(pi.dwProcessId));
     }
-    
-    AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Launched player for " + channel_name + 
-               L", PID=" + std::to_wstring(pi.dwProcessId));
 
     // 4. Robust streaming with background download threads and persistent buffering
     std::queue<std::vector<char>> buffer_queue;
@@ -280,7 +328,7 @@ bool BufferAndStreamToPlayerViaMemoryMap(
             // Check all exit conditions individually for detailed logging
             bool download_running_check = download_running.load();
             bool cancel_token_check = cancel_token.load();
-            bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" download_thread", pi.dwProcessId);
+            bool process_running_check = is_builtin_player || ProcessStillRunning(pi.hProcess, channel_name + L" download_thread", pi.dwProcessId);
             bool error_limit_check = consecutive_errors < max_consecutive_errors;
             
             if (!download_running_check) {
@@ -337,7 +385,7 @@ bool BufferAndStreamToPlayerViaMemoryMap(
                     break;
                 }
                 
-                bool process_still_running = ProcessStillRunning(pi.hProcess, channel_name + L" segment_download", pi.dwProcessId);
+                bool process_still_running = is_builtin_player || ProcessStillRunning(pi.hProcess, channel_name + L" segment_download", pi.dwProcessId);
                 if (!process_still_running) {
                     AddDebugLog(L"[MEMORY_DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
                     break;
@@ -407,7 +455,7 @@ bool BufferAndStreamToPlayerViaMemoryMap(
         while (true) {
             // Check all exit conditions individually for detailed logging  
             bool cancel_token_check = cancel_token.load();
-            bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId);
+            bool process_running_check = is_builtin_player || ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId);
             bool data_available_check = (download_running.load() || !buffer_queue.empty());
             bool reader_active_check = memory_map.IsReaderActive();
             
@@ -492,7 +540,7 @@ bool BufferAndStreamToPlayerViaMemoryMap(
 
     AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Cleanup starting for " + channel_name + 
                L", cancel=" + std::to_wstring(cancel_token.load()) + 
-               L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" cleanup_check", pi.dwProcessId)) +
+               L", process_running=" + std::to_wstring(is_builtin_player || ProcessStillRunning(pi.hProcess, channel_name + L" cleanup_check", pi.dwProcessId)) +
                L", stream_ended_normally=" + std::to_wstring(stream_ended_normally.load()));
 
     // Signal stream end to memory map
@@ -504,13 +552,17 @@ bool BufferAndStreamToPlayerViaMemoryMap(
     // Close memory map
     memory_map.Close();
 
-    // Cleanup process
-    if (ProcessStillRunning(pi.hProcess, channel_name + L" termination_check", pi.dwProcessId)) {
-        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Terminating player process for " + channel_name);
-        TerminateProcess(pi.hProcess, 0);
+    // Cleanup process (only for external players)
+    if (!is_builtin_player) {
+        if (ProcessStillRunning(pi.hProcess, channel_name + L" termination_check", pi.dwProcessId)) {
+            AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Terminating player process for " + channel_name);
+            TerminateProcess(pi.hProcess, 0);
+        }
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else {
+        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Builtin player cleanup for " + channel_name);
     }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
     
     // Decrement active stream counter
     int remaining_streams;
