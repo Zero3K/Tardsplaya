@@ -17,14 +17,15 @@ void AddDebugLog(const std::wstring& msg) {
 }
 
 int wmain(int argc, wchar_t* argv[]) {
-    if (argc != 2) {
-        std::wcerr << L"Usage: TardsplayaViewer.exe <stream_name>" << std::endl;
-        std::wcerr << L"This program reads stream data from a memory-mapped file and outputs to stdout" << std::endl;
+    if (argc != 3) {
+        std::wcerr << L"Usage: TardsplayaViewer.exe <stream_name> <player_path>" << std::endl;
+        std::wcerr << L"This program reads stream data from a memory-mapped file and pipes it to the media player" << std::endl;
         return 1;
     }
 
     std::wstring stream_name = argv[1];
-    AddDebugLog(L"Starting viewer for stream: " + stream_name);
+    std::wstring player_path = argv[2];
+    AddDebugLog(L"Starting viewer for stream: " + stream_name + L", player: " + player_path);
 
     // Create memory map reader
     StreamMemoryMap memory_map;
@@ -47,10 +48,47 @@ int wmain(int argc, wchar_t* argv[]) {
         return 1;
     }
 
-    // Set stdout to binary mode to handle video data properly
-    _setmode(_fileno(stdout), _O_BINARY);
+    // Launch the media player with stdin pipe
+    STARTUPINFOW si = {};
+    PROCESS_INFORMATION pi = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
     
-    AddDebugLog(L"Starting data streaming to stdout...");
+    // Create pipes for stdin
+    HANDLE hReadPipe, hWritePipe;
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+        AddDebugLog(L"Failed to create pipe for media player");
+        return 1;
+    }
+    
+    // Make sure the write handle is not inherited
+    SetHandleInformation(hWritePipe, HANDLE_FLAG_INHERIT, 0);
+    
+    si.hStdInput = hReadPipe;
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    
+    std::wstring player_cmd = L"\"" + player_path + L"\" -";
+    AddDebugLog(L"Launching media player: " + player_cmd);
+    
+    if (!CreateProcessW(nullptr, const_cast<LPWSTR>(player_cmd.c_str()), 
+                        nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
+        AddDebugLog(L"Failed to launch media player, Error=" + std::to_wstring(GetLastError()));
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return 1;
+    }
+    
+    // Close the read handle in the parent process
+    CloseHandle(hReadPipe);
+    
+    AddDebugLog(L"Media player launched successfully, PID=" + std::to_wstring(pi.dwProcessId));
+    
+    AddDebugLog(L"Starting data streaming to media player...");
     
     // Buffer for reading data
     const size_t BUFFER_SIZE = 64 * 1024; // 64KB buffer
@@ -65,17 +103,16 @@ int wmain(int argc, wchar_t* argv[]) {
         size_t bytes_read = memory_map.ReadData(buffer.data(), BUFFER_SIZE);
         
         if (bytes_read > 0) {
-            // Write data to stdout (for media player)
+            // Write data to media player stdin
             DWORD bytes_written;
-            HANDLE stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
             
-            if (!WriteFile(stdout_handle, buffer.data(), static_cast<DWORD>(bytes_read), &bytes_written, nullptr)) {
-                AddDebugLog(L"Failed to write to stdout, media player may have disconnected");
+            if (!WriteFile(hWritePipe, buffer.data(), static_cast<DWORD>(bytes_read), &bytes_written, nullptr)) {
+                AddDebugLog(L"Failed to write to media player pipe, player may have disconnected");
                 break;
             }
             
             if (bytes_written != bytes_read) {
-                AddDebugLog(L"Incomplete write to stdout: " + std::to_wstring(bytes_written) + 
+                AddDebugLog(L"Incomplete write to media player: " + std::to_wstring(bytes_written) + 
                            L"/" + std::to_wstring(bytes_read) + L" bytes");
                 break;
             }
@@ -83,8 +120,8 @@ int wmain(int argc, wchar_t* argv[]) {
             total_bytes_read += bytes_read;
             consecutive_empty_reads = 0;
             
-            // Flush stdout to ensure data is sent immediately
-            FlushFileBuffers(stdout_handle);
+            // Flush pipe to ensure data is sent immediately
+            FlushFileBuffers(hWritePipe);
         } else {
             consecutive_empty_reads++;
             
@@ -115,6 +152,12 @@ int wmain(int argc, wchar_t* argv[]) {
     
     // Cleanup
     memory_map.Close();
+    CloseHandle(hWritePipe);
+    
+    // Wait for media player to finish
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
     
     return 0;
 }

@@ -455,19 +455,17 @@ bool LaunchPlayerWithMemoryMap(
         return false;
     }
     
-    // Create command line: helper.exe stream_name | player.exe -
     // Use the simplified memory map naming scheme that matches CreateAsWriter
     std::wstring memory_map_name = L"TardsplayaStream_" + stream_name;
-    std::wstring cmd = L"\"" + helper_path + L"\" \"" + memory_map_name + L"\" | \"" + player_path + L"\" -";
+    
+    // Instead of using pipe command, we'll launch the viewer and let it handle the connection
+    // The media player will be launched by the viewer itself
+    std::wstring cmd = L"\"" + helper_path + L"\" \"" + memory_map_name + L"\" \"" + player_path + L"\"";
     
     AddDebugLog(L"LaunchPlayerWithMemoryMap: Command: " + cmd);
     
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = nullptr;   // Will be connected via pipe
-    si.hStdOutput = nullptr;  // Inherit
-    si.hStdError = nullptr;   // Inherit
     
     BOOL success = CreateProcessW(
         nullptr,                // Application name
