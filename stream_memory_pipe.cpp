@@ -6,6 +6,8 @@
 #include "stream_memory_pipe.h"
 #include "stream_memory_map.h"
 #include "stream_thread.h"
+#include "builtin_player.h"
+#include "builtin_streaming.h"
 #include <tlhelp32.h>
 #include <string>
 #include <vector>
@@ -257,22 +259,15 @@ bool BufferAndStreamToPlayerViaMemoryMap(
             AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Starting builtin player thread for " + channel_name);
             
             // Get or create the built-in player instance
-            // Forward declarations to avoid circular dependencies
-            class SimpleBuiltinPlayer;
-            extern SimpleBuiltinPlayer* g_builtinPlayer;
-            extern std::mutex g_builtinPlayerMutex;
-            
             SimpleBuiltinPlayer* player = nullptr;
             {
-                std::lock_guard<std::mutex> lock(g_builtinPlayerMutex);
-                if (!g_builtinPlayer) {
-                    g_builtinPlayer = new SimpleBuiltinPlayer();
-                    if (!g_builtinPlayer->Initialize(nullptr)) {
-                        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to initialize built-in player for " + channel_name);
-                        return;
-                    }
+                std::lock_guard<std::mutex> lock(GetBuiltinPlayerMutex());
+                if (!GetBuiltinPlayer()) {
+                    // We can't create the player here since it's static in the other module
+                    AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Built-in player not initialized for " + channel_name);
+                    return;
                 }
-                player = g_builtinPlayer;
+                player = GetBuiltinPlayer();
             }
             
             // Start the stream in the built-in player

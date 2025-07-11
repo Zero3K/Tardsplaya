@@ -248,7 +248,7 @@ bool BufferAndStreamToBuiltinPlayer(
             // Download current playlist
             std::string playlist;
             AddDebugLog(L"[SIMPLE_PLAYER] Fetching playlist for " + channel_name);
-            if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
+            if (!HttpGetText(playlist_url, playlist, &cancel_token)) {
                 consecutive_errors++;
                 AddDebugLog(L"[SIMPLE_PLAYER] Playlist fetch FAILED for " + channel_name + 
                            L", error " + std::to_wstring(consecutive_errors) + L"/" + 
@@ -303,7 +303,7 @@ bool BufferAndStreamToBuiltinPlayer(
                 }
                 
                 seen_urls.insert(seg);
-                std::wstring seg_url = JoinUrl(media_playlist_url, seg);
+                std::wstring seg_url = JoinUrl(playlist_url, seg);
                 std::vector<char> seg_data;
                 
                 // Download with retries
@@ -460,4 +460,14 @@ void ShutdownBuiltinPlayerSystem() {
         delete g_builtinPlayer;
         g_builtinPlayer = nullptr;
     }
+}
+
+// Get the global builtin player instance (thread-safe)
+SimpleBuiltinPlayer* GetBuiltinPlayer() {
+    return g_builtinPlayer;
+}
+
+// Get the global builtin player mutex
+std::mutex& GetBuiltinPlayerMutex() {
+    return g_builtinPlayerMutex;
 }

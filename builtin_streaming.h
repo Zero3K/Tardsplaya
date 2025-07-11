@@ -22,6 +22,12 @@ bool BufferAndStreamToBuiltinPlayer(
     std::atomic<int>* chunk_count
 );
 
+// Get the global builtin player instance (thread-safe)
+SimpleBuiltinPlayer* GetBuiltinPlayer();
+
+// Get the global builtin player mutex
+std::mutex& GetBuiltinPlayerMutex();
+
 // Initialize the built-in player system (simplified - no complex dependencies)
 bool InitializeBuiltinPlayerSystem();
 
