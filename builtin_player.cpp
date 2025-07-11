@@ -1,8 +1,13 @@
+#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_  // Prevent winsock.h conflicts  
+#define NOMINMAX      // Prevent Windows min/max macros
+#include <windows.h>
 #include "builtin_player.h"
 #include "stream_thread.h"
 #include <chrono>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
 
 // SimpleBuiltinPlayer implementation
 SimpleBuiltinPlayer::SimpleBuiltinPlayer()

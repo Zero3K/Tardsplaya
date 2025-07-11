@@ -1,5 +1,10 @@
+#define WIN32_LEAN_AND_MEAN
+#define _WINSOCKAPI_  // Prevent winsock.h conflicts with winhttp.h
+#define NOMINMAX      // Prevent Windows min/max macros
+#include <windows.h>
 #include "builtin_streaming.h"
 #include "stream_thread.h"
+#include <algorithm>
 #include <winhttp.h>
 #include <sstream>
 #include <vector>
