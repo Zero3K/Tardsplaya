@@ -35,7 +35,6 @@ struct StreamTab {
     HWND hQualities;
     HWND hWatchBtn;
     HWND hStopBtn;
-    HWND hVideoWindow;  // Video rendering window for built-in player
     std::vector<std::wstring> qualities;
     std::map<std::wstring, std::wstring> qualityToUrl;
     std::map<std::wstring, std::wstring> standardToOriginalQuality;
@@ -58,7 +57,6 @@ struct StreamTab {
         , hQualities(other.hQualities)
         , hWatchBtn(other.hWatchBtn)
         , hStopBtn(other.hStopBtn)
-        , hVideoWindow(other.hVideoWindow)
         , qualities(std::move(other.qualities))
         , qualityToUrl(std::move(other.qualityToUrl))
         , standardToOriginalQuality(std::move(other.standardToOriginalQuality))
@@ -82,7 +80,6 @@ struct StreamTab {
         other.hQualities = nullptr;
         other.hWatchBtn = nullptr;
         other.hStopBtn = nullptr;
-        other.hVideoWindow = nullptr;
         other.isStreaming = false;
         other.playerProcess = nullptr;
     }
@@ -925,7 +922,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     if (tab.useBuiltinPlayer) {
         // Use built-in player
         tab.streamThread = StartBuiltinStreamThread(
-            tab.hVideoWindow,
+            nullptr, // No status window needed - separate video window will handle display
             url,
             tab.cancelToken,
             [](const std::wstring& msg) {
@@ -1050,22 +1047,10 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
 
-    // Create video window for built-in player
-    HWND hVideoWindow = CreateWindowEx(WS_EX_CLIENTEDGE, L"STATIC", L"Video will appear here when streaming...", 
-        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE, 
-        360, 10, 300, 200, hwnd, nullptr, g_hInst, nullptr);
-    SendMessage(hVideoWindow, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-    
-    // Add control information label
-    HWND hInfoLabel = CreateWindowEx(0, L"STATIC", L"Built-in Player Mode - No external player needed", 
-        WS_CHILD | WS_VISIBLE, 10, 170, 340, 18, hwnd, nullptr, g_hInst, nullptr);
-    SendMessage(hInfoLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-
     tab.hChild = hwnd;
     tab.hQualities = hQualList;
     tab.hWatchBtn = hWatch;
     tab.hStopBtn = hStop;
-    tab.hVideoWindow = hVideoWindow;
     // Store index instead of pointer to avoid vector reallocation issues
     // We'll set this properly in AddStreamTab after the tab is added to vector
     return hwnd;
