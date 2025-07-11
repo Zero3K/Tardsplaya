@@ -1,8 +1,14 @@
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef _WINSOCKAPI_
 #define _WINSOCKAPI_  // Prevent winsock.h from being included by windows.h
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX      // Prevent Windows min/max macros
+#endif
 #include <windows.h>
 #include <string>
 #include <atomic>
