@@ -84,7 +84,7 @@
       <TargetMachine>MachineX86</TargetMachine>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>comctl32.lib;winhttp.lib;wininet.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>comctl32.lib;winhttp.lib;wininet.lib;psapi.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;evr.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -101,10 +101,12 @@
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalDependencies>comctl32.lib;winhttp.lib;wininet.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>comctl32.lib;winhttp.lib;wininet.lib;psapi.lib;mf.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;evr.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="builtin_player.cpp" />
+    <ClCompile Include="builtin_streaming.cpp" />
     <ClCompile Include="favorites.cpp" />
     <ClCompile Include="playlist_parser.cpp" />
     <ClCompile Include="stream_memory_map.cpp" />
@@ -120,6 +122,8 @@
     <ClCompile Include="urlencode.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="builtin_player.h" />
+    <ClInclude Include="builtin_streaming.h" />
     <ClInclude Include="favorites.h" />
     <ClInclude Include="json_minimal.h" />
     <ClInclude Include="tlsclient\lock.h" />

@@ -25,6 +25,7 @@
 #include "twitch_api.h"
 #include "favorites.h"
 #include "playlist_parser.h"
+#include "builtin_streaming.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
@@ -34,6 +35,7 @@ struct StreamTab {
     HWND hQualities;
     HWND hWatchBtn;
     HWND hStopBtn;
+    HWND hVideoWindow;  // Video rendering window for built-in player
     std::vector<std::wstring> qualities;
     std::map<std::wstring, std::wstring> qualityToUrl;
     std::map<std::wstring, std::wstring> standardToOriginalQuality;
@@ -42,6 +44,7 @@ struct StreamTab {
     std::atomic<bool> userRequestedStop{false}; // Track if user explicitly requested stop
     bool isStreaming = false;
     bool playerStarted = false; // Track if player has started successfully
+    bool useBuiltinPlayer = true; // Use built-in player instead of external
     HANDLE playerProcess = nullptr; // Store player process handle for cleanup
     std::atomic<int> chunkCount{0}; // Track actual chunk queue size
 
@@ -55,6 +58,7 @@ struct StreamTab {
         , hQualities(other.hQualities)
         , hWatchBtn(other.hWatchBtn)
         , hStopBtn(other.hStopBtn)
+        , hVideoWindow(other.hVideoWindow)
         , qualities(std::move(other.qualities))
         , qualityToUrl(std::move(other.qualityToUrl))
         , standardToOriginalQuality(std::move(other.standardToOriginalQuality))
@@ -63,6 +67,7 @@ struct StreamTab {
         , userRequestedStop(other.userRequestedStop.load())  // Preserve user stop state
         , isStreaming(other.isStreaming)
         , playerStarted(other.playerStarted)
+        , useBuiltinPlayer(other.useBuiltinPlayer)
         , playerProcess(other.playerProcess)
         , chunkCount(other.chunkCount.load())
     {
@@ -77,6 +82,7 @@ struct StreamTab {
         other.hQualities = nullptr;
         other.hWatchBtn = nullptr;
         other.hStopBtn = nullptr;
+        other.hVideoWindow = nullptr;
         other.isStreaming = false;
         other.playerProcess = nullptr;
     }
@@ -854,11 +860,13 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
 
 
 
-    // Check if player path exists
-    DWORD dwAttrib = GetFileAttributesW(g_playerPath.c_str());
-    if (dwAttrib == INVALID_FILE_ATTRIBUTES || (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
-        MessageBoxW(tab.hChild, L"Media player not found. Please check the player path in Settings.", L"Error", MB_OK | MB_ICONERROR);
-        return;
+    // Check if external player path exists (only for legacy external player mode)
+    if (!tab.useBuiltinPlayer) {
+        DWORD dwAttrib = GetFileAttributesW(g_playerPath.c_str());
+        if (dwAttrib == INVALID_FILE_ATTRIBUTES || (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
+            MessageBoxW(tab.hChild, L"External media player not found. Please check the player path in Settings or use built-in player mode.", L"Error", MB_OK | MB_ICONERROR);
+            return;
+        }
     }
 
     int sel = (int)SendMessage(tab.hQualities, LB_GETCURSEL, 0, 0);
@@ -911,24 +919,44 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     tab.userRequestedStop = false;
     
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
-               L", PlayerPath=" + g_playerPath + L", URL=" + url);
+               L", UseBuiltinPlayer=" + std::to_wstring(tab.useBuiltinPlayer) + L", URL=" + url);
     
-    // Start the buffering thread
-    tab.streamThread = StartStreamThread(
-        g_playerPath,
-        url,
-        tab.cancelToken,
-        [](const std::wstring& msg) {
-            // Log callback - post message to main thread for thread-safe logging
-            PostMessage(g_hMainWnd, WM_USER + 1, 0, (LPARAM)new std::wstring(msg));
-        },
-        3, // buffer 3 segments
-        tab.channel, // channel name for player window title
-        &tab.chunkCount, // chunk count for status display
-        &tab.userRequestedStop, // user requested stop flag
-        g_hMainWnd, // main window handle for auto-stop messages
-        tabIndex // tab index for identifying which stream to auto-stop
-    );
+    // Start the appropriate streaming thread based on player type
+    if (tab.useBuiltinPlayer) {
+        // Use built-in player
+        tab.streamThread = StartBuiltinStreamThread(
+            tab.hVideoWindow,
+            url,
+            tab.cancelToken,
+            [](const std::wstring& msg) {
+                // Log callback - post message to main thread for thread-safe logging
+                PostMessage(g_hMainWnd, WM_USER + 1, 0, (LPARAM)new std::wstring(msg));
+            },
+            3, // buffer 3 segments
+            tab.channel, // channel name for player window title
+            &tab.chunkCount, // chunk count for status display
+            &tab.userRequestedStop, // user requested stop flag
+            g_hMainWnd, // main window handle for auto-stop messages
+            tabIndex // tab index for identifying which stream to auto-stop
+        );
+    } else {
+        // Use external player (legacy mode)
+        tab.streamThread = StartStreamThread(
+            g_playerPath,
+            url,
+            tab.cancelToken,
+            [](const std::wstring& msg) {
+                // Log callback - post message to main thread for thread-safe logging
+                PostMessage(g_hMainWnd, WM_USER + 1, 0, (LPARAM)new std::wstring(msg));
+            },
+            3, // buffer 3 segments
+            tab.channel, // channel name for player window title
+            &tab.chunkCount, // chunk count for status display
+            &tab.userRequestedStop, // user requested stop flag
+            g_hMainWnd, // main window handle for auto-stop messages
+            tabIndex // tab index for identifying which stream to auto-stop
+        );
+    }
     
     AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));
     
@@ -992,7 +1020,7 @@ ATOM RegisterStreamChildClass() {
 }
 
 HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"") {
-    RECT rc = { 0, 0, 480, 180 };
+    RECT rc = { 0, 0, 680, 380 }; // Made wider to accommodate video window
     HWND hwnd = CreateWindowEx(0, L"StreamChildWin", NULL,
         WS_CHILD | WS_VISIBLE,
         rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
@@ -1021,10 +1049,22 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
 
+    // Create video window for built-in player
+    HWND hVideoWindow = CreateWindowEx(WS_EX_CLIENTEDGE, L"STATIC", L"Video will appear here when streaming...", 
+        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE, 
+        360, 10, 300, 200, hwnd, nullptr, g_hInst, nullptr);
+    SendMessage(hVideoWindow, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
+    // Add control information label
+    HWND hInfoLabel = CreateWindowEx(0, L"STATIC", L"Built-in Player Mode - No external player needed", 
+        WS_CHILD | WS_VISIBLE, 10, 170, 340, 18, hwnd, nullptr, g_hInst, nullptr);
+    SendMessage(hInfoLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
     tab.hChild = hwnd;
     tab.hQualities = hQualList;
     tab.hWatchBtn = hWatch;
     tab.hStopBtn = hStop;
+    tab.hVideoWindow = hVideoWindow;
     // Store index instead of pointer to avoid vector reallocation issues
     // We'll set this properly in AddStreamTab after the tab is added to vector
     return hwnd;
@@ -1490,6 +1530,12 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     // Initialize TLS client system for fallback support
     TLSClientHTTP::Initialize();
     
+    // Initialize built-in player system
+    if (!InitializeBuiltinPlayerSystem()) {
+        MessageBoxW(nullptr, L"Failed to initialize built-in media player system. The application will close.", L"Error", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+    
     WNDCLASS wc = { 0 };
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = hInstance;
@@ -1511,5 +1557,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             DispatchMessage(&msg);
         }
     }
+    
+    // Cleanup built-in player system
+    ShutdownBuiltinPlayerSystem();
+    
     return (int)msg.wParam;
 }
