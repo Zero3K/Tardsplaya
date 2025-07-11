@@ -1,4 +1,5 @@
 #include "stream_pipe.h"
+#include "stream_memory_pipe.h"
 #include "stream_thread.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -473,7 +474,7 @@ static void SetPlayerWindowTitle(DWORD processId, const std::wstring& title) {
     }
 }
 
-bool BufferAndPipeStreamToPlayer(
+bool BufferAndPipeStreamToPlayerHTTP(
     const std::wstring& player_path,
     const std::wstring& playlist_url,
     std::atomic<bool>& cancel_token,
@@ -989,4 +990,21 @@ bool BufferAndPipeStreamToPlayer(
                L", user_cancel=" + std::to_wstring(user_cancel) + L" for " + channel_name);
     
     return normal_end || user_cancel;
+}
+
+// New memory-mapped file streaming function (replaces HTTP piping)
+bool BufferAndPipeStreamToPlayer(
+    const std::wstring& player_path,
+    const std::wstring& playlist_url,
+    std::atomic<bool>& cancel_token,
+    int buffer_segments,
+    const std::wstring& channel_name,
+    std::atomic<int>* chunk_count
+) {
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Using memory-mapped file streaming for " + channel_name);
+    
+    // Call the new memory-mapped streaming function
+    return BufferAndStreamToPlayerViaMemoryMap(
+        player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count
+    );
 }

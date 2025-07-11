@@ -455,8 +455,9 @@ bool LaunchPlayerWithMemoryMap(
         return false;
     }
     
-    // Create command line: helper.exe memory_map_name | player.exe -
-    std::wstring memory_map_name = StreamMemoryMap::GenerateMemoryMapName(stream_name);
+    // Create command line: helper.exe stream_name | player.exe -
+    // Use the simplified memory map naming scheme that matches CreateAsWriter
+    std::wstring memory_map_name = L"TardsplayaStream_" + stream_name;
     std::wstring cmd = L"\"" + helper_path + L"\" \"" + memory_map_name + L"\" | \"" + player_path + L"\" -";
     
     AddDebugLog(L"LaunchPlayerWithMemoryMap: Command: " + cmd);
@@ -494,11 +495,30 @@ bool LaunchPlayerWithMemoryMap(
 }
 
 std::wstring CreateMemoryMapReaderHelper() {
-    // For now, return empty to indicate this approach needs more work
-    // In a full implementation, we'd create a small helper executable
-    // that reads from memory map and outputs to stdout
-    AddDebugLog(L"CreateMemoryMapReaderHelper: Helper creation not yet implemented");
-    return L"";
+    // Return the path to the TardsplayaViewer.exe helper program
+    // This helper reads from memory maps and outputs to stdout for media players
+    
+    // Get the current module directory
+    wchar_t module_path[MAX_PATH];
+    GetModuleFileNameW(nullptr, module_path, MAX_PATH);
+    
+    // Replace the executable name with TardsplayaViewer.exe
+    std::wstring exe_path = module_path;
+    size_t last_slash = exe_path.find_last_of(L"\\/");
+    if (last_slash != std::wstring::npos) {
+        exe_path = exe_path.substr(0, last_slash + 1) + L"TardsplayaViewer.exe";
+    } else {
+        exe_path = L"TardsplayaViewer.exe";
+    }
+    
+    // Check if the helper exists
+    if (GetFileAttributesW(exe_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        AddDebugLog(L"CreateMemoryMapReaderHelper: TardsplayaViewer.exe not found at " + exe_path);
+        return L"";
+    }
+    
+    AddDebugLog(L"CreateMemoryMapReaderHelper: Found helper at " + exe_path);
+    return exe_path;
 }
 
 } // namespace StreamMemoryMapUtils
