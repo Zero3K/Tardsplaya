@@ -14,6 +14,21 @@
 #include <queue>
 #include <mutex>
 
+// Media Foundation headers for video playback
+#include <mfapi.h>
+#include <mfplay.h>
+#include <mfreadwrite.h>
+#include <mferror.h>
+#include <evr.h>
+#include <d3d9.h>
+
+#pragma comment(lib, "mf.lib")
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfplay.lib")
+#pragma comment(lib, "mfreadwrite.lib")
+#pragma comment(lib, "evr.lib")
+#pragma comment(lib, "d3d9.lib")
+
 // Simplified built-in player that processes streams internally without external players
 class SimpleBuiltinPlayer {
 public:
@@ -71,6 +86,15 @@ private:
     std::wstring m_currentStreamName;
     std::wstring m_currentQuality;
     
+    // Media Foundation components for video rendering
+    IMFMediaSession* m_pSession;
+    IMFVideoDisplayControl* m_pVideoDisplay;
+    IMFByteStream* m_pByteStream;
+    IMFSourceResolver* m_pSourceResolver;
+    IMFMediaSource* m_pMediaSource;
+    IMFTopology* m_pTopology;
+    std::atomic<bool> m_mfInitialized;
+    
     // Internal methods
     void ProcessThreadProc();
     void ProcessSegment(const std::vector<char>& data);
@@ -81,4 +105,11 @@ private:
     void DestroyVideoWindow();
     std::pair<int, int> ParseQualitySize(const std::wstring& quality);
     static LRESULT CALLBACK VideoWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    
+    // Media Foundation methods
+    bool InitializeMediaFoundation();
+    void CleanupMediaFoundation();
+    bool CreateVideoSession();
+    bool SetVideoWindow(HWND hwnd);
+    bool StartVideoPlayback();
 };
