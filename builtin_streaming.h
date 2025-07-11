@@ -3,9 +3,6 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#ifndef _WINSOCKAPI_
-#define _WINSOCKAPI_  // Prevent winsock.h conflicts
-#endif
 #ifndef NOMINMAX
 #define NOMINMAX      // Prevent Windows min/max macros
 #endif

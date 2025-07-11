@@ -1,9 +1,11 @@
-#include "stream_memory_pipe.h"
-#include "stream_memory_map.h"
-#include "stream_thread.h"
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include "stream_memory_pipe.h"
+#include "stream_memory_map.h"
+#include "stream_thread.h"
 #include <tlhelp32.h>
 #include <string>
 #include <vector>
