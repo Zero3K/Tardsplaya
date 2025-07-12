@@ -265,7 +265,7 @@ bool BufferAndStreamToPlayerViaMemoryMap(
         // Use the direct builtin streaming approach
         std::atomic<int> local_chunk_count(0);
         bool result = BufferAndStreamToBuiltinPlayer(
-            hwndStatus,
+            NULL,  // No status window handle available in this context
             playlist_url,
             cancel_token,
             buffer_segments,
