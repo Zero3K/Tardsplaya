@@ -22,6 +22,7 @@
 #include <mferror.h>
 #include <evr.h>
 #include <d3d9.h>
+#include <propvarutil.h>
 
 #pragma comment(lib, "mf.lib")
 #pragma comment(lib, "mfplat.lib")
@@ -114,6 +115,9 @@ private:
     bool InitializeMediaFoundation();
     void CleanupMediaFoundation();
     bool CreateVideoSession();
+    bool CreateMediaSourceFromData(const std::vector<char>& data);
+    bool CreateTopology();
+    bool StartVideoPlaybackFromFile(const std::wstring& filePath);
     bool SetVideoWindow(HWND hwnd);
     bool StartVideoPlayback();
 };

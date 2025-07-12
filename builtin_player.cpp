@@ -222,21 +222,77 @@ void SimpleBuiltinPlayer::ProcessThreadProc() {
 }
 
 void SimpleBuiltinPlayer::ProcessSegment(const std::vector<char>& data) {
-    // Process the segment data - in a real implementation, this would decode and render the video/audio
-    // For now, we track statistics and update visual representation
-    
+    // Process the actual MPEG-TS segment data for video playback
     size_t segmentSize = data.size();
     m_totalBytesProcessed += segmentSize;
     m_segmentsProcessed++;
     
-    // Simulate processing time based on segment size
-    int processingTime = static_cast<int>(segmentSize / 10000); // ~1ms per 10KB
-    processingTime = std::max(1, std::min(processingTime, 100)); // 1-100ms range
-    
-    std::this_thread::sleep_for(std::chrono::milliseconds(processingTime));
+    if (!data.empty()) {
+        // Write stream data to a temporary file for playback
+        static std::wstring temp_file_path;
+        static HANDLE temp_file_handle = INVALID_HANDLE_VALUE;
+        static bool playback_started = false;
+        
+        // Create temporary file on first segment
+        if (temp_file_handle == INVALID_HANDLE_VALUE) {
+            wchar_t temp_path[MAX_PATH];
+            wchar_t temp_filename[MAX_PATH];
+            
+            GetTempPath(MAX_PATH, temp_path);
+            GetTempFileName(temp_path, L"TDS", 0, temp_filename);
+            
+            // Change extension to .ts for better codec detection
+            temp_file_path = temp_filename;
+            size_t dot_pos = temp_file_path.find_last_of(L'.');
+            if (dot_pos != std::wstring::npos) {
+                temp_file_path = temp_file_path.substr(0, dot_pos) + L".ts";
+            }
+            
+            temp_file_handle = CreateFile(
+                temp_file_path.c_str(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ,
+                nullptr,
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
+                nullptr
+            );
+            
+            if (temp_file_handle != INVALID_HANDLE_VALUE) {
+                AddDebugLog(L"[SIMPLE_PLAYER] Created temporary stream file: " + temp_file_path);
+            } else {
+                AddDebugLog(L"[SIMPLE_PLAYER] Failed to create temporary file");
+                return;
+            }
+        }
+        
+        // Write segment data to file
+        if (temp_file_handle != INVALID_HANDLE_VALUE) {
+            DWORD bytes_written = 0;
+            WriteFile(temp_file_handle, data.data(), (DWORD)segmentSize, &bytes_written, nullptr);
+            FlushFileBuffers(temp_file_handle);
+            
+            // Try to start playback after we have enough data
+            if (!playback_started && m_totalBytesProcessed >= 2 * 1024 * 1024) { // 2MB threshold
+                AddDebugLog(L"[SIMPLE_PLAYER] Attempting to start video playback with " + 
+                           std::to_wstring(m_totalBytesProcessed / 1024) + L" KB of data");
+                
+                if (StartVideoPlaybackFromFile(temp_file_path)) {
+                    playback_started = true;
+                    AddDebugLog(L"[SIMPLE_PLAYER] Video playback started successfully");
+                } else {
+                    AddDebugLog(L"[SIMPLE_PLAYER] Failed to start video playback");
+                }
+            }
+        }
+        
+        AddDebugLog(L"[SIMPLE_PLAYER] Processed segment " + std::to_wstring(m_segmentsProcessed.load()) + 
+                   L", size=" + std::to_wstring(segmentSize) + L" bytes, total=" + 
+                   std::to_wstring(m_totalBytesProcessed / 1024) + L" KB");
+    }
     
     // Update video window display every few segments
-    if (m_hwndVideo && (m_segmentsProcessed.load() % 2 == 0)) {
+    if (m_hwndVideo && (m_segmentsProcessed.load() % 5 == 0)) {
         InvalidateRect(m_hwndVideo, NULL, FALSE);
     }
     
@@ -563,10 +619,32 @@ void SimpleBuiltinPlayer::CleanupMediaFoundation() {
 }
 
 bool SimpleBuiltinPlayer::CreateVideoSession() {
-    // For now, we'll use the visual representation instead of full MF implementation
-    // Full Media Foundation implementation would require creating a media session,
-    // source resolver, topology, and handling MPEG-TS stream parsing
-    AddDebugLog(L"[SIMPLE_PLAYER] Using visual representation mode");
+    AddDebugLog(L"[SIMPLE_PLAYER] Creating Media Foundation video session");
+    
+    HRESULT hr = S_OK;
+    
+    // Create source resolver
+    hr = MFCreateSourceResolver(&m_pSourceResolver);
+    if (FAILED(hr)) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create source resolver, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    // Create a byte stream for MPEG-TS data
+    hr = MFCreateTempFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_DELETE_IF_EXIST, MF_FILEFLAGS_NONE, &m_pByteStream);
+    if (FAILED(hr)) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create byte stream, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    // Create media session
+    hr = MFCreateMediaSession(NULL, &m_pSession);
+    if (FAILED(hr)) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create media session, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    AddDebugLog(L"[SIMPLE_PLAYER] Media Foundation video session created successfully");
     return true;
 }
 
@@ -577,11 +655,299 @@ bool SimpleBuiltinPlayer::SetVideoWindow(HWND hwnd) {
     return true;
 }
 
-bool SimpleBuiltinPlayer::StartVideoPlayback() {
-    // For now, we'll rely on the visual representation
-    // Full implementation would start the Media Foundation session
-    AddDebugLog(L"[SIMPLE_PLAYER] Video playback started (visual mode)");
+bool SimpleBuiltinPlayer::CreateMediaSourceFromData(const std::vector<char>& data) {
+    AddDebugLog(L"[SIMPLE_PLAYER] Creating media source from " + std::to_wstring(data.size()) + L" bytes of data");
+    
+    HRESULT hr = S_OK;
+    
+    if (!m_pSourceResolver) {
+        hr = MFCreateSourceResolver(&m_pSourceResolver);
+        if (FAILED(hr)) {
+            AddDebugLog(L"[SIMPLE_PLAYER] Failed to create source resolver, hr=" + std::to_wstring(hr));
+            return false;
+        }
+    }
+    
+    // Create a memory-backed byte stream from the accumulated data
+    if (m_pByteStream) {
+        m_pByteStream->Release();
+        m_pByteStream = nullptr;
+    }
+    
+    hr = MFCreateMFByteStreamOnStream(nullptr, &m_pByteStream);
+    if (FAILED(hr)) {
+        // Try alternative approach with temp file
+        hr = MFCreateTempFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_DELETE_IF_EXIST, MF_FILEFLAGS_NONE, &m_pByteStream);
+        if (FAILED(hr)) {
+            AddDebugLog(L"[SIMPLE_PLAYER] Failed to create byte stream, hr=" + std::to_wstring(hr));
+            return false;
+        }
+    }
+    
+    // Write initial data to the byte stream
+    ULONG bytesWritten = 0;
+    hr = m_pByteStream->Write(data.data(), (ULONG)data.size(), &bytesWritten);
+    if (FAILED(hr) || bytesWritten != data.size()) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to write initial data to byte stream, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    // Set the current position back to the beginning
+    LARGE_INTEGER seekPos = { 0 };
+    hr = m_pByteStream->Seek(seekPos, STREAM_SEEK_SET, nullptr);
+    if (FAILED(hr)) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to seek to beginning of byte stream, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    // Try to create a media source from the byte stream
+    DWORD dwFlags = 0;
+    MF_OBJECT_TYPE ObjectType = MF_OBJECT_INVALID;
+    IUnknown* pSource = nullptr;
+    
+    hr = m_pSourceResolver->CreateObjectFromByteStream(
+        m_pByteStream,
+        nullptr,
+        MF_RESOLUTION_MEDIASOURCE,
+        nullptr,
+        &ObjectType,
+        &pSource
+    );
+    
+    if (SUCCEEDED(hr) && pSource) {
+        hr = pSource->QueryInterface(IID_PPV_ARGS(&m_pMediaSource));
+        pSource->Release();
+        
+        if (SUCCEEDED(hr)) {
+            AddDebugLog(L"[SIMPLE_PLAYER] Successfully created media source from data");
+            return true;
+        }
+    }
+    
+    AddDebugLog(L"[SIMPLE_PLAYER] Failed to create media source from data, hr=" + std::to_wstring(hr));
+    return false;
+}
+
+bool SimpleBuiltinPlayer::CreateTopology() {
+    AddDebugLog(L"[SIMPLE_PLAYER] Creating topology for media playback");
+    
+    if (!m_pMediaSource) {
+        AddDebugLog(L"[SIMPLE_PLAYER] No media source available for topology creation");
+        return false;
+    }
+    
+    HRESULT hr = S_OK;
+    
+    // Create the topology
+    hr = MFCreateTopology(&m_pTopology);
+    if (FAILED(hr)) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create topology, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    // Get presentation descriptor from media source
+    IMFPresentationDescriptor* pPD = nullptr;
+    hr = m_pMediaSource->CreatePresentationDescriptor(&pPD);
+    if (FAILED(hr)) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create presentation descriptor, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    // Get the number of streams
+    DWORD cStreams = 0;
+    hr = pPD->GetStreamDescriptorCount(&cStreams);
+    if (FAILED(hr)) {
+        pPD->Release();
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to get stream count, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    AddDebugLog(L"[SIMPLE_PLAYER] Found " + std::to_wstring(cStreams) + L" streams in media source");
+    
+    // Add topology nodes for each stream
+    for (DWORD i = 0; i < cStreams; i++) {
+        BOOL fSelected = FALSE;
+        IMFStreamDescriptor* pSD = nullptr;
+        
+        hr = pPD->GetStreamDescriptorByIndex(i, &fSelected, &pSD);
+        if (SUCCEEDED(hr) && fSelected) {
+            // Create source node
+            IMFTopologyNode* pSourceNode = nullptr;
+            hr = MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, &pSourceNode);
+            if (SUCCEEDED(hr)) {
+                // Set source node attributes
+                pSourceNode->SetUnknown(MF_TOPONODE_SOURCE, m_pMediaSource);
+                pSourceNode->SetUnknown(MF_TOPONODE_PRESENTATION_DESCRIPTOR, pPD);
+                pSourceNode->SetUnknown(MF_TOPONODE_STREAM_DESCRIPTOR, pSD);
+                
+                // Add source node to topology
+                m_pTopology->AddNode(pSourceNode);
+                
+                // Create output node for video renderer
+                IMFTopologyNode* pOutputNode = nullptr;
+                hr = MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, &pOutputNode);
+                if (SUCCEEDED(hr)) {
+                    // Create video renderer
+                    IMFActivate* pRendererActivate = nullptr;
+                    hr = MFCreateVideoRendererActivate(m_hwndVideo, &pRendererActivate);
+                    if (SUCCEEDED(hr)) {
+                        pOutputNode->SetObject(pRendererActivate);
+                        m_pTopology->AddNode(pOutputNode);
+                        
+                        // Connect source to output
+                        pSourceNode->ConnectOutput(0, pOutputNode, 0);
+                        
+                        AddDebugLog(L"[SIMPLE_PLAYER] Successfully created topology for stream " + std::to_wstring(i));
+                        pRendererActivate->Release();
+                    }
+                    pOutputNode->Release();
+                }
+                pSourceNode->Release();
+            }
+        }
+        
+        if (pSD) pSD->Release();
+    }
+    
+    pPD->Release();
+    
+    AddDebugLog(L"[SIMPLE_PLAYER] Topology creation completed");
     return true;
+}
+
+bool SimpleBuiltinPlayer::StartVideoPlaybackFromFile(const std::wstring& filePath) {
+    AddDebugLog(L"[SIMPLE_PLAYER] Starting video playback from file: " + filePath);
+    
+    HRESULT hr = S_OK;
+    
+    // Create source resolver if not already created
+    if (!m_pSourceResolver) {
+        hr = MFCreateSourceResolver(&m_pSourceResolver);
+        if (FAILED(hr)) {
+            AddDebugLog(L"[SIMPLE_PLAYER] Failed to create source resolver, hr=" + std::to_wstring(hr));
+            return false;
+        }
+    }
+    
+    // Create media source from file
+    MF_OBJECT_TYPE ObjectType = MF_OBJECT_INVALID;
+    IUnknown* pSource = nullptr;
+    
+    hr = m_pSourceResolver->CreateObjectFromURL(
+        filePath.c_str(),
+        MF_RESOLUTION_MEDIASOURCE,
+        nullptr,
+        &ObjectType,
+        &pSource
+    );
+    
+    if (FAILED(hr) || !pSource) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create media source from file, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    // Get media source interface
+    if (m_pMediaSource) {
+        m_pMediaSource->Release();
+        m_pMediaSource = nullptr;
+    }
+    
+    hr = pSource->QueryInterface(IID_PPV_ARGS(&m_pMediaSource));
+    pSource->Release();
+    
+    if (FAILED(hr)) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to get media source interface, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    // Create the video session if not already created
+    if (!CreateVideoSession()) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create video session");
+        return false;
+    }
+    
+    // Create topology for the media source
+    if (!CreateTopology()) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create topology");
+        return false;
+    }
+    
+    // Set the topology on the session
+    if (m_pSession && m_pTopology) {
+        hr = m_pSession->SetTopology(0, m_pTopology);
+        if (FAILED(hr)) {
+            AddDebugLog(L"[SIMPLE_PLAYER] Failed to set topology, hr=" + std::to_wstring(hr));
+            return false;
+        }
+        
+        // Start the media session
+        PROPVARIANT var;
+        PropVariantInit(&var);
+        var.vt = VT_EMPTY;
+        
+        hr = m_pSession->Start(&GUID_NULL, &var);
+        PropVariantClear(&var);
+        
+        if (FAILED(hr)) {
+            AddDebugLog(L"[SIMPLE_PLAYER] Failed to start media session, hr=" + std::to_wstring(hr));
+            return false;
+        }
+        
+        AddDebugLog(L"[SIMPLE_PLAYER] Media session started successfully from file");
+        return true;
+    }
+    
+    AddDebugLog(L"[SIMPLE_PLAYER] No media session available for playback");
+    return false;
+}
+
+bool SimpleBuiltinPlayer::StartVideoPlayback() {
+    AddDebugLog(L"[SIMPLE_PLAYER] Starting video playback with Media Foundation");
+    
+    // Create the video session if not already created
+    if (!CreateVideoSession()) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create video session");
+        return false;
+    }
+    
+    if (!m_pMediaSource) {
+        AddDebugLog(L"[SIMPLE_PLAYER] No media source available for playback");
+        return false;
+    }
+    
+    // Create topology for the media source
+    if (!CreateTopology()) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create topology");
+        return false;
+    }
+    
+    // Set the topology on the session
+    if (m_pSession && m_pTopology) {
+        HRESULT hr = m_pSession->SetTopology(0, m_pTopology);
+        if (FAILED(hr)) {
+            AddDebugLog(L"[SIMPLE_PLAYER] Failed to set topology, hr=" + std::to_wstring(hr));
+            return false;
+        }
+        
+        // Start the media session
+        PROPVARIANT var;
+        PropVariantInit(&var);
+        var.vt = VT_EMPTY;
+        
+        hr = m_pSession->Start(&GUID_NULL, &var);
+        PropVariantClear(&var);
+        
+        if (FAILED(hr)) {
+            AddDebugLog(L"[SIMPLE_PLAYER] Failed to start media session, hr=" + std::to_wstring(hr));
+            return false;
+        }
+        
+        AddDebugLog(L"[SIMPLE_PLAYER] Media session started successfully");
+        return true;
+    }
+    
+    AddDebugLog(L"[SIMPLE_PLAYER] No media session available for playback");
+    return false;
 }
 
 bool SimpleBuiltinPlayer::ReadFromMemoryMap(const std::wstring& stream_name, std::atomic<bool>& cancel_token) {
