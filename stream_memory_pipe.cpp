@@ -251,45 +251,41 @@ bool BufferAndStreamToPlayerViaMemoryMap(
     bool is_builtin_player = (player_path == L"builtin");
     
     if (is_builtin_player) {
-        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Using builtin player for " + channel_name + L", skipping external player launch");
-        // For builtin player, we don't launch an external process
-        // The builtin player will connect to the memory map directly
-        memset(&pi, 0, sizeof(pi));
+        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Using builtin player for " + channel_name + L", switching to direct streaming mode");
+        // For builtin player, bypass memory maps and use direct streaming
+        memory_map.Close();  // Don't need memory map for builtin player
         
-        // Start the builtin player to read from this memory map
-        // This will be done in a separate thread so the memory streaming can continue
-        std::thread builtin_player_thread([channel_name]() {
-            AddDebugLog(L"[BUILTIN_THREAD] Starting builtin player thread for " + channel_name);
-            
-            // Create a new builtin player instance for this stream
-            SimpleBuiltinPlayer builtin_player;
-            AddDebugLog(L"[BUILTIN_THREAD] Created builtin player instance for " + channel_name);
-            
-            if (!builtin_player.Initialize(nullptr)) {
-                AddDebugLog(L"[BUILTIN_THREAD] Failed to initialize builtin player for " + channel_name);
-                return;
-            }
-            AddDebugLog(L"[BUILTIN_THREAD] Initialized builtin player for " + channel_name);
-            
-            // Start the stream in the built-in player
-            if (!builtin_player.StartStream(channel_name, L"")) {
-                AddDebugLog(L"[BUILTIN_THREAD] Failed to start stream in built-in player for " + channel_name);
-                return;
-            }
-            AddDebugLog(L"[BUILTIN_THREAD] Started stream in builtin player for " + channel_name);
-            
-            // Create a local cancel token for the builtin player
-            std::atomic<bool> local_cancel(false);
-            
-            AddDebugLog(L"[BUILTIN_THREAD] About to start reading from memory map for " + channel_name);
-            // Read from memory map and feed to player
-            bool read_success = builtin_player.ReadFromMemoryMap(channel_name, local_cancel);
-            AddDebugLog(L"[BUILTIN_THREAD] Builtin player finished for " + channel_name + 
-                       L", read_success=" + std::to_wstring(read_success));
-        });
-        builtin_player_thread.detach(); // Let it run independently
+        // Get quality from URL (extract from playlist_url if possible)
+        std::wstring quality = L"720p";  // Default
+        if (playlist_url.find(L"720p") != std::wstring::npos) quality = L"720p";
+        else if (playlist_url.find(L"1080p") != std::wstring::npos) quality = L"1080p";
+        else if (playlist_url.find(L"480p") != std::wstring::npos) quality = L"480p";
+        else if (playlist_url.find(L"360p") != std::wstring::npos) quality = L"360p";
         
-        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Builtin player thread created and detached for " + channel_name);
+        // Use the direct builtin streaming approach
+        std::atomic<int> local_chunk_count(0);
+        bool result = BufferAndStreamToBuiltinPlayer(
+            hwndStatus,
+            playlist_url,
+            cancel_token,
+            buffer_segments,
+            channel_name,
+            quality,
+            &local_chunk_count
+        );
+        
+        if (chunk_count) {
+            *chunk_count = local_chunk_count.load();
+        }
+        
+        // Decrement stream counter
+        std::lock_guard<std::mutex> lock(g_memory_stream_mutex);
+        --g_memory_active_streams;
+        
+        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Builtin player streaming finished for " + channel_name + 
+                   L", result=" + std::to_wstring(result));
+        
+        return result;
     } else {
         if (!StreamMemoryMapUtils::LaunchPlayerWithMemoryMap(player_path, channel_name, &pi, channel_name)) {
             AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to launch player for " + channel_name);
