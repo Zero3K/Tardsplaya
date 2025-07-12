@@ -611,8 +611,6 @@ bool BufferAndPipeStreamToPlayer(
     
     // Close the read handle since the child process now owns it
     CloseHandle(hStdinRead);
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
     if (!success) {
         DWORD error = GetLastError();
