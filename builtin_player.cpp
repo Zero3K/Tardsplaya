@@ -98,11 +98,7 @@ bool SimpleBuiltinPlayer::StartStream(const std::wstring& streamName, const std:
     
     m_isPlaying = true;
     
-    // Start video playback
-    if (!StartVideoPlayback()) {
-        AddDebugLog(L"[SIMPLE_PLAYER] Failed to start video playback");
-        return false;
-    }
+    // Video playback will start automatically when we have enough data
     
     UpdateStatus();
     
