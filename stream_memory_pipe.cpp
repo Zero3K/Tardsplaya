@@ -194,6 +194,9 @@ bool BufferAndStreamToPlayerViaMemoryMap(
     const std::wstring& channel_name,
     std::atomic<int>* chunk_count
 ) {
+    AddDebugLog(L"[ENTRY] BufferAndStreamToPlayerViaMemoryMap called with player_path=" + player_path + 
+               L", channel=" + channel_name + L", buffer_segments=" + std::to_wstring(buffer_segments));
+    
     // Track active streams for cross-stream interference detection
     int current_stream_count;
     {
@@ -256,30 +259,37 @@ bool BufferAndStreamToPlayerViaMemoryMap(
         // Start the builtin player to read from this memory map
         // This will be done in a separate thread so the memory streaming can continue
         std::thread builtin_player_thread([channel_name]() {
-            AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Starting builtin player thread for " + channel_name);
+            AddDebugLog(L"[BUILTIN_THREAD] Starting builtin player thread for " + channel_name);
             
             // Create a new builtin player instance for this stream
             SimpleBuiltinPlayer builtin_player;
+            AddDebugLog(L"[BUILTIN_THREAD] Created builtin player instance for " + channel_name);
+            
             if (!builtin_player.Initialize(nullptr)) {
-                AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to initialize builtin player for " + channel_name);
+                AddDebugLog(L"[BUILTIN_THREAD] Failed to initialize builtin player for " + channel_name);
                 return;
             }
+            AddDebugLog(L"[BUILTIN_THREAD] Initialized builtin player for " + channel_name);
             
             // Start the stream in the built-in player
             if (!builtin_player.StartStream(channel_name, L"")) {
-                AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to start stream in built-in player for " + channel_name);
+                AddDebugLog(L"[BUILTIN_THREAD] Failed to start stream in built-in player for " + channel_name);
                 return;
             }
+            AddDebugLog(L"[BUILTIN_THREAD] Started stream in builtin player for " + channel_name);
             
             // Create a local cancel token for the builtin player
             std::atomic<bool> local_cancel(false);
             
+            AddDebugLog(L"[BUILTIN_THREAD] About to start reading from memory map for " + channel_name);
             // Read from memory map and feed to player
             bool read_success = builtin_player.ReadFromMemoryMap(channel_name, local_cancel);
-            AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Builtin player finished for " + channel_name + 
+            AddDebugLog(L"[BUILTIN_THREAD] Builtin player finished for " + channel_name + 
                        L", read_success=" + std::to_wstring(read_success));
         });
         builtin_player_thread.detach(); // Let it run independently
+        
+        AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Builtin player thread created and detached for " + channel_name);
     } else {
         if (!StreamMemoryMapUtils::LaunchPlayerWithMemoryMap(player_path, channel_name, &pi, channel_name)) {
             AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to launch player for " + channel_name);
