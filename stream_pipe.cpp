@@ -488,7 +488,7 @@ bool BufferAndPipeStreamToPlayer(
         current_stream_count = ++g_active_streams;
     }
     
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting robust HTTP streaming for " + channel_name + L", URL=" + playlist_url);
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Starting IPC streaming for " + channel_name + L", URL=" + playlist_url);
     AddDebugLog(L"[STREAMS] This is stream #" + std::to_wstring(current_stream_count) + L" concurrently active");
     
     // Add startup delay for multi-stream scenarios to reduce resource contention
@@ -545,70 +545,72 @@ bool BufferAndPipeStreamToPlayer(
     }
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Using media playlist URL=" + media_playlist_url + L" for " + channel_name);
 
-    // Add startup delay for multi-stream scenarios to reduce resource contention
-    int stream_count = g_active_streams.load();
-    if (stream_count > 1) {
-        int delay_ms = (stream_count - 1) * 500; // 500ms delay per additional stream
-        AddDebugLog(L"[ISOLATION] Adding " + std::to_wstring(delay_ms) + L"ms startup delay for stream #" + 
-                   std::to_wstring(stream_count) + L" (" + channel_name + L")");
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-    }
-
-    // 2. Create and start HTTP server with detailed port allocation logging
-    StreamHttpServer http_server;
-    AddDebugLog(L"[HTTP] Attempting to start HTTP server for " + channel_name + L", preferred port=8080");
-    if (!http_server.Start(8080)) {
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to start HTTP server for " + channel_name);
-        // Decrement stream counter on early exit
+    // 2. Create media player process with stdin piping for IPC
+    // Create isolated working directory for this stream to prevent conflicts
+    std::wstring temp_dir = L"C:\\Temp\\Tardsplaya_" + channel_name + L"_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount());
+    CreateDirectoryW(temp_dir.c_str(), nullptr);
+    
+    // Create pipe for stdin communication
+    HANDLE hStdinRead, hStdinWrite;
+    SECURITY_ATTRIBUTES saAttr;
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+    
+    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, 0)) {
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create pipe for " + channel_name);
         std::lock_guard<std::mutex> lock(g_stream_mutex);
         --g_active_streams;
         return false;
     }
     
-    int server_port = http_server.GetPort();
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Started HTTP server on port " + std::to_wstring(server_port) + L" for " + channel_name);
-    
-    // Log if we got a different port than expected (indicates port conflicts)
-    if (server_port != 8080) {
-        AddDebugLog(L"[HTTP] Port conflict resolved - got port " + std::to_wstring(server_port) + 
-                   L" instead of 8080 for " + channel_name);
+    // Ensure the write handle is not inherited
+    if (!SetHandleInformation(hStdinWrite, HANDLE_FLAG_INHERIT, 0)) {
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to set handle information for " + channel_name);
+        CloseHandle(hStdinRead);
+        CloseHandle(hStdinWrite);
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        --g_active_streams;
+        return false;
     }
-
-    // 3. Create media player process with localhost URL and proper isolation
-    std::wstring localhost_url = L"http://localhost:" + std::to_wstring(server_port) + L"/";
     
-    // Create isolated working directory for this stream to prevent conflicts
-    std::wstring temp_dir = L"C:\\Temp\\Tardsplaya_" + channel_name + L"_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount());
-    CreateDirectoryW(temp_dir.c_str(), nullptr);
-    
-    // Build command with media player isolation parameters
+    // Build command with media player configured to read from stdin
     std::wstring cmd;
     if (player_path.find(L"mpc-hc") != std::wstring::npos) {
-        // MPC-HC specific isolation: use different config path and disable instance management
-        cmd = L"\"" + player_path + L"\" \"" + localhost_url + L"\" /new /nofocus";
+        // MPC-HC: read from stdin
+        cmd = L"\"" + player_path + L"\" - /new /nofocus";
     } else if (player_path.find(L"vlc") != std::wstring::npos) {
-        // VLC specific isolation: use different config directory
+        // VLC: read from stdin
         std::wstring vlc_config = temp_dir + L"\\vlc_config";
         CreateDirectoryW(vlc_config.c_str(), nullptr);
-        cmd = L"\"" + player_path + L"\" \"" + localhost_url + L"\" --intf dummy --no-one-instance --config=" + vlc_config;
+        cmd = L"\"" + player_path + L"\" - --intf dummy --no-one-instance --config=" + vlc_config;
     } else {
-        // Generic media player - basic isolation
-        cmd = L"\"" + player_path + L"\" \"" + localhost_url + L"\"";
+        // Generic media player: read from stdin
+        cmd = L"\"" + player_path + L"\" -";
     }
     
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
+    si.hStdInput = hStdinRead;
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    si.dwFlags |= STARTF_USESTDHANDLES;
     PROCESS_INFORMATION pi = {};
     
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Launching isolated player: " + cmd + L" for " + channel_name);
-    AddDebugLog(L"[ISOLATION] Working directory: " + temp_dir + L" for " + channel_name);
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Launching IPC player: " + cmd + L" for " + channel_name);
+    AddDebugLog(L"[IPC] Working directory: " + temp_dir + L" for " + channel_name);
     
     // Record timing for process creation
     auto start_time = std::chrono::high_resolution_clock::now();
     BOOL success = CreateProcessW(
-        nullptr, const_cast<LPWSTR>(cmd.c_str()), nullptr, nullptr, FALSE,
+        nullptr, const_cast<LPWSTR>(cmd.c_str()), nullptr, nullptr, TRUE,
         CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB, nullptr, temp_dir.c_str(), &si, &pi
     );
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    
+    // Close the read handle since the child process now owns it
+    CloseHandle(hStdinRead);
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
@@ -616,6 +618,8 @@ bool BufferAndPipeStreamToPlayer(
         DWORD error = GetLastError();
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create process for " + channel_name + 
                    L", Error=" + std::to_wstring(error) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
+        // Clean up pipe handle
+        CloseHandle(hStdinWrite);
         // Clean up temp directory on failure
         if (!temp_dir.empty()) {
             std::wstring rmdir_cmd = L"rmdir /s /q \"" + temp_dir + L"\"";
@@ -630,15 +634,15 @@ bool BufferAndPipeStreamToPlayer(
                L", PID=" + std::to_wstring(pi.dwProcessId) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
     
     // Set process priority for better multi-stream performance
-    stream_count = g_active_streams.load(); // Update count before setting priority
+    int stream_count = g_active_streams.load(); // Update count before setting priority
     if (stream_count > 1) {
         // Lower priority for additional streams to reduce conflicts
         SetPriorityClass(pi.hProcess, BELOW_NORMAL_PRIORITY_CLASS);
-        AddDebugLog(L"[ISOLATION] Set BELOW_NORMAL priority for stream #" + std::to_wstring(stream_count) + L" (" + channel_name + L")");
+        AddDebugLog(L"[IPC] Set BELOW_NORMAL priority for stream #" + std::to_wstring(stream_count) + L" (" + channel_name + L")");
     } else {
         // Normal priority for first stream
         SetPriorityClass(pi.hProcess, NORMAL_PRIORITY_CLASS);
-        AddDebugLog(L"[ISOLATION] Set NORMAL priority for first stream (" + channel_name + L")");
+        AddDebugLog(L"[IPC] Set NORMAL priority for first stream (" + channel_name + L")");
     }
     
     // Verify process is actually running immediately after creation
@@ -646,21 +650,22 @@ bool BufferAndPipeStreamToPlayer(
     bool initial_check = ProcessStillRunning(pi.hProcess, channel_name + L" initial_verification", pi.dwProcessId);
     AddDebugLog(L"[PROCESS] Initial verification after 100ms: " + std::to_wstring(initial_check) + L" for " + channel_name);
 
-    // 4. Start thread to maintain player window title with channel name
+    // 3. Start thread to maintain player window title with channel name
     std::thread title_thread([pi, channel_name]() {
         SetPlayerWindowTitle(pi.dwProcessId, channel_name);
     });
     title_thread.detach();
 
-    // 5. Robust streaming with background download threads and persistent buffering
+    // 4. IPC streaming with background download threads and direct piping
     std::queue<std::vector<char>> buffer_queue;
     std::mutex buffer_mutex;
     std::set<std::wstring> seen_urls;
     std::atomic<bool> download_running(true);
     std::atomic<bool> stream_ended_normally(false);
     
-    // Store temp directory for cleanup
+    // Store temp directory and pipe handle for cleanup
     std::wstring temp_dir_for_cleanup = temp_dir;
+    HANDLE stdin_pipe = hStdinWrite;
     
     const int target_buffer_segments = std::max(buffer_segments, 10); // Minimum 10 segments
     const int max_buffer_segments = target_buffer_segments * 2; // Don't over-buffer
@@ -823,13 +828,13 @@ bool BufferAndPipeStreamToPlayer(
                    L", PID=" + std::to_wstring(pi.dwProcessId));
     });
 
-    // Main buffer feeding thread - keeps HTTP server well-fed
+    // Main buffer feeding thread - writes directly to player stdin pipe
     std::thread feeder_thread([&]() {
         auto feeder_start_time = std::chrono::high_resolution_clock::now();
         auto feeder_startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(feeder_start_time - thread_start_time);
         
         bool started = false;
-        AddDebugLog(L"[FEEDER] Starting feeder thread for " + channel_name + 
+        AddDebugLog(L"[FEEDER] Starting IPC feeder thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(feeder_startup_delay.count()) + L"ms");
         
         while (true) {
@@ -860,25 +865,9 @@ bool BufferAndPipeStreamToPlayer(
             // Wait for initial buffer before starting - increased for stability
             if (!started) {
                 if (buffer_size >= target_buffer_segments) {
-                    // Ensure HTTP server has adequate initial buffer to prevent freezing
-                    size_t http_buffer = http_server.GetQueueLength();
-                    if (http_buffer < 2) {
-                        // Pre-feed HTTP server with a couple segments
-                        int prefeed_count = 0;
-                        std::lock_guard<std::mutex> lock(buffer_mutex);
-                        while (!buffer_queue.empty() && prefeed_count < 3) {
-                            std::vector<char> prefeed_data = std::move(buffer_queue.front());
-                            buffer_queue.pop();
-                            http_server.AddData(prefeed_data);
-                            prefeed_count++;
-                        }
-                        AddDebugLog(L"[FEEDER] Pre-fed " + std::to_wstring(prefeed_count) + 
-                                   L" segments to HTTP server for startup stability for " + channel_name);
-                    }
-                    
                     started = true;
                     AddDebugLog(L"[FEEDER] Initial buffer ready (" + 
-                               std::to_wstring(buffer_size) + L" segments), starting feed for " + channel_name);
+                               std::to_wstring(buffer_size) + L" segments), starting IPC feed for " + channel_name);
                 } else {
                     AddDebugLog(L"[FEEDER] Waiting for initial buffer (" + std::to_wstring(buffer_size) + L"/" +
                                std::to_wstring(target_buffer_segments) + L") for " + channel_name);
@@ -887,50 +876,43 @@ bool BufferAndPipeStreamToPlayer(
                 }
             }
             
-            // Feed multiple segments to HTTP server to maintain continuous flow
-            std::vector<std::vector<char>> segments_to_feed;
-            size_t http_queue_size = http_server.GetQueueLength();
-            size_t min_queue_size = http_server.GetMinQueueSize();
-            
+            // Get segment data from buffer queue
+            std::vector<char> segment_data;
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
-                // Feed segments based on HTTP server queue size to maintain minimum
-                int max_segments_to_feed = std::max(1, (int)(min_queue_size - http_queue_size + 1));
-                int segments_fed = 0;
-                
-                while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
-                    segments_to_feed.push_back(std::move(buffer_queue.front()));
+                if (!buffer_queue.empty()) {
+                    segment_data = std::move(buffer_queue.front());
                     buffer_queue.pop();
-                    segments_fed++;
                 }
             }
             
-            if (!segments_to_feed.empty()) {
-                for (auto& segment_data : segments_to_feed) {
-                    http_server.AddData(segment_data);
-                }
+            if (!segment_data.empty()) {
+                // Write segment directly to player stdin pipe
+                DWORD bytes_written = 0;
+                BOOL write_result = WriteFile(stdin_pipe, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, NULL);
                 
-                size_t new_http_buffer = http_server.GetQueueLength();
-                size_t current_buffer = buffer_size - segments_to_feed.size();
-                AddDebugLog(L"[FEEDER] Fed " + std::to_wstring(segments_to_feed.size()) + 
-                           L" segments to HTTP server, local_buffer=" + std::to_wstring(current_buffer) + 
-                           L", http_buffer=" + std::to_wstring(new_http_buffer) + L" for " + channel_name);
+                if (!write_result || bytes_written != segment_data.size()) {
+                    DWORD error = GetLastError();
+                    AddDebugLog(L"[IPC] Failed to write to stdin pipe for " + channel_name + 
+                               L", Error=" + std::to_wstring(error) + 
+                               L", BytesWritten=" + std::to_wstring(bytes_written) + 
+                               L"/" + std::to_wstring(segment_data.size()));
+                    break;
+                }
                 
                 if (chunk_count) {
-                    *chunk_count = (int)current_buffer;
+                    chunk_count->store((int)buffer_size);
                 }
                 
-                // Shorter wait when actively feeding
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                AddDebugLog(L"[IPC] Wrote segment (" + std::to_wstring(segment_data.size()) + 
+                           L" bytes) to " + channel_name + L", buffer=" + std::to_wstring(buffer_size));
             } else {
-                // No segments available, wait
-                AddDebugLog(L"[FEEDER] No segments available, waiting... (download_running=" + 
-                           std::to_wstring(download_running.load()) + L") for " + channel_name);
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                // No data available, wait briefly
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
         
-        AddDebugLog(L"[FEEDER] *** FEEDER THREAD ENDING *** for " + channel_name +
+        AddDebugLog(L"[FEEDER] IPC feeder thread ending for " + channel_name +
                    L", cancel=" + std::to_wstring(cancel_token.load()) + 
                    L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" feeder_final", pi.dwProcessId)) +
                    L", download_running=" + std::to_wstring(download_running.load()) +
@@ -947,14 +929,11 @@ bool BufferAndPipeStreamToPlayer(
                L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" cleanup_check", pi.dwProcessId)) +
                L", stream_ended_normally=" + std::to_wstring(stream_ended_normally.load()));
 
-    // Signal stream end to HTTP server
-    http_server.SetStreamEnded();
+    // Close stdin pipe to signal end of stream to player
+    CloseHandle(stdin_pipe);
     
-    // Allow time for final data to be sent
+    // Allow time for player to process remaining data
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-    
-    // Stop HTTP server
-    http_server.Stop();
 
     // Cleanup process
     if (ProcessStillRunning(pi.hProcess, channel_name + L" termination_check", pi.dwProcessId)) {
