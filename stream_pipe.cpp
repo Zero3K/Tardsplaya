@@ -546,9 +546,6 @@ bool BufferAndPipeStreamToPlayer(
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Using media playlist URL=" + media_playlist_url + L" for " + channel_name);
 
     // 2. Create media player process with stdin piping for IPC
-    // Create isolated working directory for this stream to prevent conflicts
-    std::wstring temp_dir = L"C:\\Temp\\Tardsplaya_" + channel_name + L"_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount());
-    CreateDirectoryW(temp_dir.c_str(), nullptr);
     
     // Create pipe for stdin communication
     HANDLE hStdinRead, hStdinWrite;
@@ -581,9 +578,7 @@ bool BufferAndPipeStreamToPlayer(
         cmd = L"\"" + player_path + L"\" - /new /nofocus";
     } else if (player_path.find(L"vlc") != std::wstring::npos) {
         // VLC: read from stdin
-        std::wstring vlc_config = temp_dir + L"\\vlc_config";
-        CreateDirectoryW(vlc_config.c_str(), nullptr);
-        cmd = L"\"" + player_path + L"\" - --intf dummy --no-one-instance --config=" + vlc_config;
+        cmd = L"\"" + player_path + L"\" - --intf dummy --no-one-instance";
     } else {
         // Generic media player: read from stdin
         cmd = L"\"" + player_path + L"\" -";
@@ -598,13 +593,12 @@ bool BufferAndPipeStreamToPlayer(
     PROCESS_INFORMATION pi = {};
     
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Launching IPC player: " + cmd + L" for " + channel_name);
-    AddDebugLog(L"[IPC] Working directory: " + temp_dir + L" for " + channel_name);
     
     // Record timing for process creation
     auto start_time = std::chrono::high_resolution_clock::now();
     BOOL success = CreateProcessW(
         nullptr, const_cast<LPWSTR>(cmd.c_str()), nullptr, nullptr, TRUE,
-        CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB, nullptr, temp_dir.c_str(), &si, &pi
+        CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB, nullptr, nullptr, &si, &pi
     );
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
@@ -618,11 +612,6 @@ bool BufferAndPipeStreamToPlayer(
                    L", Error=" + std::to_wstring(error) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
         // Clean up pipe handle
         CloseHandle(hStdinWrite);
-        // Clean up temp directory on failure
-        if (!temp_dir.empty()) {
-            std::wstring rmdir_cmd = L"rmdir /s /q \"" + temp_dir + L"\"";
-            _wsystem(rmdir_cmd.c_str());
-        }
         // Decrement stream counter on early exit
         std::lock_guard<std::mutex> lock(g_stream_mutex);
         --g_active_streams;
@@ -661,8 +650,7 @@ bool BufferAndPipeStreamToPlayer(
     std::atomic<bool> download_running(true);
     std::atomic<bool> stream_ended_normally(false);
     
-    // Store temp directory and pipe handle for cleanup
-    std::wstring temp_dir_for_cleanup = temp_dir;
+    // Store pipe handle for cleanup
     HANDLE stdin_pipe = hStdinWrite;
     
     const int target_buffer_segments = std::max(buffer_segments, 10); // Minimum 10 segments
@@ -953,17 +941,11 @@ bool BufferAndPipeStreamToPlayer(
     
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Cleanup complete for " + channel_name);
     
-    // Clean up isolated temp directory
-    if (!temp_dir_for_cleanup.empty()) {
-        AddDebugLog(L"[ISOLATION] Cleaning up temp directory: " + temp_dir_for_cleanup + L" for " + channel_name);
-        // Use system command to remove directory recursively 
-        std::wstring rmdir_cmd = L"rmdir /s /q \"" + temp_dir_for_cleanup + L"\"";
-        _wsystem(rmdir_cmd.c_str());
-    }
-    
     AddDebugLog(L"[STREAMS] Stream ended - " + std::to_wstring(remaining_streams) + L" streams remain active");
     AddDebugLog(L"[STREAMS] Exit reason: normal_end=" + std::to_wstring(normal_end) + 
                L", user_cancel=" + std::to_wstring(user_cancel) + L" for " + channel_name);
     
-    return normal_end || user_cancel;
+    // If user explicitly cancelled or stream ended normally, or if the process
+    // was terminated (which could be user closing the player), consider it successful
+    return normal_end || user_cancel || !ProcessStillRunning(pi.hProcess, channel_name + L" final_return_check", pi.dwProcessId);
 }
