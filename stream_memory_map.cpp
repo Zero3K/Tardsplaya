@@ -324,7 +324,6 @@ bool StreamMemoryMap::WriteData(const void* data, size_t size, std::atomic<bool>
         
         // Update writer position
         header_->writer_position = (writer_pos + static_cast<LONG>(to_write)) % buf_size;
-        header_->data_available += static_cast<LONG>(to_write);
         header_->sequence_number++;
         
         ReleaseLock();
@@ -372,7 +371,6 @@ size_t StreamMemoryMap::ReadData(void* buffer, size_t max_size) {
     
     // Update reader position
     header_->reader_position = (reader_pos + static_cast<LONG>(to_read)) % buf_size;
-    header_->data_available -= static_cast<LONG>(to_read);
     
     ReleaseLock();
     
