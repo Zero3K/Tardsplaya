@@ -814,12 +814,16 @@ bool BufferAndPipeStreamToPlayer(
                    L", PID=" + std::to_wstring(pi.dwProcessId));
     });
 
-    // Main buffer feeding thread - writes directly to player stdin pipe
+    // Main buffer feeding thread - writes directly to player stdin pipe with anti-freezing mechanisms
     std::thread feeder_thread([&]() {
         auto feeder_start_time = std::chrono::high_resolution_clock::now();
         auto feeder_startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(feeder_start_time - thread_start_time);
         
         bool started = false;
+        const size_t min_buffer_size = 3; // Minimum 3 segments to prevent video freezing (from PR #21)
+        int empty_buffer_count = 0;
+        const int max_empty_waits = 500; // 5 seconds max wait for data (10ms * 500)
+        
         AddDebugLog(L"[FEEDER] Starting IPC feeder thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(feeder_startup_delay.count()) + L"ms");
         
@@ -862,39 +866,64 @@ bool BufferAndPipeStreamToPlayer(
                 }
             }
             
-            // Get segment data from buffer queue
-            std::vector<char> segment_data;
+            // Multi-segment feeding to maintain continuous flow (adapted from PR #21)
+            std::vector<std::vector<char>> segments_to_feed;
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
-                if (!buffer_queue.empty()) {
-                    segment_data = std::move(buffer_queue.front());
+                
+                // Feed multiple segments when buffer is low to prevent freezing
+                int max_segments_to_feed = 1;
+                if (buffer_size < min_buffer_size) {
+                    max_segments_to_feed = std::min((int)buffer_queue.size(), 3); // Feed up to 3 segments when low
+                    AddDebugLog(L"[FEEDER] Buffer low (" + std::to_wstring(buffer_size) + 
+                               L" < " + std::to_wstring(min_buffer_size) + 
+                               L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
+                }
+                
+                int segments_fed = 0;
+                while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
+                    segments_to_feed.push_back(std::move(buffer_queue.front()));
                     buffer_queue.pop();
+                    segments_fed++;
                 }
             }
             
-            if (!segment_data.empty()) {
-                // Write segment directly to player stdin pipe
-                DWORD bytes_written = 0;
-                BOOL write_result = WriteFile(stdin_pipe, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, NULL);
+            if (!segments_to_feed.empty()) {
+                // Write segments directly to player stdin pipe
+                for (const auto& segment_data : segments_to_feed) {
+                    DWORD bytes_written = 0;
+                    BOOL write_result = WriteFile(stdin_pipe, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, NULL);
+                    
+                    if (!write_result || bytes_written != segment_data.size()) {
+                        DWORD error = GetLastError();
+                        AddDebugLog(L"[IPC] Failed to write to stdin pipe for " + channel_name + 
+                                   L", Error=" + std::to_wstring(error) + 
+                                   L", BytesWritten=" + std::to_wstring(bytes_written) + 
+                                   L"/" + std::to_wstring(segment_data.size()));
+                        break;
+                    }
+                }
                 
-                if (!write_result || bytes_written != segment_data.size()) {
-                    DWORD error = GetLastError();
-                    AddDebugLog(L"[IPC] Failed to write to stdin pipe for " + channel_name + 
-                               L", Error=" + std::to_wstring(error) + 
-                               L", BytesWritten=" + std::to_wstring(bytes_written) + 
-                               L"/" + std::to_wstring(segment_data.size()));
+                size_t remaining_buffer = buffer_size - segments_to_feed.size();
+                if (chunk_count) {
+                    chunk_count->store((int)remaining_buffer);
+                }
+                
+                empty_buffer_count = 0; // Reset counter when data is fed
+                AddDebugLog(L"[IPC] Fed " + std::to_wstring(segments_to_feed.size()) + 
+                           L" segments to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer));
+                
+                // Shorter wait when actively feeding to maintain flow
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            } else {
+                // No data available - use shorter wait to prevent video freezing (from PR #21)
+                empty_buffer_count++;
+                if (empty_buffer_count >= max_empty_waits) {
+                    AddDebugLog(L"[IPC] No data for too long (" + std::to_wstring(empty_buffer_count * 10) + 
+                               L"ms), ending to prevent freeze for " + channel_name);
                     break;
                 }
-                
-                if (chunk_count) {
-                    chunk_count->store((int)buffer_size);
-                }
-                
-                AddDebugLog(L"[IPC] Wrote segment (" + std::to_wstring(segment_data.size()) + 
-                           L" bytes) to " + channel_name + L", buffer=" + std::to_wstring(buffer_size));
-            } else {
-                // No data available, wait briefly
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms (from PR #21)
             }
         }
         
@@ -902,7 +931,8 @@ bool BufferAndPipeStreamToPlayer(
                    L", cancel=" + std::to_wstring(cancel_token.load()) + 
                    L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" feeder_final", pi.dwProcessId)) +
                    L", download_running=" + std::to_wstring(download_running.load()) +
-                   L", buffer_queue_empty=" + std::to_wstring(buffer_queue.empty()));
+                   L", buffer_queue_empty=" + std::to_wstring(buffer_queue.empty()) +
+                   L", empty_buffer_count=" + std::to_wstring(empty_buffer_count));
     });
 
     // Wait for download and feeder threads to complete
