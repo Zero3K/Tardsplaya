@@ -5,6 +5,7 @@
 #define NOMINMAX      // Prevent Windows min/max macros
 #endif
 #include <windows.h>
+#include <shlwapi.h>    // For SHCreateMemStream
 #include "builtin_player.h"
 #include "stream_thread.h"
 #include <chrono>
@@ -21,6 +22,7 @@ SimpleBuiltinPlayer::SimpleBuiltinPlayer()
     , m_isPlaying(false)
     , m_isInitialized(false)
     , m_processRunning(false)
+    , m_playbackStarted(false)
     , m_totalBytesProcessed(0)
     , m_segmentsProcessed(0)
     , m_pSession(nullptr)
@@ -31,6 +33,8 @@ SimpleBuiltinPlayer::SimpleBuiltinPlayer()
     , m_pTopology(nullptr)
     , m_mfInitialized(false)
 {
+    // Reserve memory for stream buffer to avoid frequent reallocations
+    m_memoryStreamBuffer.reserve(10 * 1024 * 1024); // 10MB initial capacity
 }
 
 SimpleBuiltinPlayer::~SimpleBuiltinPlayer() {
@@ -116,6 +120,7 @@ void SimpleBuiltinPlayer::StopStream() {
     
     m_isPlaying = false;
     m_processRunning = false;
+    m_playbackStarted = false;
     
     // Stop the processing thread
     if (m_processThread.joinable()) {
@@ -130,11 +135,18 @@ void SimpleBuiltinPlayer::StopStream() {
         }
     }
     
+    // Clear memory stream buffer
+    {
+        std::lock_guard<std::mutex> lock(m_memoryBufferMutex);
+        m_memoryStreamBuffer.clear();
+        m_memoryStreamBuffer.shrink_to_fit();
+    }
+    
     // Destroy the separate video window
     DestroyVideoWindow();
     
     UpdateStatus();
-    AddDebugLog(L"[SIMPLE_PLAYER] Stream stopped");
+    AddDebugLog(L"[SIMPLE_PLAYER] Stream stopped and memory buffers cleared");
 }
 
 bool SimpleBuiltinPlayer::FeedData(const char* data, size_t size) {
@@ -224,67 +236,28 @@ void SimpleBuiltinPlayer::ProcessSegment(const std::vector<char>& data) {
     m_segmentsProcessed++;
     
     if (!data.empty()) {
-        // Write stream data to a temporary file for playback
-        static std::wstring temp_file_path;
-        static HANDLE temp_file_handle = INVALID_HANDLE_VALUE;
-        static bool playback_started = false;
-        
-        // Create temporary file on first segment
-        if (temp_file_handle == INVALID_HANDLE_VALUE) {
-            wchar_t temp_path[MAX_PATH];
-            wchar_t temp_filename[MAX_PATH];
-            
-            GetTempPath(MAX_PATH, temp_path);
-            GetTempFileName(temp_path, L"TDS", 0, temp_filename);
-            
-            // Change extension to .ts for better codec detection
-            temp_file_path = temp_filename;
-            size_t dot_pos = temp_file_path.find_last_of(L'.');
-            if (dot_pos != std::wstring::npos) {
-                temp_file_path = temp_file_path.substr(0, dot_pos) + L".ts";
-            }
-            
-            temp_file_handle = CreateFile(
-                temp_file_path.c_str(),
-                GENERIC_WRITE,
-                FILE_SHARE_READ,
-                nullptr,
-                CREATE_ALWAYS,
-                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
-                nullptr
-            );
-            
-            if (temp_file_handle != INVALID_HANDLE_VALUE) {
-                AddDebugLog(L"[SIMPLE_PLAYER] Created temporary stream file: " + temp_file_path);
-            } else {
-                AddDebugLog(L"[SIMPLE_PLAYER] Failed to create temporary file");
-                return;
-            }
+        // Accumulate stream data in memory buffer
+        {
+            std::lock_guard<std::mutex> lock(m_memoryBufferMutex);
+            m_memoryStreamBuffer.insert(m_memoryStreamBuffer.end(), data.begin(), data.end());
         }
         
-        // Write segment data to file
-        if (temp_file_handle != INVALID_HANDLE_VALUE) {
-            DWORD bytes_written = 0;
-            WriteFile(temp_file_handle, data.data(), (DWORD)segmentSize, &bytes_written, nullptr);
-            FlushFileBuffers(temp_file_handle);
+        // Try to start playback after we have enough data in memory
+        if (!m_playbackStarted.load() && m_totalBytesProcessed >= 2 * 1024 * 1024) { // 2MB threshold
+            AddDebugLog(L"[SIMPLE_PLAYER] Attempting to start video playback with " + 
+                       std::to_wstring(m_totalBytesProcessed / 1024) + L" KB of data in memory");
             
-            // Try to start playback after we have enough data
-            if (!playback_started && m_totalBytesProcessed >= 2 * 1024 * 1024) { // 2MB threshold
-                AddDebugLog(L"[SIMPLE_PLAYER] Attempting to start video playback with " + 
-                           std::to_wstring(m_totalBytesProcessed / 1024) + L" KB of data");
-                
-                if (StartVideoPlaybackFromFile(temp_file_path)) {
-                    playback_started = true;
-                    AddDebugLog(L"[SIMPLE_PLAYER] Video playback started successfully");
-                } else {
-                    AddDebugLog(L"[SIMPLE_PLAYER] Failed to start video playback");
-                }
+            if (StartVideoPlaybackFromMemory()) {
+                m_playbackStarted = true;
+                AddDebugLog(L"[SIMPLE_PLAYER] Video playback started successfully from memory");
+            } else {
+                AddDebugLog(L"[SIMPLE_PLAYER] Failed to start video playback from memory");
             }
         }
         
         AddDebugLog(L"[SIMPLE_PLAYER] Processed segment " + std::to_wstring(m_segmentsProcessed.load()) + 
                    L", size=" + std::to_wstring(segmentSize) + L" bytes, total=" + 
-                   std::to_wstring(m_totalBytesProcessed / 1024) + L" KB");
+                   std::to_wstring(m_totalBytesProcessed / 1024) + L" KB in memory");
     }
     
     // Update video window display every few segments
@@ -295,7 +268,7 @@ void SimpleBuiltinPlayer::ProcessSegment(const std::vector<char>& data) {
     // Log occasional debug info
     if (m_segmentsProcessed.load() % 20 == 0) {
         AddDebugLog(L"[SIMPLE_PLAYER] Processed " + std::to_wstring(m_segmentsProcessed.load()) + 
-                   L" segments, " + std::to_wstring(m_totalBytesProcessed.load() / 1024) + L" KB total");
+                   L" segments, " + std::to_wstring(m_totalBytesProcessed.load() / 1024) + L" KB total in memory");
     }
 }
 
@@ -626,12 +599,7 @@ bool SimpleBuiltinPlayer::CreateVideoSession() {
         return false;
     }
     
-    // Create a byte stream for MPEG-TS data
-    hr = MFCreateTempFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_DELETE_IF_EXIST, MF_FILEFLAGS_NONE, &m_pByteStream);
-    if (FAILED(hr)) {
-        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create byte stream, hr=" + std::to_wstring(hr));
-        return false;
-    }
+    // Note: Byte stream will be created from memory when needed, not here
     
     // Create media session
     hr = MFCreateMediaSession(NULL, &m_pSession);
@@ -670,31 +638,22 @@ bool SimpleBuiltinPlayer::CreateMediaSourceFromData(const std::vector<char>& dat
         m_pByteStream = nullptr;
     }
     
-    hr = MFCreateMFByteStreamOnStream(nullptr, &m_pByteStream);
-    if (FAILED(hr)) {
-        // Try alternative approach with temp file
-        hr = MFCreateTempFile(MF_ACCESSMODE_READWRITE, MF_OPENMODE_DELETE_IF_EXIST, MF_FILEFLAGS_NONE, &m_pByteStream);
-        if (FAILED(hr)) {
-            AddDebugLog(L"[SIMPLE_PLAYER] Failed to create byte stream, hr=" + std::to_wstring(hr));
-            return false;
-        }
-    }
-    
-    // Write initial data to the byte stream
-    ULONG bytesWritten = 0;
-    hr = m_pByteStream->Write(reinterpret_cast<const BYTE*>(data.data()), (ULONG)data.size(), &bytesWritten);
-    if (FAILED(hr) || bytesWritten != data.size()) {
-        AddDebugLog(L"[SIMPLE_PLAYER] Failed to write initial data to byte stream, hr=" + std::to_wstring(hr));
+    // Create byte stream from memory buffer using SHCreateMemStream
+    IStream* pMemoryStream = SHCreateMemStream(reinterpret_cast<const BYTE*>(data.data()), (UINT)data.size());
+    if (!pMemoryStream) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create memory stream");
         return false;
     }
     
-    // Set the current position back to the beginning
-    hr = m_pByteStream->SetCurrentPosition(0);
+    hr = MFCreateMFByteStreamOnStream(pMemoryStream, &m_pByteStream);
+    pMemoryStream->Release(); // Release the COM reference since MF has its own
+    
     if (FAILED(hr)) {
-        AddDebugLog(L"[SIMPLE_PLAYER] Failed to seek to beginning of byte stream, hr=" + std::to_wstring(hr));
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create MF byte stream from memory, hr=" + std::to_wstring(hr));
         return false;
     }
     
+    // Data is already in the memory stream, so we can proceed directly to create media source
     // Try to create a media source from the byte stream
     DWORD dwFlags = 0;
     MF_OBJECT_TYPE ObjectType = MF_OBJECT_INVALID;
@@ -810,8 +769,8 @@ bool SimpleBuiltinPlayer::CreateTopology() {
     return true;
 }
 
-bool SimpleBuiltinPlayer::StartVideoPlaybackFromFile(const std::wstring& filePath) {
-    AddDebugLog(L"[SIMPLE_PLAYER] Starting video playback from file: " + filePath);
+bool SimpleBuiltinPlayer::StartVideoPlaybackFromMemory() {
+    AddDebugLog(L"[SIMPLE_PLAYER] Starting video playback from memory buffer");
     
     HRESULT hr = S_OK;
     
@@ -824,12 +783,41 @@ bool SimpleBuiltinPlayer::StartVideoPlaybackFromFile(const std::wstring& filePat
         }
     }
     
-    // Create media source from file
+    // Get a copy of the memory buffer
+    std::vector<char> bufferCopy;
+    {
+        std::lock_guard<std::mutex> lock(m_memoryBufferMutex);
+        if (m_memoryStreamBuffer.empty()) {
+            AddDebugLog(L"[SIMPLE_PLAYER] No data in memory buffer");
+            return false;
+        }
+        bufferCopy = m_memoryStreamBuffer;
+    }
+    
+    // Create a memory-based byte stream from the buffer
+    if (m_pByteStream) {
+        m_pByteStream->Release();
+        m_pByteStream = nullptr;
+    }
+    
+    // Create byte stream from memory buffer
+    hr = MFCreateMFByteStreamOnStream(
+        SHCreateMemStream(reinterpret_cast<const BYTE*>(bufferCopy.data()), (UINT)bufferCopy.size()),
+        &m_pByteStream
+    );
+    
+    if (FAILED(hr)) {
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create byte stream from memory, hr=" + std::to_wstring(hr));
+        return false;
+    }
+    
+    // Create media source from byte stream
     MF_OBJECT_TYPE ObjectType = MF_OBJECT_INVALID;
     IUnknown* pSource = nullptr;
     
-    hr = m_pSourceResolver->CreateObjectFromURL(
-        filePath.c_str(),
+    hr = m_pSourceResolver->CreateObjectFromByteStream(
+        m_pByteStream,
+        nullptr,
         MF_RESOLUTION_MEDIASOURCE,
         nullptr,
         &ObjectType,
@@ -837,7 +825,7 @@ bool SimpleBuiltinPlayer::StartVideoPlaybackFromFile(const std::wstring& filePat
     );
     
     if (FAILED(hr) || !pSource) {
-        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create media source from file, hr=" + std::to_wstring(hr));
+        AddDebugLog(L"[SIMPLE_PLAYER] Failed to create media source from memory, hr=" + std::to_wstring(hr));
         return false;
     }
     
@@ -888,7 +876,7 @@ bool SimpleBuiltinPlayer::StartVideoPlaybackFromFile(const std::wstring& filePat
             return false;
         }
         
-        AddDebugLog(L"[SIMPLE_PLAYER] Media session started successfully from file");
+        AddDebugLog(L"[SIMPLE_PLAYER] Media session started successfully from memory buffer");
         return true;
     }
     

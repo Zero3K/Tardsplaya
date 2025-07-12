@@ -85,6 +85,11 @@ private:
     std::thread m_processThread;
     std::atomic<bool> m_processRunning;
     
+    // In-memory stream buffer (accumulates all stream data)
+    std::vector<char> m_memoryStreamBuffer;
+    std::mutex m_memoryBufferMutex;
+    std::atomic<bool> m_playbackStarted;
+    
     // Statistics
     std::atomic<size_t> m_totalBytesProcessed;
     std::atomic<size_t> m_segmentsProcessed;
@@ -117,7 +122,7 @@ private:
     bool CreateVideoSession();
     bool CreateMediaSourceFromData(const std::vector<char>& data);
     bool CreateTopology();
-    bool StartVideoPlaybackFromFile(const std::wstring& filePath);
+    bool StartVideoPlaybackFromMemory();
     bool SetVideoWindow(HWND hwnd);
     bool StartVideoPlayback();
 };
