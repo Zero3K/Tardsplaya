@@ -1,5 +1,6 @@
 #include "stream_thread.h"
 #include "stream_pipe.h"
+#include "stream_memory_pipe.h"
 #include "builtin_streaming.h"
 
 std::thread StartStreamThread(
@@ -80,7 +81,8 @@ std::thread StartBuiltinStreamThread(
                    L", Tab=" + std::to_wstring(tab_index) + 
                    L", BufferSegs=" + std::to_wstring(buffer_segments));
         
-        bool ok = BufferAndStreamToBuiltinPlayer(hwndStatus, playlist_url, cancel_token, buffer_segments, channel_name, quality, chunk_count);
+        // Use memory-mapped streaming for builtin player (same as external players)
+        bool ok = BufferAndStreamToPlayerViaMemoryMap(L"builtin", playlist_url, cancel_token, buffer_segments, channel_name, chunk_count);
         
         AddDebugLog(L"StartBuiltinStreamThread: Stream finished, ok=" + std::to_wstring(ok) + 
                    L", Channel=" + channel_name + L", Tab=" + std::to_wstring(tab_index));

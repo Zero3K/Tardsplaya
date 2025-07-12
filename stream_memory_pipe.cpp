@@ -258,20 +258,15 @@ bool BufferAndStreamToPlayerViaMemoryMap(
         std::thread builtin_player_thread([channel_name]() {
             AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Starting builtin player thread for " + channel_name);
             
-            // Get or create the built-in player instance
-            SimpleBuiltinPlayer* player = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(GetBuiltinPlayerMutex());
-                if (!GetBuiltinPlayer()) {
-                    // We can't create the player here since it's static in the other module
-                    AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Built-in player not initialized for " + channel_name);
-                    return;
-                }
-                player = GetBuiltinPlayer();
+            // Create a new builtin player instance for this stream
+            SimpleBuiltinPlayer builtin_player;
+            if (!builtin_player.Initialize(nullptr)) {
+                AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to initialize builtin player for " + channel_name);
+                return;
             }
             
             // Start the stream in the built-in player
-            if (!player->StartStream(channel_name, L"")) {
+            if (!builtin_player.StartStream(channel_name, L"")) {
                 AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Failed to start stream in built-in player for " + channel_name);
                 return;
             }
@@ -280,7 +275,7 @@ bool BufferAndStreamToPlayerViaMemoryMap(
             std::atomic<bool> local_cancel(false);
             
             // Read from memory map and feed to player
-            bool read_success = player->ReadFromMemoryMap(channel_name, local_cancel);
+            bool read_success = builtin_player.ReadFromMemoryMap(channel_name, local_cancel);
             AddDebugLog(L"BufferAndStreamToPlayerViaMemoryMap: Builtin player finished for " + channel_name + 
                        L", read_success=" + std::to_wstring(read_success));
         });
