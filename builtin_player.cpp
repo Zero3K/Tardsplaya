@@ -686,15 +686,14 @@ bool SimpleBuiltinPlayer::CreateMediaSourceFromData(const std::vector<char>& dat
     
     // Write initial data to the byte stream
     ULONG bytesWritten = 0;
-    hr = m_pByteStream->Write(data.data(), (ULONG)data.size(), &bytesWritten);
+    hr = m_pByteStream->Write(reinterpret_cast<const BYTE*>(data.data()), (ULONG)data.size(), &bytesWritten);
     if (FAILED(hr) || bytesWritten != data.size()) {
         AddDebugLog(L"[SIMPLE_PLAYER] Failed to write initial data to byte stream, hr=" + std::to_wstring(hr));
         return false;
     }
     
     // Set the current position back to the beginning
-    LARGE_INTEGER seekPos = { 0 };
-    hr = m_pByteStream->Seek(seekPos, STREAM_SEEK_SET, nullptr);
+    hr = m_pByteStream->SetCurrentPosition(0);
     if (FAILED(hr)) {
         AddDebugLog(L"[SIMPLE_PLAYER] Failed to seek to beginning of byte stream, hr=" + std::to_wstring(hr));
         return false;
