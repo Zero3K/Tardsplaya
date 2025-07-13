@@ -161,7 +161,7 @@ private:
         // Stream data from queue with continuous flow to prevent freezing
         int segments_sent = 0;
         int empty_queue_count = 0;
-        const int max_empty_waits = 100; // 5 seconds max wait for data (50ms * 100)
+        const int max_empty_waits = 100; // ~2.5 seconds max wait for data (25ms * 100)
         
         while (running && !stream_ended) {
             std::vector<char> data;
@@ -183,13 +183,13 @@ private:
                 }
                 segments_sent++;
             } else {
-                // No data available - use shorter wait to prevent video freezing
+                // No data available - use balanced wait to prevent video freezing
                 empty_queue_count++;
                 if (empty_queue_count >= max_empty_waits) {
                     AddDebugLog(L"[HTTP] No data for too long, ending client session to prevent freeze");
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms
+                std::this_thread::sleep_for(std::chrono::milliseconds(25)); // Balanced polling rate
             }
         }
         
@@ -272,7 +272,7 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
     bool in_scte35_out = false;
     bool skip_next_segment = false;
     int consecutive_skipped = 0;
-    const int max_consecutive_skips = 5; // More aggressive limit to prevent buffer starvation
+    const int max_consecutive_skips = 10; // Prevent excessive skipping that could cause buffer starvation
     
     // Track ad block duration to prevent getting stuck
     static auto last_scte35_out_time = std::chrono::high_resolution_clock::now();
@@ -885,12 +885,14 @@ bool BufferAndPipeStreamToPlayer(
         bool started = false;
         const size_t min_buffer_size = 3; // Minimum 3 segments to prevent video freezing (from PR #21)
         int empty_buffer_count = 0;
-        const int max_empty_waits = 500; // 5 seconds max wait for data (10ms * 500)
+        const int max_empty_waits = 200; // 5 seconds max wait for data (25ms * 200)
         
         // Player health monitoring - detect if player stops consuming data
         size_t last_buffer_size = 0;
         int buffer_not_decreasing_count = 0;
-        const int max_buffer_stagnant_cycles = 10; // Reduced from 20 for faster detection
+        int slow_write_count = 0; // Track consecutive slow writes
+        const int max_buffer_stagnant_cycles = 20; // Detect when player stops consuming data
+        const int max_slow_writes = 5; // Allow several slow writes before aborting
         
         AddDebugLog(L"[FEEDER] Starting IPC feeder thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(feeder_startup_delay.count()) + L"ms");
@@ -1008,15 +1010,24 @@ bool BufferAndPipeStreamToPlayer(
                         break;
                     }
                     
-                    // More aggressive timeout detection - if WriteFile takes too long, the player is likely frozen
-                    if (write_duration.count() > 500) { // Reduced from 1000ms to 500ms for earlier detection
-                        AddDebugLog(L"[IPC] CRITICAL: Very slow write detected (" + std::to_wstring(write_duration.count()) + 
-                                   L"ms) for " + channel_name + L" - player appears frozen, aborting stream");
-                        write_success = false;
-                        break;
-                    } else if (write_duration.count() > 200) { // Warning level at 200ms
+                    // Detect if WriteFile is taking too long (player not consuming data)
+                    if (write_duration.count() > 1000) { // More than 1 second indicates potential freeze
+                        slow_write_count++;
                         AddDebugLog(L"[IPC] WARNING: Slow write detected (" + std::to_wstring(write_duration.count()) + 
-                                   L"ms) for " + channel_name + L" - player may be becoming unresponsive");
+                                   L"ms) #" + std::to_wstring(slow_write_count) + L"/" + std::to_wstring(max_slow_writes) +
+                                   L" for " + channel_name + L" - player may be unresponsive");
+                        
+                        if (slow_write_count >= max_slow_writes) {
+                            AddDebugLog(L"[IPC] CRITICAL: Too many consecutive slow writes - player appears frozen, aborting stream for " + channel_name);
+                            write_success = false;
+                            break;
+                        }
+                    } else {
+                        // Reset slow write counter on normal speed write
+                        if (slow_write_count > 0) {
+                            AddDebugLog(L"[IPC] Write speed normalized for " + channel_name + L" - resetting slow write counter");
+                            slow_write_count = 0;
+                        }
                     }
                 }
                 
@@ -1050,7 +1061,7 @@ bool BufferAndPipeStreamToPlayer(
                 int effective_max_waits = download_running.load() ? max_empty_waits : (max_empty_waits / 5); // Shorter timeout if download stopped
                 
                 if (empty_buffer_count >= effective_max_waits) {
-                    AddDebugLog(L"[IPC] No data for too long (" + std::to_wstring(empty_buffer_count * 10) + 
+                    AddDebugLog(L"[IPC] No data for too long (" + std::to_wstring(empty_buffer_count * 25) + 
                                L"ms), ending to prevent freeze for " + channel_name + 
                                L" (download_running=" + std::to_wstring(download_running.load()) + L")");
                     break;
@@ -1065,13 +1076,13 @@ bool BufferAndPipeStreamToPlayer(
                     }
                     
                     // Log potential ad filtering issues when buffer is empty for extended periods
-                    if (empty_buffer_count >= 100) { // 1 second of empty buffer
-                        AddDebugLog(L"[IPC] Extended empty buffer period (" + std::to_wstring(empty_buffer_count * 10) + 
+                    if (empty_buffer_count >= 40) { // 1 second of empty buffer (25ms * 40)
+                        AddDebugLog(L"[IPC] Extended empty buffer period (" + std::to_wstring(empty_buffer_count * 25) + 
                                    L"ms) - possible ad filtering causing starvation for " + channel_name);
                     }
                 }
                 
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms (from PR #21)
+                std::this_thread::sleep_for(std::chrono::milliseconds(25)); // Balanced timing for empty buffer waits
             }
         }
         
