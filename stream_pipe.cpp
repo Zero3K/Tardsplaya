@@ -892,7 +892,8 @@ bool BufferAndPipeStreamToPlayer(
         int buffer_not_decreasing_count = 0;
         int slow_write_count = 0; // Track consecutive slow writes
         const int max_buffer_stagnant_cycles = 20; // Detect when player stops consuming data
-        const int max_slow_writes = 5; // Allow several slow writes before aborting
+        const int max_slow_writes = 10; // Allow more slow writes - WriteFile blocking is normal for full player buffers
+        auto stream_start_time = std::chrono::high_resolution_clock::now(); // Track stream age for smarter timeouts
         
         AddDebugLog(L"[FEEDER] Starting IPC feeder thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(feeder_startup_delay.count()) + L"ms");
@@ -939,20 +940,24 @@ bool BufferAndPipeStreamToPlayer(
             // Player health monitoring - check if buffer is growing while download is active
             // This indicates the player stopped consuming data (possible freeze)
             if (started && download_running.load()) {
-                if (buffer_size >= last_buffer_size && buffer_size > target_buffer_segments) {
+                // More sophisticated buffer health check - look for sustained growth patterns
+                if (buffer_size >= last_buffer_size + 1 && buffer_size > target_buffer_segments + 5) {
                     buffer_not_decreasing_count++;
                     if (buffer_not_decreasing_count >= max_buffer_stagnant_cycles) {
-                        AddDebugLog(L"[FEEDER] CRITICAL: Buffer stagnant for " + std::to_wstring(buffer_not_decreasing_count) + 
-                                   L" cycles (buffer=" + std::to_wstring(buffer_size) + L"/" + std::to_wstring(last_buffer_size) + 
-                                   L") - player frozen, terminating stream for " + channel_name);
+                        AddDebugLog(L"[FEEDER] CRITICAL: Buffer rapidly growing for " + std::to_wstring(buffer_not_decreasing_count) + 
+                                   L" cycles (buffer=" + std::to_wstring(buffer_size) + L" vs target=" + std::to_wstring(target_buffer_segments) + 
+                                   L") - player likely frozen, terminating stream for " + channel_name);
                         // Player is definitely frozen - abort the stream immediately
                         break;
                     } else if (buffer_not_decreasing_count >= (max_buffer_stagnant_cycles / 2)) {
-                        AddDebugLog(L"[FEEDER] WARNING: Buffer showing stagnation signs (" + std::to_wstring(buffer_not_decreasing_count) + 
-                                   L"/" + std::to_wstring(max_buffer_stagnant_cycles) + L" cycles) for " + channel_name);
+                        AddDebugLog(L"[FEEDER] WARNING: Buffer showing growth pattern (" + std::to_wstring(buffer_not_decreasing_count) + 
+                                   L"/" + std::to_wstring(max_buffer_stagnant_cycles) + L" cycles, size=" + std::to_wstring(buffer_size) + L") for " + channel_name);
                     }
                 } else {
-                    buffer_not_decreasing_count = 0; // Reset when buffer decreases (player consuming)
+                    // Reset when buffer is stable or decreasing (player consuming normally)
+                    if (buffer_not_decreasing_count > 0 && buffer_size <= last_buffer_size) {
+                        buffer_not_decreasing_count = std::max(0, buffer_not_decreasing_count - 1); // Gradual decay
+                    }
                 }
                 last_buffer_size = buffer_size;
             }
@@ -1011,22 +1016,34 @@ bool BufferAndPipeStreamToPlayer(
                     }
                     
                     // Detect if WriteFile is taking too long (player not consuming data)
-                    if (write_duration.count() > 1000) { // More than 1 second indicates potential freeze
+                    // Use dynamic timeout based on stream age - early startup allows longer writes
+                    auto stream_age = std::chrono::duration_cast<std::chrono::seconds>(segment_write_start - stream_start_time);
+                    int timeout_threshold = (stream_age.count() < 30) ? 3000 : 2000; // 3s for first 30s, then 2s
+                    
+                    if (write_duration.count() > timeout_threshold) {
                         slow_write_count++;
                         AddDebugLog(L"[IPC] WARNING: Slow write detected (" + std::to_wstring(write_duration.count()) + 
-                                   L"ms) #" + std::to_wstring(slow_write_count) + L"/" + std::to_wstring(max_slow_writes) +
-                                   L" for " + channel_name + L" - player may be unresponsive");
+                                   L"ms > " + std::to_wstring(timeout_threshold) + L"ms) #" + std::to_wstring(slow_write_count) + 
+                                   L"/" + std::to_wstring(max_slow_writes) + L" for " + channel_name + L" (stream age: " + 
+                                   std::to_wstring(stream_age.count()) + L"s)");
                         
-                        if (slow_write_count >= max_slow_writes) {
-                            AddDebugLog(L"[IPC] CRITICAL: Too many consecutive slow writes - player appears frozen, aborting stream for " + channel_name);
+                        // Only abort if we have multiple issues: slow writes AND buffer growth
+                        bool buffer_growing = (buffer_size > last_buffer_size + 2); // Buffer growing rapidly
+                        if (slow_write_count >= max_slow_writes && buffer_growing) {
+                            AddDebugLog(L"[IPC] CRITICAL: Too many slow writes AND buffer growing - player frozen, aborting stream for " + channel_name);
                             write_success = false;
                             break;
+                        } else if (slow_write_count >= max_slow_writes) {
+                            AddDebugLog(L"[IPC] WARNING: Many slow writes but buffer stable - continuing (WriteFile blocking may be normal flow control) for " + channel_name);
+                            slow_write_count = max_slow_writes - 2; // Reduce count but don't reset completely
                         }
                     } else {
-                        // Reset slow write counter on normal speed write
+                        // Reset slow write counter on normal speed write (but decay gradually)
                         if (slow_write_count > 0) {
-                            AddDebugLog(L"[IPC] Write speed normalized for " + channel_name + L" - resetting slow write counter");
-                            slow_write_count = 0;
+                            slow_write_count = std::max(0, slow_write_count - 2); // Decay by 2 for each good write
+                            if (slow_write_count == 0) {
+                                AddDebugLog(L"[IPC] Write speed normalized for " + channel_name + L" - slow write counter reset");
+                            }
                         }
                     }
                 }
