@@ -412,3 +412,9 @@ FodyWeavers.xsd
 test_freeze_fix
 test_freeze_fix.exe
 test_stream_fix.md
+test_freeze_fix_enhanced
+test_freeze_fix_enhanced.exe
+test_comprehensive
+test_comprehensive.exe
+test_build
+test_build.exe
