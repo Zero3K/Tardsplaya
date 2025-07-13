@@ -1027,9 +1027,6 @@ bool BufferAndPipeStreamToPlayer(
                                    L"ms) - possible ad filtering causing starvation for " + channel_name);
                     }
                 }
-                        break;
-                    }
-                }
                 
                 std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms (from PR #21)
             }
