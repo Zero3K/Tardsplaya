@@ -271,6 +271,8 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
     std::string line;
     bool in_scte35_out = false;
     bool skip_next_segment = false;
+    int consecutive_skipped = 0;
+    const int max_consecutive_skips = 10; // Prevent excessive skipping that could cause buffer starvation
     
     while (std::getline(ss, line)) {
         if (line.empty()) continue;
@@ -280,18 +282,24 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
             if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 in_scte35_out = true;
                 skip_next_segment = true;
+                consecutive_skipped = 0; // Reset counter when entering ad block
                 AddDebugLog(L"[FILTER] Found SCTE35-OUT marker, entering ad block");
                 continue;
             }
             // SCTE-35 ad marker detection (end of ad block)
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
                 in_scte35_out = false;
+                consecutive_skipped = 0; // Reset counter when exiting ad block
                 AddDebugLog(L"[FILTER] Found SCTE35-IN marker, exiting ad block");
                 continue;
             }
-            // Discontinuity markers (often used with ads)
-            else if (line.find("#EXT-X-DISCONTINUITY") == 0 && in_scte35_out) {
-                AddDebugLog(L"[FILTER] Skipping discontinuity marker in ad block");
+            // Discontinuity markers - PRESERVE THESE for stream integrity
+            // These are critical for proper playback and should not be skipped
+            else if (line.find("#EXT-X-DISCONTINUITY") == 0) {
+                if (in_scte35_out) {
+                    AddDebugLog(L"[FILTER] Preserving discontinuity marker in ad block for stream integrity");
+                }
+                // Always preserve discontinuity markers to maintain stream continuity
                 continue;
             }
             // Stitched ad segments
@@ -328,17 +336,35 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         }
         
         // This is a segment URL
-        if (skip_next_segment || in_scte35_out) {
+        bool should_skip = (skip_next_segment || in_scte35_out);
+        
+        // Safety check: don't skip too many consecutive segments to prevent buffer starvation
+        if (should_skip && consecutive_skipped >= max_consecutive_skips) {
+            AddDebugLog(L"[FILTER] WARNING: Too many consecutive skips (" + std::to_wstring(consecutive_skipped) + 
+                       L"), allowing segment to prevent stream starvation: " + std::wstring(line.begin(), line.end()));
+            should_skip = false;
+            consecutive_skipped = 0; // Reset counter after allowing a segment
+        }
+        
+        if (should_skip) {
             // Skip this segment as it contains ad content
-            AddDebugLog(L"[FILTER] Skipping ad segment: " + std::wstring(line.begin(), line.end()));
+            consecutive_skipped++;
+            AddDebugLog(L"[FILTER] Skipping ad segment (" + std::to_wstring(consecutive_skipped) + 
+                       L" consecutive): " + std::wstring(line.begin(), line.end()));
             skip_next_segment = false;
             continue;
         }
+        
+        // Include this segment
+        consecutive_skipped = 0; // Reset counter when including a segment
+        skip_next_segment = false;
         
         // Should be a .ts or .aac segment
         std::wstring wline(line.begin(), line.end());
         segs.push_back(wline);
     }
+    
+    AddDebugLog(L"[FILTER] Playlist parsing complete: " + std::to_wstring(segs.size()) + L" segments included");
     return segs;
 }
 
@@ -728,6 +754,14 @@ bool BufferAndPipeStreamToPlayer(
             AddDebugLog(L"[DOWNLOAD] Parsed " + std::to_wstring(segments.size()) + 
                        L" segments from playlist for " + channel_name);
             
+            // Check for potential ad filtering issues - if we get very few segments, the buffer might starve
+            if (segments.size() == 0) {
+                AddDebugLog(L"[DOWNLOAD] WARNING: No segments after filtering - all segments may be ads, this could cause freezing");
+            } else if (segments.size() < 2) {
+                AddDebugLog(L"[DOWNLOAD] WARNING: Very few segments after filtering (" + std::to_wstring(segments.size()) + 
+                           L") - heavy ad filtering detected, may cause playback issues");
+            }
+            
             // Download new segments
             int new_segments_downloaded = 0;
             for (auto& seg : segments) {
@@ -984,6 +1018,15 @@ bool BufferAndPipeStreamToPlayer(
                     bool still_running = ProcessStillRunning(pi.hProcess, channel_name + L" empty_wait_check", pi.dwProcessId);
                     if (!still_running) {
                         AddDebugLog(L"[IPC] Player process died during empty wait for " + channel_name);
+                        break;
+                    }
+                    
+                    // Log potential ad filtering issues when buffer is empty for extended periods
+                    if (empty_buffer_count >= 100) { // 1 second of empty buffer
+                        AddDebugLog(L"[IPC] Extended empty buffer period (" + std::to_wstring(empty_buffer_count * 10) + 
+                                   L"ms) - possible ad filtering causing starvation for " + channel_name);
+                    }
+                }
                         break;
                     }
                 }
