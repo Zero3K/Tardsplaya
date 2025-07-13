@@ -824,6 +824,11 @@ bool BufferAndPipeStreamToPlayer(
         int empty_buffer_count = 0;
         const int max_empty_waits = 500; // 5 seconds max wait for data (10ms * 500)
         
+        // Player health monitoring - detect if player stops consuming data
+        size_t last_buffer_size = 0;
+        int buffer_not_decreasing_count = 0;
+        const int max_buffer_stagnant_cycles = 20; // ~2 seconds of buffer not decreasing while downloading
+        
         AddDebugLog(L"[FEEDER] Starting IPC feeder thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(feeder_startup_delay.count()) + L"ms");
         
@@ -866,6 +871,24 @@ bool BufferAndPipeStreamToPlayer(
                 }
             }
             
+            // Player health monitoring - check if buffer is growing while download is active
+            // This indicates the player stopped consuming data (possible freeze)
+            if (started && download_running.load()) {
+                if (buffer_size >= last_buffer_size && buffer_size > target_buffer_segments) {
+                    buffer_not_decreasing_count++;
+                    if (buffer_not_decreasing_count >= max_buffer_stagnant_cycles) {
+                        AddDebugLog(L"[FEEDER] WARNING: Buffer stagnant for " + std::to_wstring(buffer_not_decreasing_count) + 
+                                   L" cycles (buffer=" + std::to_wstring(buffer_size) + L"/" + std::to_wstring(last_buffer_size) + 
+                                   L") - player may be frozen for " + channel_name);
+                        // Continue anyway but log the issue for diagnosis
+                        buffer_not_decreasing_count = 0; // Reset to avoid spam
+                    }
+                } else {
+                    buffer_not_decreasing_count = 0; // Reset when buffer decreases (player consuming)
+                }
+                last_buffer_size = buffer_size;
+            }
+            
             // Multi-segment feeding to maintain continuous flow (adapted from PR #21)
             std::vector<std::vector<char>> segments_to_feed;
             {
@@ -889,40 +912,82 @@ bool BufferAndPipeStreamToPlayer(
             }
             
             if (!segments_to_feed.empty()) {
-                // Write segments directly to player stdin pipe
+                // Write segments directly to player stdin pipe with timeout protection
+                bool write_success = true;
+                auto write_start_time = std::chrono::high_resolution_clock::now();
+                
                 for (const auto& segment_data : segments_to_feed) {
                     DWORD bytes_written = 0;
+                    
+                    // Attempt write with timeout detection
+                    auto segment_write_start = std::chrono::high_resolution_clock::now();
                     BOOL write_result = WriteFile(stdin_pipe, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, NULL);
+                    auto segment_write_end = std::chrono::high_resolution_clock::now();
+                    auto write_duration = std::chrono::duration_cast<std::chrono::milliseconds>(segment_write_end - segment_write_start);
                     
                     if (!write_result || bytes_written != segment_data.size()) {
                         DWORD error = GetLastError();
                         AddDebugLog(L"[IPC] Failed to write to stdin pipe for " + channel_name + 
                                    L", Error=" + std::to_wstring(error) + 
                                    L", BytesWritten=" + std::to_wstring(bytes_written) + 
-                                   L"/" + std::to_wstring(segment_data.size()));
+                                   L"/" + std::to_wstring(segment_data.size()) +
+                                   L", Duration=" + std::to_wstring(write_duration.count()) + L"ms");
+                        write_success = false;
+                        break;
+                    }
+                    
+                    // Detect if WriteFile is taking too long (player not consuming data)
+                    if (write_duration.count() > 1000) { // More than 1 second for a single write
+                        AddDebugLog(L"[IPC] WARNING: Slow write detected (" + std::to_wstring(write_duration.count()) + 
+                                   L"ms) for " + channel_name + L" - player may be unresponsive");
+                    }
+                }
+                
+                if (write_success) {
+                    size_t remaining_buffer = buffer_size - segments_to_feed.size();
+                    if (chunk_count) {
+                        chunk_count->store((int)remaining_buffer);
+                    }
+                    
+                    empty_buffer_count = 0; // Reset counter when data is fed successfully
+                    
+                    auto total_write_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::high_resolution_clock::now() - write_start_time);
+                    
+                    AddDebugLog(L"[IPC] Fed " + std::to_wstring(segments_to_feed.size()) + 
+                               L" segments to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer) +
+                               L", write_time=" + std::to_wstring(total_write_time.count()) + L"ms");
+                    
+                    // Shorter wait when actively feeding to maintain flow
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                } else {
+                    // Write failed - this could indicate a frozen player
+                    AddDebugLog(L"[IPC] Write failure detected - possible player freeze for " + channel_name);
+                    break; // Exit feeder loop to prevent further issues
+                }
+            } else {
+                // No data available - use shorter wait to prevent video freezing (from PR #21)
+                empty_buffer_count++;
+                
+                // Adaptive timeout based on whether download is still active
+                int effective_max_waits = download_running.load() ? max_empty_waits : (max_empty_waits / 5); // Shorter timeout if download stopped
+                
+                if (empty_buffer_count >= effective_max_waits) {
+                    AddDebugLog(L"[IPC] No data for too long (" + std::to_wstring(empty_buffer_count * 10) + 
+                               L"ms), ending to prevent freeze for " + channel_name + 
+                               L" (download_running=" + std::to_wstring(download_running.load()) + L")");
+                    break;
+                }
+                
+                // More frequent process checks when waiting for data
+                if (empty_buffer_count % 50 == 0) { // Every 500ms
+                    bool still_running = ProcessStillRunning(pi.hProcess, channel_name + L" empty_wait_check", pi.dwProcessId);
+                    if (!still_running) {
+                        AddDebugLog(L"[IPC] Player process died during empty wait for " + channel_name);
                         break;
                     }
                 }
                 
-                size_t remaining_buffer = buffer_size - segments_to_feed.size();
-                if (chunk_count) {
-                    chunk_count->store((int)remaining_buffer);
-                }
-                
-                empty_buffer_count = 0; // Reset counter when data is fed
-                AddDebugLog(L"[IPC] Fed " + std::to_wstring(segments_to_feed.size()) + 
-                           L" segments to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer));
-                
-                // Shorter wait when actively feeding to maintain flow
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            } else {
-                // No data available - use shorter wait to prevent video freezing (from PR #21)
-                empty_buffer_count++;
-                if (empty_buffer_count >= max_empty_waits) {
-                    AddDebugLog(L"[IPC] No data for too long (" + std::to_wstring(empty_buffer_count * 10) + 
-                               L"ms), ending to prevent freeze for " + channel_name);
-                    break;
-                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms (from PR #21)
             }
         }
@@ -969,7 +1034,18 @@ bool BufferAndPipeStreamToPlayer(
     bool normal_end = stream_ended_normally.load();
     bool user_cancel = cancel_token.load();
     
+    // Enhanced diagnostic summary to help identify freeze patterns
+    auto total_runtime = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::high_resolution_clock::now() - start_time);
+    
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Cleanup complete for " + channel_name);
+    AddDebugLog(L"[DIAGNOSTIC] Stream Summary for " + channel_name + L":");
+    AddDebugLog(L"[DIAGNOSTIC]   Runtime: " + std::to_wstring(total_runtime.count()) + L" seconds");
+    AddDebugLog(L"[DIAGNOSTIC]   Normal end: " + std::to_wstring(normal_end));
+    AddDebugLog(L"[DIAGNOSTIC]   User cancel: " + std::to_wstring(user_cancel));
+    AddDebugLog(L"[DIAGNOSTIC]   Process alive at end: " + std::to_wstring(ProcessStillRunning(pi.hProcess, L"", 0)));
+    AddDebugLog(L"[DIAGNOSTIC]   Target buffer size: " + std::to_wstring(target_buffer_segments));
+    AddDebugLog(L"[DIAGNOSTIC]   Concurrent streams: " + std::to_wstring(remaining_streams + 1)); // +1 since we haven't decremented yet
     
     AddDebugLog(L"[STREAMS] Stream ended - " + std::to_wstring(remaining_streams) + L" streams remain active");
     AddDebugLog(L"[STREAMS] Exit reason: normal_end=" + std::to_wstring(normal_end) + 
