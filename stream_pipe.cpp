@@ -272,7 +272,11 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
     bool in_scte35_out = false;
     bool skip_next_segment = false;
     int consecutive_skipped = 0;
-    const int max_consecutive_skips = 10; // Prevent excessive skipping that could cause buffer starvation
+    const int max_consecutive_skips = 5; // More aggressive limit to prevent buffer starvation
+    
+    // Track ad block duration to prevent getting stuck
+    static auto last_scte35_out_time = std::chrono::high_resolution_clock::now();
+    static bool tracking_ad_block = false;
     
     while (std::getline(ss, line)) {
         if (line.empty()) continue;
@@ -283,6 +287,8 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
                 in_scte35_out = true;
                 skip_next_segment = true;
                 consecutive_skipped = 0; // Reset counter when entering ad block
+                last_scte35_out_time = std::chrono::high_resolution_clock::now();
+                tracking_ad_block = true;
                 AddDebugLog(L"[FILTER] Found SCTE35-OUT marker, entering ad block");
                 continue;
             }
@@ -290,6 +296,7 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
                 in_scte35_out = false;
                 consecutive_skipped = 0; // Reset counter when exiting ad block
+                tracking_ad_block = false;
                 AddDebugLog(L"[FILTER] Found SCTE35-IN marker, exiting ad block");
                 continue;
             }
@@ -338,12 +345,34 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         // This is a segment URL
         bool should_skip = (skip_next_segment || in_scte35_out);
         
+        // Ad block timeout check - prevent getting stuck in ad-skipping mode
+        if (tracking_ad_block) {
+            auto ad_block_duration = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::high_resolution_clock::now() - last_scte35_out_time);
+            if (ad_block_duration.count() > 120) { // 2 minutes max ad block
+                AddDebugLog(L"[FILTER] TIMEOUT: Ad block has been active for " + std::to_wstring(ad_block_duration.count()) + 
+                           L" seconds - forcing exit to prevent infinite ad skipping");
+                in_scte35_out = false;
+                tracking_ad_block = false;
+                should_skip = false;
+            }
+        }
+        
         // Safety check: don't skip too many consecutive segments to prevent buffer starvation
         if (should_skip && consecutive_skipped >= max_consecutive_skips) {
             AddDebugLog(L"[FILTER] WARNING: Too many consecutive skips (" + std::to_wstring(consecutive_skipped) + 
                        L"), allowing segment to prevent stream starvation: " + std::wstring(line.begin(), line.end()));
             should_skip = false;
             consecutive_skipped = 0; // Reset counter after allowing a segment
+        }
+        
+        // Emergency override: if we have very few segments total, force include more to prevent buffer starvation
+        // This handles cases where heavy ad filtering results in too few playable segments
+        if (should_skip && segs.size() == 0 && consecutive_skipped >= 2) {
+            AddDebugLog(L"[FILTER] EMERGENCY: No segments included yet and " + std::to_wstring(consecutive_skipped) + 
+                       L" consecutive skips - forcing inclusion to prevent complete starvation");
+            should_skip = false;
+            consecutive_skipped = 0;
         }
         
         if (should_skip) {
@@ -861,7 +890,7 @@ bool BufferAndPipeStreamToPlayer(
         // Player health monitoring - detect if player stops consuming data
         size_t last_buffer_size = 0;
         int buffer_not_decreasing_count = 0;
-        const int max_buffer_stagnant_cycles = 20; // ~2 seconds of buffer not decreasing while downloading
+        const int max_buffer_stagnant_cycles = 10; // Reduced from 20 for faster detection
         
         AddDebugLog(L"[FEEDER] Starting IPC feeder thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(feeder_startup_delay.count()) + L"ms");
@@ -911,11 +940,14 @@ bool BufferAndPipeStreamToPlayer(
                 if (buffer_size >= last_buffer_size && buffer_size > target_buffer_segments) {
                     buffer_not_decreasing_count++;
                     if (buffer_not_decreasing_count >= max_buffer_stagnant_cycles) {
-                        AddDebugLog(L"[FEEDER] WARNING: Buffer stagnant for " + std::to_wstring(buffer_not_decreasing_count) + 
+                        AddDebugLog(L"[FEEDER] CRITICAL: Buffer stagnant for " + std::to_wstring(buffer_not_decreasing_count) + 
                                    L" cycles (buffer=" + std::to_wstring(buffer_size) + L"/" + std::to_wstring(last_buffer_size) + 
-                                   L") - player may be frozen for " + channel_name);
-                        // Continue anyway but log the issue for diagnosis
-                        buffer_not_decreasing_count = 0; // Reset to avoid spam
+                                   L") - player frozen, terminating stream for " + channel_name);
+                        // Player is definitely frozen - abort the stream immediately
+                        break;
+                    } else if (buffer_not_decreasing_count >= (max_buffer_stagnant_cycles / 2)) {
+                        AddDebugLog(L"[FEEDER] WARNING: Buffer showing stagnation signs (" + std::to_wstring(buffer_not_decreasing_count) + 
+                                   L"/" + std::to_wstring(max_buffer_stagnant_cycles) + L" cycles) for " + channel_name);
                     }
                 } else {
                     buffer_not_decreasing_count = 0; // Reset when buffer decreases (player consuming)
@@ -928,10 +960,16 @@ bool BufferAndPipeStreamToPlayer(
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
                 
-                // Feed multiple segments when buffer is low to prevent freezing
+                // Emergency feeding when buffer is critically low
                 int max_segments_to_feed = 1;
-                if (buffer_size < min_buffer_size) {
-                    max_segments_to_feed = std::min((int)buffer_queue.size(), 3); // Feed up to 3 segments when low
+                if (buffer_size == 0) {
+                    // Critical: no segments available - feed as many as possible
+                    max_segments_to_feed = std::min((int)buffer_queue.size(), 5);
+                    AddDebugLog(L"[FEEDER] CRITICAL: Buffer completely empty, emergency feeding " + 
+                               std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
+                } else if (buffer_size < min_buffer_size) {
+                    // Low buffer: feed multiple segments to prevent starvation
+                    max_segments_to_feed = std::min((int)buffer_queue.size(), 3);
                     AddDebugLog(L"[FEEDER] Buffer low (" + std::to_wstring(buffer_size) + 
                                L" < " + std::to_wstring(min_buffer_size) + 
                                L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
@@ -970,10 +1008,15 @@ bool BufferAndPipeStreamToPlayer(
                         break;
                     }
                     
-                    // Detect if WriteFile is taking too long (player not consuming data)
-                    if (write_duration.count() > 1000) { // More than 1 second for a single write
+                    // More aggressive timeout detection - if WriteFile takes too long, the player is likely frozen
+                    if (write_duration.count() > 500) { // Reduced from 1000ms to 500ms for earlier detection
+                        AddDebugLog(L"[IPC] CRITICAL: Very slow write detected (" + std::to_wstring(write_duration.count()) + 
+                                   L"ms) for " + channel_name + L" - player appears frozen, aborting stream");
+                        write_success = false;
+                        break;
+                    } else if (write_duration.count() > 200) { // Warning level at 200ms
                         AddDebugLog(L"[IPC] WARNING: Slow write detected (" + std::to_wstring(write_duration.count()) + 
-                                   L"ms) for " + channel_name + L" - player may be unresponsive");
+                                   L"ms) for " + channel_name + L" - player may be becoming unresponsive");
                     }
                 }
                 
