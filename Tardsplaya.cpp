@@ -927,7 +927,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         &tab.chunkCount, // chunk count for status display
         &tab.userRequestedStop, // user requested stop flag
         g_hMainWnd, // main window handle for auto-stop messages
-        tabIndex // tab index for identifying which stream to auto-stop
+        tabIndex, // tab index for identifying which stream to auto-stop
+        originalQuality // selected quality for ad recovery
     );
     
     AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));

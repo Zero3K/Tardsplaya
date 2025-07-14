@@ -25,5 +25,6 @@ std::thread StartStreamThread(
     std::atomic<int>* chunk_count = nullptr,
     std::atomic<bool>* user_requested_stop = nullptr,
     HWND main_window = nullptr,
-    size_t tab_index = 0
+    size_t tab_index = 0,
+    const std::wstring& selected_quality = L""
 );
