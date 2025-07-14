@@ -1,5 +1,7 @@
 #include "stream_pipe.h"
 #include "stream_thread.h"
+#include "twitch_api.h"
+#include "playlist_parser.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -16,6 +18,33 @@
 #include <queue>
 #include <mutex>
 #include "tlsclient/tlsclient.h"
+
+// Forward declarations for functions defined in Tardsplaya.cpp
+std::wstring GetAccessToken(const std::wstring& channel);
+std::wstring FetchPlaylist(const std::wstring& channel, const std::wstring& accessToken);
+std::map<std::wstring, std::wstring> ParsePlaylist(const std::wstring& m3u8);
+
+// Forward declarations for functions defined in other files
+bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token = nullptr);
+std::wstring Utf8ToWide(const std::string& str);
+
+// Helper functions for URL parsing
+std::wstring ExtractDomain(const std::wstring& url) {
+    size_t start = url.find(L"://");
+    if (start == std::wstring::npos) return url;
+    start += 3;
+    size_t end = url.find(L'/', start);
+    if (end == std::wstring::npos) return url.substr(start);
+    return url.substr(start, end - start);
+}
+
+std::wstring ExtractPath(const std::wstring& url) {
+    size_t start = url.find(L"://");
+    if (start == std::wstring::npos) return L"/";
+    start = url.find(L'/', start + 3);
+    if (start == std::wstring::npos) return L"/";
+    return url.substr(start);
+}
 
 // Global stream tracking for multi-stream debugging
 static std::atomic<int> g_active_streams(0);
@@ -158,7 +187,7 @@ private:
             "\r\n";
         send(client_socket, response.c_str(), (int)response.length(), 0);
         
-        // Stream data from queue with continuous flow to prevent freezing
+        // Stream data from queue
         int segments_sent = 0;
         int empty_queue_count = 0;
         const int max_empty_waits = 100; // 5 seconds max wait for data (50ms * 100)
@@ -176,20 +205,64 @@ private:
             }
             
             if (!data.empty()) {
-                int sent = send(client_socket, data.data(), (int)data.size(), 0);
-                if (sent <= 0) {
-                    AddDebugLog(L"[HTTP] Client disconnected after " + std::to_wstring(segments_sent) + L" segments");
-                    break; // Client disconnected
+                // Send data with retry logic to handle slow writes and write failures
+                bool data_sent = false;
+                int send_attempts = 0;
+                const int max_send_attempts = 3;
+                const char* data_ptr = data.data();
+                int remaining_bytes = (int)data.size();
+                
+                while (!data_sent && send_attempts < max_send_attempts && remaining_bytes > 0) {
+                    int sent = send(client_socket, data_ptr, remaining_bytes, 0);
+                    
+                    if (sent > 0) {
+                        data_ptr += sent;
+                        remaining_bytes -= sent;
+                        
+                        if (remaining_bytes == 0) {
+                            data_sent = true;
+                        }
+                        // Continue sending remaining bytes if partial send occurred
+                    } else {
+                        send_attempts++;
+                        int error = WSAGetLastError();
+                        
+                        if (error == WSAECONNRESET || error == WSAECONNABORTED || error == WSAENOTCONN) {
+                            AddDebugLog(L"[HTTP] Client disconnected (error=" + std::to_wstring(error) + L") after " + 
+                                       std::to_wstring(segments_sent) + L" segments");
+                            break; // Client disconnected, no point retrying
+                        }
+                        
+                        if (error == WSAEWOULDBLOCK || error == WSAEINPROGRESS) {
+                            AddDebugLog(L"[HTTP] Socket send would block, attempt " + std::to_wstring(send_attempts) + 
+                                       L"/" + std::to_wstring(max_send_attempts));
+                            if (send_attempts < max_send_attempts) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(50)); // Wait for socket to become ready
+                            }
+                        } else {
+                            AddDebugLog(L"[HTTP] Send error " + std::to_wstring(error) + L", attempt " + 
+                                       std::to_wstring(send_attempts) + L"/" + std::to_wstring(max_send_attempts));
+                            if (send_attempts < max_send_attempts) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            }
+                        }
+                    }
+                }
+                
+                if (!data_sent) {
+                    AddDebugLog(L"[HTTP] Failed to send data after " + std::to_wstring(max_send_attempts) + 
+                               L" attempts, client likely disconnected");
+                    break;
                 }
                 segments_sent++;
             } else {
-                // No data available - use shorter wait to prevent video freezing
+                // No data available - wait for more data
                 empty_queue_count++;
                 if (empty_queue_count >= max_empty_waits) {
-                    AddDebugLog(L"[HTTP] No data for too long, ending client session to prevent freeze");
+                    AddDebugLog(L"[HTTP] No data for too long, ending client session");
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
         
@@ -197,6 +270,58 @@ private:
         closesocket(client_socket);
     }
 };
+
+/*
+ * WRITE FAILURE PREVENTION MECHANISMS:
+ * 
+ * This implementation focuses on preventing slow writes and write failures instead of 
+ * reducing timing delays to prevent video freezing:
+ *
+ * 1. WriteFile Retry Logic: Each write operation attempts up to 3 times with error recovery
+ * 2. Timeout Handling: WriteFileWithTimeout prevents indefinite blocking on slow writes  
+ * 3. Partial Write Handling: Socket sends handle partial writes by continuing from offset
+ * 4. Error-Specific Recovery: Different error types (broken pipe, timeout, etc.) handled appropriately
+ * 5. Buffered Pipes: Larger pipe buffer (1MB) reduces chance of write blocking
+ * 6. Resource Monitoring: Track write attempts and failures for diagnostics
+ *
+ * Previous approach reduced delays from 50ms to 10ms to prevent freezing, but this 
+ * approach maintains 50ms delays and focuses on robust write operations instead.
+ */
+
+// Helper function to perform WriteFile with timeout for slow write prevention
+static bool WriteFileWithTimeout(HANDLE hFile, const void* lpBuffer, DWORD nNumberOfBytesToWrite, 
+                                DWORD* lpNumberOfBytesWritten, DWORD timeoutMs = 5000) {
+    OVERLAPPED overlapped = { 0 };
+    overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!overlapped.hEvent) {
+        return FALSE;
+    }
+    
+    BOOL result = WriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, &overlapped);
+    
+    if (!result) {
+        DWORD error = GetLastError();
+        if (error == ERROR_IO_PENDING) {
+            // Wait for the write to complete with timeout
+            DWORD waitResult = WaitForSingleObject(overlapped.hEvent, timeoutMs);
+            if (waitResult == WAIT_OBJECT_0) {
+                result = GetOverlappedResult(hFile, &overlapped, lpNumberOfBytesWritten, FALSE);
+            } else if (waitResult == WAIT_TIMEOUT) {
+                // Cancel the I/O operation if it times out
+                CancelIo(hFile);
+                SetLastError(ERROR_TIMEOUT);
+                result = FALSE;
+            } else {
+                result = FALSE;
+            }
+        } else {
+            result = FALSE;
+        }
+    }
+    
+    CloseHandle(overlapped.hEvent);
+    return result;
+}
 
 // Utility: HTTP GET (returns as binary), with error retries
 static bool HttpGetBinary(const std::wstring& url, std::vector<char>& out, int max_attempts = 3, std::atomic<bool>* cancel_token = nullptr) {
@@ -329,8 +454,13 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         
         // This is a segment URL
         if (skip_next_segment || in_scte35_out) {
-            // Skip this segment as it contains ad content
-            AddDebugLog(L"[FILTER] Skipping ad segment: " + std::wstring(line.begin(), line.end()));
+            // Ad segment detected - trigger fresh playlist fetch instead of skipping
+            AddDebugLog(L"[FILTER] Ad segment detected: " + std::wstring(line.begin(), line.end()));
+            AddDebugLog(L"[FILTER] Triggering fresh playlist fetch to bypass ads");
+            
+            // Add a special marker to signal fresh playlist fetch is needed
+            segs.push_back(L"__FETCH_FRESH_PLAYLIST__");
+            
             skip_next_segment = false;
             continue;
         }
@@ -479,7 +609,8 @@ bool BufferAndPipeStreamToPlayer(
     std::atomic<bool>& cancel_token,
     int buffer_segments,
     const std::wstring& channel_name,
-    std::atomic<int>* chunk_count
+    std::atomic<int>* chunk_count,
+    const std::wstring& selected_quality
 ) {
     // Track active streams for cross-stream interference detection
     int current_stream_count;
@@ -554,7 +685,9 @@ bool BufferAndPipeStreamToPlayer(
     saAttr.bInheritHandle = TRUE;
     saAttr.lpSecurityDescriptor = NULL;
     
-    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, 0)) {
+    // Create pipe with larger buffer size to help prevent slow writes
+    const DWORD PIPE_BUFFER_SIZE = 1024 * 1024; // 1MB buffer to handle slow writes
+    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, PIPE_BUFFER_SIZE)) {
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create pipe for " + channel_name);
         std::lock_guard<std::mutex> lock(g_stream_mutex);
         --g_active_streams;
@@ -649,15 +782,22 @@ bool BufferAndPipeStreamToPlayer(
     std::set<std::wstring> seen_urls;
     std::atomic<bool> download_running(true);
     std::atomic<bool> stream_ended_normally(false);
+    std::atomic<bool> urgent_download_needed(false); // Signal for immediate download when buffer reaches 0
     
     // Store pipe handle for cleanup
     HANDLE stdin_pipe = hStdinWrite;
     
     const int target_buffer_segments = std::max(buffer_segments, 10); // Minimum 10 segments
     const int max_buffer_segments = target_buffer_segments * 2; // Don't over-buffer
+    const int buffer_full_timeout_seconds = 15; // Empty buffer if full for this long
+    
+    // Buffer fullness timeout tracking
+    std::chrono::steady_clock::time_point buffer_full_start_time;
+    bool buffer_full_timer_active = false;
     
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Target buffer: " + std::to_wstring(target_buffer_segments) + 
-               L" segments, max: " + std::to_wstring(max_buffer_segments) + L" for " + channel_name);
+               L" segments, max: " + std::to_wstring(max_buffer_segments) + 
+               L", timeout: " + std::to_wstring(buffer_full_timeout_seconds) + L"s for " + channel_name);
 
     // Log thread creation timing
     auto thread_start_time = std::chrono::high_resolution_clock::now();
@@ -671,10 +811,21 @@ bool BufferAndPipeStreamToPlayer(
         int consecutive_errors = 0;
         const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
         
+        int fresh_playlist_attempts = 0;
+        const int max_fresh_playlist_attempts = 5; // Limit fresh playlist fetches to prevent infinite loops
+        auto last_fresh_playlist_time = std::chrono::steady_clock::now();
+        const std::chrono::seconds fresh_playlist_cooldown(30); // 30 second cooldown between attempts
+        
         AddDebugLog(L"[DOWNLOAD] Starting download thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(startup_delay.count()) + L"ms");
         
         while (true) {
+            // Check for urgent download request first
+            bool urgent_needed = urgent_download_needed.load();
+            if (urgent_needed) {
+                AddDebugLog(L"[DOWNLOAD] *** URGENT DOWNLOAD REQUESTED *** - buffer reached 0 for " + channel_name);
+            }
+            
             // Check all exit conditions individually for detailed logging
             bool download_running_check = download_running.load();
             bool cancel_token_check = cancel_token.load();
@@ -725,8 +876,18 @@ bool BufferAndPipeStreamToPlayer(
             }
 
             auto segments = ParseSegments(playlist);
+            
+            // Count buffer reset markers for monitoring ad filtering effectiveness
+            int ad_reset_count = 0;
+            for (const auto& seg : segments) {
+                if (seg == L"__AD_RESET_BUFFER__") {
+                    ad_reset_count++;
+                }
+            }
+            
             AddDebugLog(L"[DOWNLOAD] Parsed " + std::to_wstring(segments.size()) + 
-                       L" segments from playlist for " + channel_name);
+                       L" segments from playlist for " + channel_name + 
+                       (ad_reset_count > 0 ? L" (including " + std::to_wstring(ad_reset_count) + L" ad resets)" : L""));
             
             // Download new segments
             int new_segments_downloaded = 0;
@@ -744,20 +905,400 @@ bool BufferAndPipeStreamToPlayer(
                     break;
                 }
                 
+                // Handle ad segment detection - fetch fresh playlist to bypass ads
+                if (seg == L"__FETCH_FRESH_PLAYLIST__") {
+                    // Don't add to seen_urls yet - process this marker every time
+                    AddDebugLog(L"[AD_RECOVERY] Fresh playlist fetch requested - bypassing ads for " + channel_name);
+                    
+                    // Check fresh playlist fetch limits and cooldown
+                    auto current_time = std::chrono::steady_clock::now();
+                    auto time_since_last_fetch = current_time - last_fresh_playlist_time;
+                    bool cooldown_passed = time_since_last_fetch >= fresh_playlist_cooldown;
+                    bool attempts_remaining = fresh_playlist_attempts < max_fresh_playlist_attempts;
+                    
+                    if (!attempts_remaining) {
+                        AddDebugLog(L"[AD_RECOVERY] Maximum fresh playlist attempts reached (" + 
+                                   std::to_wstring(fresh_playlist_attempts) + L"), skipping for " + channel_name);
+                        continue;
+                    }
+                    
+                    if (!cooldown_passed) {
+                        auto remaining_cooldown = std::chrono::duration_cast<std::chrono::seconds>(fresh_playlist_cooldown - time_since_last_fetch);
+                        AddDebugLog(L"[AD_RECOVERY] Fresh playlist cooldown active, " + 
+                                   std::to_wstring(remaining_cooldown.count()) + L" seconds remaining for " + channel_name);
+                        continue;
+                    }
+                    
+                    AddDebugLog(L"[AD_RECOVERY] Proceeding with fresh playlist fetch (attempt " + 
+                               std::to_wstring(fresh_playlist_attempts + 1) + L"/" + 
+                               std::to_wstring(max_fresh_playlist_attempts) + L") for " + channel_name);
+                    
+                    // Implement user's suggestion: fetch fresh quality list and switch to clean playlist
+                    if (!channel_name.empty() && !selected_quality.empty()) {
+                        // Use the same authentication approach as the main application
+                        AddDebugLog(L"[AD_RECOVERY] Getting fresh access token for " + channel_name);
+                        std::wstring fresh_access_token = GetAccessToken(channel_name);
+                        
+                        if (!fresh_access_token.empty() && fresh_access_token != L"OFFLINE") {
+                            AddDebugLog(L"[AD_RECOVERY] Successfully obtained fresh access token for " + channel_name);
+                            
+                            // Fetch fresh master playlist using the authenticated token
+                            std::wstring fresh_master_playlist = FetchPlaylist(channel_name, fresh_access_token);
+                            
+                            if (!fresh_master_playlist.empty()) {
+                                AddDebugLog(L"[AD_RECOVERY] Successfully fetched fresh master playlist for " + channel_name);
+                                AddDebugLog(L"[AD_RECOVERY] Fresh master playlist content (first 500 chars): " + fresh_master_playlist.substr(0, 500));
+                                
+                                // Parse the fresh playlist to get quality URLs
+                                std::map<std::wstring, std::wstring> fresh_qualities = ParsePlaylist(fresh_master_playlist);
+                                
+                                if (!fresh_qualities.empty()) {
+                                    AddDebugLog(L"[AD_RECOVERY] Successfully parsed " + std::to_wstring(fresh_qualities.size()) + L" qualities from fresh playlist for " + channel_name);
+                                    
+                                    // Log all available qualities for debugging
+                                    std::wstring qualities_list = L"[AD_RECOVERY] Available qualities: ";
+                                    for (const auto& quality_pair : fresh_qualities) {
+                                        qualities_list += quality_pair.first + L", ";
+                                    }
+                                    AddDebugLog(qualities_list);
+                                    AddDebugLog(L"[AD_RECOVERY] Originally selected quality: " + selected_quality);
+                                    
+                                    // Find the URL for the user's selected quality
+                                    std::wstring fresh_playlist_url;
+                                    bool quality_found = false;
+                                    std::wstring selected_quality_name;
+                                    
+                                    // First try exact match
+                                    if (fresh_qualities.find(selected_quality) != fresh_qualities.end()) {
+                                        fresh_playlist_url = fresh_qualities[selected_quality];
+                                        selected_quality_name = selected_quality;
+                                        quality_found = true;
+                                        AddDebugLog(L"[AD_RECOVERY] Found exact quality match: " + selected_quality + L" for " + channel_name);
+                                    }
+                                    
+                                    // If exact quality not found, try to find a similar quality
+                                    if (!quality_found) {
+                                        std::vector<std::wstring> priority_qualities = {L"source", L"1080p60", L"1080p", L"720p60", L"720p", L"480p", L"360p", L"160p"};
+                                        for (const auto& priority_quality : priority_qualities) {
+                                            if (fresh_qualities.find(priority_quality) != fresh_qualities.end()) {
+                                                fresh_playlist_url = fresh_qualities[priority_quality];
+                                                selected_quality_name = priority_quality;
+                                                quality_found = true;
+                                                AddDebugLog(L"[AD_RECOVERY] Using fallback quality: " + priority_quality + L" for " + channel_name);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    
+                                    // If still no match, find the best video quality (prioritize higher resolutions)
+                                    if (!quality_found && !fresh_qualities.empty()) {
+                                        // Enhanced video quality detection - check for common video quality patterns
+                                        std::vector<std::wstring> video_quality_patterns = {
+                                            L"source", L"1080p", L"720p", L"480p", L"360p", L"160p", 
+                                            L"chunked", L"high", L"medium", L"low", L"mobile"
+                                        };
+                                        
+                                        for (const auto& pattern : video_quality_patterns) {
+                                            for (const auto& quality_pair : fresh_qualities) {
+                                                // Check if quality name contains video quality indicators
+                                                bool is_video_quality = quality_pair.first.find(pattern) != std::wstring::npos;
+                                                bool not_audio = quality_pair.first.find(L"audio") == std::wstring::npos && 
+                                                                quality_pair.first != L"audio_only" &&
+                                                                quality_pair.first.find(L"Audio") == std::wstring::npos;
+                                                bool url_not_audio = quality_pair.second.find(L"audio") == std::wstring::npos &&
+                                                                    quality_pair.second.find(L"Audio") == std::wstring::npos;
+                                                
+                                                if (is_video_quality && not_audio && url_not_audio) {
+                                                    fresh_playlist_url = quality_pair.second;
+                                                    selected_quality_name = quality_pair.first;
+                                                    quality_found = true;
+                                                    AddDebugLog(L"[AD_RECOVERY] Using video quality pattern match: " + quality_pair.first + L" for " + channel_name);
+                                                    break;
+                                                }
+                                            }
+                                            if (quality_found) break;
+                                        }
+                                        
+                                        // If pattern matching failed, use strict filtering for any non-audio stream
+                                        if (!quality_found) {
+                                            AddDebugLog(L"[AD_RECOVERY] Pattern matching failed, using strict audio filtering for " + channel_name);
+                                            for (const auto& quality_pair : fresh_qualities) {
+                                                // Very strict audio filtering
+                                                bool definitely_not_audio = 
+                                                    quality_pair.first.find(L"audio") == std::wstring::npos && 
+                                                    quality_pair.first != L"audio_only" &&
+                                                    quality_pair.first.find(L"Audio") == std::wstring::npos &&
+                                                    quality_pair.first.find(L"sound") == std::wstring::npos &&
+                                                    quality_pair.first.find(L"Sound") == std::wstring::npos &&
+                                                    quality_pair.second.find(L"audio") == std::wstring::npos &&
+                                                    quality_pair.second.find(L"Audio") == std::wstring::npos &&
+                                                    quality_pair.second.find(L"sound") == std::wstring::npos &&
+                                                    quality_pair.second.find(L"Sound") == std::wstring::npos;
+                                                
+                                                if (definitely_not_audio) {
+                                                    fresh_playlist_url = quality_pair.second;
+                                                    selected_quality_name = quality_pair.first;
+                                                    quality_found = true;
+                                                    AddDebugLog(L"[AD_RECOVERY] Using strictly filtered quality: " + quality_pair.first + L" for " + channel_name);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        
+                                        // If somehow we only have audio streams available, log this as an error
+                                        if (!quality_found) {
+                                            AddDebugLog(L"[AD_RECOVERY] ERROR: Only audio streams available in fresh playlist for " + channel_name);
+                                            
+                                            // Log all available qualities for debugging
+                                            AddDebugLog(L"[AD_RECOVERY] Available qualities for analysis:");
+                                            for (const auto& quality_pair : fresh_qualities) {
+                                                AddDebugLog(L"[AD_RECOVERY]   - " + quality_pair.first + L" -> " + quality_pair.second.substr(0, 100) + L"...");
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Additional validation: check if the URL looks like a video stream
+                                    if (quality_found) {
+                                        AddDebugLog(L"[AD_RECOVERY] Selected quality: " + selected_quality_name + L" -> URL: " + fresh_playlist_url);
+                                        
+                                        // Enhanced validation: check if URL/quality contains audio-only indicators
+                                        bool url_seems_audio = fresh_playlist_url.find(L"audio") != std::wstring::npos ||
+                                                              fresh_playlist_url.find(L"Audio") != std::wstring::npos ||
+                                                              fresh_playlist_url.find(L"sound") != std::wstring::npos ||
+                                                              fresh_playlist_url.find(L"Sound") != std::wstring::npos;
+                                        
+                                        bool quality_seems_audio = selected_quality_name.find(L"audio") != std::wstring::npos ||
+                                                                  selected_quality_name == L"audio_only" ||
+                                                                  selected_quality_name.find(L"Audio") != std::wstring::npos ||
+                                                                  selected_quality_name.find(L"sound") != std::wstring::npos;
+                                        
+                                        if (url_seems_audio || quality_seems_audio) {
+                                            AddDebugLog(L"[AD_RECOVERY] WARNING: Selected quality appears to be audio-only - Quality: " + 
+                                                       selected_quality_name + L", URL: " + fresh_playlist_url.substr(0, 100) + L"...");
+                                            quality_found = false;
+                                            
+                                            // Try to find a different quality using enhanced filtering
+                                            AddDebugLog(L"[AD_RECOVERY] Searching for alternative video quality...");
+                                            for (const auto& quality_pair : fresh_qualities) {
+                                                bool quality_safe = quality_pair.first.find(L"audio") == std::wstring::npos &&
+                                                                   quality_pair.first != L"audio_only" &&
+                                                                   quality_pair.first.find(L"Audio") == std::wstring::npos &&
+                                                                   quality_pair.first.find(L"sound") == std::wstring::npos &&
+                                                                   quality_pair.first.find(L"Sound") == std::wstring::npos;
+                                                
+                                                bool url_safe = quality_pair.second.find(L"audio") == std::wstring::npos &&
+                                                               quality_pair.second.find(L"Audio") == std::wstring::npos &&
+                                                               quality_pair.second.find(L"sound") == std::wstring::npos &&
+                                                               quality_pair.second.find(L"Sound") == std::wstring::npos;
+                                                
+                                                // Additionally prefer qualities with video indicators
+                                                bool has_video_indicators = quality_pair.first.find(L"p") != std::wstring::npos || // 720p, 1080p, etc.
+                                                                           quality_pair.first.find(L"source") != std::wstring::npos ||
+                                                                           quality_pair.first.find(L"chunked") != std::wstring::npos ||
+                                                                           quality_pair.first.find(L"high") != std::wstring::npos ||
+                                                                           quality_pair.first.find(L"medium") != std::wstring::npos ||
+                                                                           quality_pair.first.find(L"low") != std::wstring::npos;
+                                                
+                                                if (quality_safe && url_safe && has_video_indicators) {
+                                                    fresh_playlist_url = quality_pair.second;
+                                                    selected_quality_name = quality_pair.first;
+                                                    quality_found = true;
+                                                    AddDebugLog(L"[AD_RECOVERY] Found safe video quality: " + quality_pair.first + L" -> " + quality_pair.second.substr(0, 100) + L"...");
+                                                    break;
+                                                }
+                                            }
+                                            
+                                            // If no video indicators found, try any non-audio quality
+                                            if (!quality_found) {
+                                                AddDebugLog(L"[AD_RECOVERY] No qualities with video indicators found, trying any non-audio quality...");
+                                                for (const auto& quality_pair : fresh_qualities) {
+                                                    bool quality_safe = quality_pair.first.find(L"audio") == std::wstring::npos &&
+                                                                       quality_pair.first != L"audio_only" &&
+                                                                       quality_pair.first.find(L"Audio") == std::wstring::npos &&
+                                                                       quality_pair.first.find(L"sound") == std::wstring::npos &&
+                                                                       quality_pair.first.find(L"Sound") == std::wstring::npos;
+                                                    
+                                                    bool url_safe = quality_pair.second.find(L"audio") == std::wstring::npos &&
+                                                                   quality_pair.second.find(L"Audio") == std::wstring::npos &&
+                                                                   quality_pair.second.find(L"sound") == std::wstring::npos &&
+                                                                   quality_pair.second.find(L"Sound") == std::wstring::npos;
+                                                    
+                                                    if (quality_safe && url_safe) {
+                                                        fresh_playlist_url = quality_pair.second;
+                                                        selected_quality_name = quality_pair.first;
+                                                        quality_found = true;
+                                                        AddDebugLog(L"[AD_RECOVERY] Found fallback video quality: " + quality_pair.first + L" -> " + quality_pair.second.substr(0, 100) + L"...");
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Enhanced media playlist validation to verify video content
+                                        if (quality_found) {
+                                            AddDebugLog(L"[AD_RECOVERY] Validating that selected playlist contains video content...");
+                                            
+                                            // Quick fetch to validate the media playlist structure
+                                            std::string sample_resp;
+                                            if (HttpGetText(fresh_playlist_url, sample_resp, &cancel_token)) {
+                                                std::wstring sample_playlist = Utf8ToWide(sample_resp);
+                                                
+                                                if (!sample_playlist.empty()) {
+                                                    // Enhanced video content detection
+                                                    bool has_video_segments = sample_playlist.find(L".ts") != std::wstring::npos ||
+                                                                             sample_playlist.find(L".m4s") != std::wstring::npos ||
+                                                                             sample_playlist.find(L".mp4") != std::wstring::npos;
+                                                    
+                                                    // Check for audio-only markers in the playlist
+                                                    bool has_audio_only_markers = (sample_playlist.find(L"AUDIO=") != std::wstring::npos &&
+                                                                                  sample_playlist.find(L"VIDEO=") == std::wstring::npos) ||
+                                                                                 sample_playlist.find(L"audio-only") != std::wstring::npos ||
+                                                                                 sample_playlist.find(L"AUDIO-ONLY") != std::wstring::npos;
+                                                    
+                                                    // Check for video resolution indicators
+                                                    bool has_video_resolution = sample_playlist.find(L"RESOLUTION=") != std::wstring::npos ||
+                                                                               sample_playlist.find(L"BANDWIDTH=") != std::wstring::npos;
+                                                    
+                                                    // Check for codec indicators
+                                                    bool has_video_codecs = sample_playlist.find(L"avc1") != std::wstring::npos || // H.264
+                                                                          sample_playlist.find(L"hvc1") != std::wstring::npos || // H.265
+                                                                          sample_playlist.find(L"vp9") != std::wstring::npos ||  // VP9
+                                                                          sample_playlist.find(L"av01") != std::wstring::npos;  // AV1
+                                                    
+                                                    bool content_seems_video = has_video_segments && !has_audio_only_markers && 
+                                                                              (has_video_resolution || has_video_codecs);
+                                                    
+                                                    if (content_seems_video) {
+                                                        AddDebugLog(L"[AD_RECOVERY] ✓ Selected playlist appears to contain video content (segments=" + 
+                                                                   std::to_wstring(has_video_segments) + L", resolution=" + 
+                                                                   std::to_wstring(has_video_resolution) + L", codecs=" + 
+                                                                   std::to_wstring(has_video_codecs) + L")");
+                                                    } else {
+                                                        AddDebugLog(L"[AD_RECOVERY] ✗ WARNING: Selected playlist might be audio-only or invalid!");
+                                                        AddDebugLog(L"[AD_RECOVERY] Analysis: segments=" + std::to_wstring(has_video_segments) + 
+                                                                   L", audio_only_markers=" + std::to_wstring(has_audio_only_markers) + 
+                                                                   L", resolution=" + std::to_wstring(has_video_resolution) + 
+                                                                   L", codecs=" + std::to_wstring(has_video_codecs));
+                                                        AddDebugLog(L"[AD_RECOVERY] Sample playlist content (first 500 chars): " + sample_playlist.substr(0, 500));
+                                                        
+                                                        // If validation fails, mark quality as not found to prevent using this stream
+                                                        if (!has_video_segments || has_audio_only_markers) {
+                                                            AddDebugLog(L"[AD_RECOVERY] Rejecting playlist due to failed video validation");
+                                                            quality_found = false;
+                                                        }
+                                                    }
+                                                } else {
+                                                    AddDebugLog(L"[AD_RECOVERY] WARNING: Could not fetch sample content from selected playlist URL");
+                                                }
+                                            } else {
+                                                AddDebugLog(L"[AD_RECOVERY] WARNING: Failed to fetch sample content from selected playlist URL");
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (quality_found) {
+                                        // Update the media playlist URL to the fresh one
+                                        media_playlist_url = fresh_playlist_url;
+                                        AddDebugLog(L"[AD_RECOVERY] Successfully switched to fresh playlist URL to bypass ads for " + channel_name);
+                                        AddDebugLog(L"[AD_RECOVERY] New playlist URL: " + fresh_playlist_url);
+                                        
+                                        // Update fresh playlist tracking
+                                        fresh_playlist_attempts++;
+                                        last_fresh_playlist_time = current_time;
+                                        
+                                        // Clear seen URLs to allow re-downloading from fresh playlist
+                                        seen_urls.clear();
+                                        // Don't re-insert __FETCH_FRESH_PLAYLIST__ marker to allow future processing
+                                        
+                                        // Reset error count since we're starting fresh
+                                        consecutive_errors = 0;
+                                        
+                                        // Break from segment processing to restart playlist fetching with new URL
+                                        AddDebugLog(L"[AD_RECOVERY] Breaking from segment loop to restart with fresh playlist for " + channel_name);
+                                        break;
+                                    } else {
+                                        AddDebugLog(L"[AD_RECOVERY] Warning: Could not find suitable quality in fresh playlist for " + channel_name);
+                                    }
+                                } else {
+                                    AddDebugLog(L"[AD_RECOVERY] Warning: Fresh playlist contains no quality information for " + channel_name);
+                                }
+                            } else {
+                                AddDebugLog(L"[AD_RECOVERY] Failed to fetch fresh master playlist for " + channel_name);
+                            }
+                        } else if (fresh_access_token == L"OFFLINE") {
+                            AddDebugLog(L"[AD_RECOVERY] Channel " + channel_name + L" is offline, cannot fetch fresh playlist");
+                        } else {
+                            AddDebugLog(L"[AD_RECOVERY] Failed to obtain fresh access token for " + channel_name);
+                        }
+                    } else {
+                        AddDebugLog(L"[AD_RECOVERY] Warning: Missing channel name or selected quality for ad recovery");
+                    }
+                    
+                    // Fallback: if fresh playlist fetch failed, just continue without reset
+                    AddDebugLog(L"[AD_RECOVERY] Continuing with existing playlist for " + channel_name);
+                    continue;
+                }
+                
+                // Check if this is a regular segment we've already seen
                 if (seen_urls.count(seg)) continue;
                 
-                // Check buffer size before downloading more
+                // Check buffer size before downloading more (unless urgent download is needed)
                 size_t current_buffer_size;
                 {
                     std::lock_guard<std::mutex> lock(buffer_mutex);
                     current_buffer_size = buffer_queue.size();
                 }
                 
-                if (current_buffer_size >= max_buffer_segments) {
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Buffer full (" + std::to_wstring(current_buffer_size) + 
-                               L"), waiting for " + channel_name);
+                bool urgent_bypass = urgent_download_needed.load();
+                if (current_buffer_size >= max_buffer_segments && !urgent_bypass) {
+                    auto current_time = std::chrono::steady_clock::now();
+                    
+                    // Start timing if this is the first time buffer is full
+                    if (!buffer_full_timer_active) {
+                        buffer_full_timer_active = true;
+                        buffer_full_start_time = current_time;
+                        AddDebugLog(L"[BUFFER] Buffer full (" + std::to_wstring(current_buffer_size) + 
+                                   L"), starting timeout timer for " + channel_name);
+                    } else {
+                        // Check if buffer has been full too long
+                        auto duration_full = std::chrono::duration_cast<std::chrono::seconds>(current_time - buffer_full_start_time);
+                        if (duration_full.count() >= buffer_full_timeout_seconds) {
+                            // Empty the buffer to prevent stagnation
+                            size_t cleared_segments;
+                            {
+                                std::lock_guard<std::mutex> lock(buffer_mutex);
+                                cleared_segments = buffer_queue.size();
+                                std::queue<std::vector<char>> empty_queue;
+                                buffer_queue.swap(empty_queue); // Clear the queue efficiently
+                            }
+                            
+                            buffer_full_timer_active = false; // Reset timer
+                            
+                            AddDebugLog(L"[BUFFER] Buffer full timeout (" + std::to_wstring(duration_full.count()) + 
+                                       L"s) - cleared " + std::to_wstring(cleared_segments) + 
+                                       L" segments for " + channel_name);
+                            continue; // Skip the wait and try downloading again
+                        } else {
+                            AddDebugLog(L"[BUFFER] Buffer full (" + std::to_wstring(current_buffer_size) + 
+                                       L"), waiting (" + std::to_wstring(duration_full.count()) + 
+                                       L"/" + std::to_wstring(buffer_full_timeout_seconds) + L"s) for " + channel_name);
+                        }
+                    }
+                    
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
+                } else {
+                    // Buffer is not full, reset the timer
+                    if (buffer_full_timer_active) {
+                        buffer_full_timer_active = false;
+                        AddDebugLog(L"[BUFFER] Buffer no longer full, resetting timeout timer for " + channel_name);
+                    }
+                    
+                    // Log if urgent download is bypassing normal buffer checks
+                    if (urgent_bypass) {
+                        AddDebugLog(L"[DOWNLOAD] Urgent download bypassing buffer fullness check (buffer=" + 
+                                   std::to_wstring(current_buffer_size) + L"/" + std::to_wstring(max_buffer_segments) + L") for " + channel_name);
+                    }
                 }
                 
                 seen_urls.insert(seg);
@@ -792,9 +1333,16 @@ bool BufferAndPipeStreamToPlayer(
             AddDebugLog(L"[DOWNLOAD] Segment batch complete - downloaded " + std::to_wstring(new_segments_downloaded) + 
                        L" new segments for " + channel_name);
             
-            // Poll playlist more frequently for live streams
-            AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            // Poll playlist more frequently for live streams or when urgent download is needed
+            urgent_needed = urgent_download_needed.load();
+            if (urgent_needed) {
+                urgent_download_needed.store(false); // Reset the flag
+                AddDebugLog(L"[DOWNLOAD] Urgent download completed, immediately fetching next playlist for " + channel_name);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Very short delay for urgent downloads
+            } else {
+                AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            }
         }
         
         // Log exactly why the download loop ended
@@ -820,9 +1368,9 @@ bool BufferAndPipeStreamToPlayer(
         auto feeder_startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(feeder_start_time - thread_start_time);
         
         bool started = false;
-        const size_t min_buffer_size = 3; // Minimum 3 segments to prevent video freezing (from PR #21)
+        const size_t min_buffer_size = 3; // Minimum 3 segments for smooth streaming
         int empty_buffer_count = 0;
-        const int max_empty_waits = 500; // 5 seconds max wait for data (10ms * 500)
+        const int max_empty_waits = 100; // 5 seconds max wait for data (50ms * 100)
         
         AddDebugLog(L"[FEEDER] Starting IPC feeder thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(feeder_startup_delay.count()) + L"ms");
@@ -866,7 +1414,7 @@ bool BufferAndPipeStreamToPlayer(
                 }
             }
             
-            // Multi-segment feeding to maintain continuous flow (adapted from PR #21)
+            // Multi-segment feeding to maintain continuous flow
             std::vector<std::vector<char>> segments_to_feed;
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
@@ -874,10 +1422,20 @@ bool BufferAndPipeStreamToPlayer(
                 // Feed multiple segments when buffer is low to prevent freezing
                 int max_segments_to_feed = 1;
                 if (buffer_size < min_buffer_size) {
+                    // When buffer is low, be more aggressive about feeding segments
                     max_segments_to_feed = std::min((int)buffer_queue.size(), 3); // Feed up to 3 segments when low
+                    
                     AddDebugLog(L"[FEEDER] Buffer low (" + std::to_wstring(buffer_size) + 
                                L" < " + std::to_wstring(min_buffer_size) + 
                                L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
+                    
+                    // Warning if buffer reaches 0
+                    if (buffer_size == 0) {
+                        AddDebugLog(L"[FEEDER] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
+                        // Signal download thread to urgently fetch more segments
+                        urgent_download_needed.store(true);
+                        AddDebugLog(L"[FEEDER] Triggered urgent download to refill empty buffer for " + channel_name);
+                    }
                 }
                 
                 int segments_fed = 0;
@@ -889,19 +1447,69 @@ bool BufferAndPipeStreamToPlayer(
             }
             
             if (!segments_to_feed.empty()) {
-                // Write segments directly to player stdin pipe
+                // Write segments directly to player stdin pipe with retry logic
+                bool write_failed = false;
+                int segments_processed = 0;
+                
                 for (const auto& segment_data : segments_to_feed) {
-                    DWORD bytes_written = 0;
-                    BOOL write_result = WriteFile(stdin_pipe, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, NULL);
+                    // Skip empty segments (shouldn't happen with buffer reset approach)
+                    if (segment_data.empty()) {
+                        AddDebugLog(L"[IPC] Warning: Found empty segment in buffer for " + channel_name);
+                        segments_processed++;
+                        continue;
+                    }
                     
-                    if (!write_result || bytes_written != segment_data.size()) {
-                        DWORD error = GetLastError();
-                        AddDebugLog(L"[IPC] Failed to write to stdin pipe for " + channel_name + 
-                                   L", Error=" + std::to_wstring(error) + 
-                                   L", BytesWritten=" + std::to_wstring(bytes_written) + 
-                                   L"/" + std::to_wstring(segment_data.size()));
+                    bool segment_written = false;
+                    int write_attempts = 0;
+                    const int max_write_attempts = 3;
+                    
+                    while (!segment_written && write_attempts < max_write_attempts && !cancel_token.load()) {
+                        DWORD bytes_written = 0;
+                        // Use WriteFile with timeout to prevent slow writes from blocking indefinitely
+                        BOOL write_result = WriteFileWithTimeout(stdin_pipe, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, 3000); // 3 second timeout
+                        
+                        if (write_result && bytes_written == segment_data.size()) {
+                            segment_written = true;
+                            segments_processed++;
+                        } else {
+                            write_attempts++;
+                            DWORD error = GetLastError();
+                            
+                            if (error == ERROR_NO_DATA || error == ERROR_BROKEN_PIPE) {
+                                AddDebugLog(L"[IPC] Pipe closed/broken for " + channel_name + L", error=" + std::to_wstring(error));
+                                write_failed = true;
+                                break; // Pipe is broken, no point retrying
+                            }
+                            
+                            if (error == ERROR_TIMEOUT) {
+                                AddDebugLog(L"[IPC] Write timeout (3s) on attempt " + std::to_wstring(write_attempts) + 
+                                           L"/" + std::to_wstring(max_write_attempts) + L" for " + channel_name + 
+                                           L" - slow write detected");
+                            } else {
+                                AddDebugLog(L"[IPC] Write attempt " + std::to_wstring(write_attempts) + L"/" + std::to_wstring(max_write_attempts) + 
+                                           L" failed for " + channel_name + 
+                                           L", Error=" + std::to_wstring(error) + 
+                                           L", BytesWritten=" + std::to_wstring(bytes_written) + 
+                                           L"/" + std::to_wstring(segment_data.size()));
+                            }
+                            
+                            if (write_attempts < max_write_attempts) {
+                                // Wait briefly before retry to handle temporary write issues
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            }
+                        }
+                    }
+                    
+                    if (!segment_written) {
+                        AddDebugLog(L"[IPC] Failed to write segment after " + std::to_wstring(max_write_attempts) + L" attempts for " + channel_name);
+                        write_failed = true;
                         break;
                     }
+                }
+                
+                if (write_failed) {
+                    AddDebugLog(L"[IPC] Write failure detected, stopping feeder for " + channel_name);
+                    break;
                 }
                 
                 size_t remaining_buffer = buffer_size - segments_to_feed.size();
@@ -910,20 +1518,20 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 
                 empty_buffer_count = 0; // Reset counter when data is fed
-                AddDebugLog(L"[IPC] Fed " + std::to_wstring(segments_to_feed.size()) + 
+                AddDebugLog(L"[IPC] Fed " + std::to_wstring(segments_processed) + 
                            L" segments to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer));
                 
                 // Shorter wait when actively feeding to maintain flow
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             } else {
-                // No data available - use shorter wait to prevent video freezing (from PR #21)
+                // No data available - wait for more data
                 empty_buffer_count++;
                 if (empty_buffer_count >= max_empty_waits) {
-                    AddDebugLog(L"[IPC] No data for too long (" + std::to_wstring(empty_buffer_count * 10) + 
-                               L"ms), ending to prevent freeze for " + channel_name);
+                    AddDebugLog(L"[IPC] No data for too long (" + std::to_wstring(empty_buffer_count * 50) + 
+                               L"ms), ending stream for " + channel_name);
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms (from PR #21)
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
         
