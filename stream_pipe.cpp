@@ -758,9 +758,15 @@ bool BufferAndPipeStreamToPlayer(
     
     const int target_buffer_segments = std::max(buffer_segments, 10); // Minimum 10 segments
     const int max_buffer_segments = target_buffer_segments * 2; // Don't over-buffer
+    const int buffer_full_timeout_seconds = 15; // Empty buffer if full for this long
+    
+    // Buffer fullness timeout tracking
+    std::chrono::steady_clock::time_point buffer_full_start_time;
+    bool buffer_full_timer_active = false;
     
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Target buffer: " + std::to_wstring(target_buffer_segments) + 
-               L" segments, max: " + std::to_wstring(max_buffer_segments) + L" for " + channel_name);
+               L" segments, max: " + std::to_wstring(max_buffer_segments) + 
+               L", timeout: " + std::to_wstring(buffer_full_timeout_seconds) + L"s for " + channel_name);
 
     // Log thread creation timing
     auto thread_start_time = std::chrono::high_resolution_clock::now();
@@ -886,10 +892,48 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 
                 if (current_buffer_size >= max_buffer_segments) {
-                    AddDebugLog(L"BufferAndPipeStreamToPlayer: Buffer full (" + std::to_wstring(current_buffer_size) + 
-                               L"), waiting for " + channel_name);
+                    auto current_time = std::chrono::steady_clock::now();
+                    
+                    // Start timing if this is the first time buffer is full
+                    if (!buffer_full_timer_active) {
+                        buffer_full_timer_active = true;
+                        buffer_full_start_time = current_time;
+                        AddDebugLog(L"[BUFFER] Buffer full (" + std::to_wstring(current_buffer_size) + 
+                                   L"), starting timeout timer for " + channel_name);
+                    } else {
+                        // Check if buffer has been full too long
+                        auto duration_full = std::chrono::duration_cast<std::chrono::seconds>(current_time - buffer_full_start_time);
+                        if (duration_full.count() >= buffer_full_timeout_seconds) {
+                            // Empty the buffer to prevent stagnation
+                            size_t cleared_segments;
+                            {
+                                std::lock_guard<std::mutex> lock(buffer_mutex);
+                                cleared_segments = buffer_queue.size();
+                                std::queue<std::vector<char>> empty_queue;
+                                buffer_queue.swap(empty_queue); // Clear the queue efficiently
+                            }
+                            
+                            buffer_full_timer_active = false; // Reset timer
+                            
+                            AddDebugLog(L"[BUFFER] Buffer full timeout (" + std::to_wstring(duration_full.count()) + 
+                                       L"s) - cleared " + std::to_wstring(cleared_segments) + 
+                                       L" segments for " + channel_name);
+                            continue; // Skip the wait and try downloading again
+                        } else {
+                            AddDebugLog(L"[BUFFER] Buffer full (" + std::to_wstring(current_buffer_size) + 
+                                       L"), waiting (" + std::to_wstring(duration_full.count()) + 
+                                       L"/" + std::to_wstring(buffer_full_timeout_seconds) + L"s) for " + channel_name);
+                        }
+                    }
+                    
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
+                } else {
+                    // Buffer is not full, reset the timer
+                    if (buffer_full_timer_active) {
+                        buffer_full_timer_active = false;
+                        AddDebugLog(L"[BUFFER] Buffer no longer full, resetting timeout timer for " + channel_name);
+                    }
                 }
                 
                 seen_urls.insert(seg);
