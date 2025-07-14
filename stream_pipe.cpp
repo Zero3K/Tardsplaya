@@ -932,6 +932,14 @@ bool BufferAndPipeStreamToPlayer(
                                 if (!fresh_qualities.empty()) {
                                     AddDebugLog(L"[AD_RECOVERY] Successfully parsed " + std::to_wstring(fresh_qualities.size()) + L" qualities from fresh playlist for " + channel_name);
                                     
+                                    // Log all available qualities for debugging
+                                    std::wstring qualities_list = L"[AD_RECOVERY] Available qualities: ";
+                                    for (const auto& quality_pair : fresh_qualities) {
+                                        qualities_list += quality_pair.first + L", ";
+                                    }
+                                    AddDebugLog(qualities_list);
+                                    AddDebugLog(L"[AD_RECOVERY] Originally selected quality: " + selected_quality);
+                                    
                                     // Find the URL for the user's selected quality
                                     std::wstring fresh_playlist_url;
                                     bool quality_found = false;
@@ -945,7 +953,7 @@ bool BufferAndPipeStreamToPlayer(
                                     
                                     // If exact quality not found, try to find a similar quality
                                     if (!quality_found) {
-                                        std::vector<std::wstring> priority_qualities = {L"source", L"720p60", L"720p", L"1080p60", L"1080p", L"480p"};
+                                        std::vector<std::wstring> priority_qualities = {L"source", L"1080p60", L"1080p", L"720p60", L"720p", L"480p", L"360p", L"160p"};
                                         for (const auto& priority_quality : priority_qualities) {
                                             if (fresh_qualities.find(priority_quality) != fresh_qualities.end()) {
                                                 fresh_playlist_url = fresh_qualities[priority_quality];
@@ -956,12 +964,23 @@ bool BufferAndPipeStreamToPlayer(
                                         }
                                     }
                                     
-                                    // If still no match, use the first available quality
+                                    // If still no match, find the first NON-AUDIO quality (avoid audio_only)
                                     if (!quality_found && !fresh_qualities.empty()) {
-                                        auto first_quality = fresh_qualities.begin();
-                                        fresh_playlist_url = first_quality->second;
-                                        quality_found = true;
-                                        AddDebugLog(L"[AD_RECOVERY] Using first available quality: " + first_quality->first + L" for " + channel_name);
+                                        for (const auto& quality_pair : fresh_qualities) {
+                                            // Skip audio-only streams - we want video content
+                                            if (quality_pair.first.find(L"audio") == std::wstring::npos && 
+                                                quality_pair.first != L"audio_only") {
+                                                fresh_playlist_url = quality_pair.second;
+                                                quality_found = true;
+                                                AddDebugLog(L"[AD_RECOVERY] Using first available video quality: " + quality_pair.first + L" for " + channel_name);
+                                                break;
+                                            }
+                                        }
+                                        
+                                        // If somehow we only have audio streams available, log this as an error
+                                        if (!quality_found) {
+                                            AddDebugLog(L"[AD_RECOVERY] ERROR: Only audio streams available in fresh playlist for " + channel_name);
+                                        }
                                     }
                                     
                                     if (quality_found) {
