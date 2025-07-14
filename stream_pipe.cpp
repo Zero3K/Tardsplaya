@@ -19,6 +19,11 @@
 #include <mutex>
 #include "tlsclient/tlsclient.h"
 
+// Forward declarations for functions defined in Tardsplaya.cpp
+std::wstring GetAccessToken(const std::wstring& channel);
+std::wstring FetchPlaylist(const std::wstring& channel, const std::wstring& accessToken);
+std::map<std::wstring, std::wstring> ParsePlaylist(const std::wstring& m3u8);
+
 // Global stream tracking for multi-stream debugging
 static std::atomic<int> g_active_streams(0);
 static std::mutex g_stream_mutex;
@@ -901,86 +906,90 @@ bool BufferAndPipeStreamToPlayer(
                     
                     // Implement user's suggestion: fetch fresh quality list and switch to clean playlist
                     if (!channel_name.empty() && !selected_quality.empty()) {
-                        std::vector<std::wstring> fresh_qualities;
-                        std::wstring fresh_master_url;
+                        // Use the same authentication approach as the main application
+                        AddDebugLog(L"[AD_RECOVERY] Getting fresh access token for " + channel_name);
+                        std::wstring fresh_access_token = GetAccessToken(channel_name);
                         
-                        // Fetch fresh quality list from Twitch
-                        bool fetch_success = FetchTwitchStreamQualities(channel_name, fresh_qualities, fresh_master_url);
-                        
-                        if (fetch_success) {
-                            AddDebugLog(L"[AD_RECOVERY] Successfully fetched fresh quality list with " + 
-                                       std::to_wstring(fresh_qualities.size()) + L" qualities for " + channel_name);
+                        if (!fresh_access_token.empty() && fresh_access_token != L"OFFLINE") {
+                            AddDebugLog(L"[AD_RECOVERY] Successfully obtained fresh access token for " + channel_name);
                             
-                            // Parse the fresh master playlist to get individual quality URLs
-                            std::string fresh_master;
-                            if (HttpGetText(fresh_master_url, fresh_master, &cancel_token)) {
-                                std::wstring fresh_master_wide = std::wstring(fresh_master.begin(), fresh_master.end());
+                            // Fetch fresh master playlist using the authenticated token
+                            std::wstring fresh_master_playlist = FetchPlaylist(channel_name, fresh_access_token);
+                            
+                            if (!fresh_master_playlist.empty()) {
+                                AddDebugLog(L"[AD_RECOVERY] Successfully fetched fresh master playlist for " + channel_name);
                                 
-                                // Parse the fresh playlist to extract quality URLs
-                                std::vector<PlaylistQuality> fresh_quality_list = ParseM3U8MasterPlaylist(fresh_master_wide, fresh_master_url);
+                                // Parse the fresh playlist to get quality URLs
+                                std::map<std::wstring, std::wstring> fresh_qualities = ParsePlaylist(fresh_master_playlist);
                                 
-                                // Find the URL for the user's selected quality
-                                std::wstring fresh_playlist_url;
-                                bool quality_found = false;
-                                
-                                for (const auto& quality : fresh_quality_list) {
-                                    if (quality.name == selected_quality) {
-                                        fresh_playlist_url = quality.url;
+                                if (!fresh_qualities.empty()) {
+                                    AddDebugLog(L"[AD_RECOVERY] Successfully parsed " + std::to_wstring(fresh_qualities.size()) + L" qualities from fresh playlist for " + channel_name);
+                                    
+                                    // Find the URL for the user's selected quality
+                                    std::wstring fresh_playlist_url;
+                                    bool quality_found = false;
+                                    
+                                    // First try exact match
+                                    if (fresh_qualities.find(selected_quality) != fresh_qualities.end()) {
+                                        fresh_playlist_url = fresh_qualities[selected_quality];
                                         quality_found = true;
-                                        break;
+                                        AddDebugLog(L"[AD_RECOVERY] Found exact quality match: " + selected_quality + L" for " + channel_name);
                                     }
-                                }
-                                
-                                // If exact quality not found, try to find a similar quality or use the first available
-                                if (!quality_found && !fresh_quality_list.empty()) {
-                                    // Try to find a quality containing the same resolution or keyword
-                                    for (const auto& quality : fresh_quality_list) {
-                                        if (quality.name.find(L"source") != std::wstring::npos || 
-                                            quality.name.find(L"720") != std::wstring::npos ||
-                                            quality.name.find(L"1080") != std::wstring::npos) {
-                                            fresh_playlist_url = quality.url;
-                                            quality_found = true;
-                                            AddDebugLog(L"[AD_RECOVERY] Using fallback quality: " + quality.name + L" for " + channel_name);
-                                            break;
+                                    
+                                    // If exact quality not found, try to find a similar quality
+                                    if (!quality_found) {
+                                        std::vector<std::wstring> priority_qualities = {L"source", L"720p60", L"720p", L"1080p60", L"1080p", L"480p"};
+                                        for (const auto& priority_quality : priority_qualities) {
+                                            if (fresh_qualities.find(priority_quality) != fresh_qualities.end()) {
+                                                fresh_playlist_url = fresh_qualities[priority_quality];
+                                                quality_found = true;
+                                                AddDebugLog(L"[AD_RECOVERY] Using fallback quality: " + priority_quality + L" for " + channel_name);
+                                                break;
+                                            }
                                         }
                                     }
                                     
-                                    // If still no match, use the first quality
-                                    if (!quality_found) {
-                                        fresh_playlist_url = fresh_quality_list[0].url;
+                                    // If still no match, use the first available quality
+                                    if (!quality_found && !fresh_qualities.empty()) {
+                                        auto first_quality = fresh_qualities.begin();
+                                        fresh_playlist_url = first_quality->second;
                                         quality_found = true;
-                                        AddDebugLog(L"[AD_RECOVERY] Using first available quality: " + fresh_quality_list[0].name + L" for " + channel_name);
+                                        AddDebugLog(L"[AD_RECOVERY] Using first available quality: " + first_quality->first + L" for " + channel_name);
                                     }
-                                }
-                                
-                                if (quality_found) {
-                                    // Update the media playlist URL to the fresh one
-                                    media_playlist_url = fresh_playlist_url;
-                                    AddDebugLog(L"[AD_RECOVERY] Successfully switched to fresh playlist URL to bypass ads for " + channel_name);
-                                    AddDebugLog(L"[AD_RECOVERY] New playlist URL: " + fresh_playlist_url);
                                     
-                                    // Update fresh playlist tracking
-                                    fresh_playlist_attempts++;
-                                    last_fresh_playlist_time = current_time;
-                                    
-                                    // Clear seen URLs to allow re-downloading from fresh playlist
-                                    seen_urls.clear();
-                                    // Don't re-insert __FETCH_FRESH_PLAYLIST__ marker to allow future processing
-                                    
-                                    // Reset error count since we're starting fresh
-                                    consecutive_errors = 0;
-                                    
-                                    // Break from segment processing to restart playlist fetching with new URL
-                                    AddDebugLog(L"[AD_RECOVERY] Breaking from segment loop to restart with fresh playlist for " + channel_name);
-                                    break;
+                                    if (quality_found) {
+                                        // Update the media playlist URL to the fresh one
+                                        media_playlist_url = fresh_playlist_url;
+                                        AddDebugLog(L"[AD_RECOVERY] Successfully switched to fresh playlist URL to bypass ads for " + channel_name);
+                                        AddDebugLog(L"[AD_RECOVERY] New playlist URL: " + fresh_playlist_url);
+                                        
+                                        // Update fresh playlist tracking
+                                        fresh_playlist_attempts++;
+                                        last_fresh_playlist_time = current_time;
+                                        
+                                        // Clear seen URLs to allow re-downloading from fresh playlist
+                                        seen_urls.clear();
+                                        // Don't re-insert __FETCH_FRESH_PLAYLIST__ marker to allow future processing
+                                        
+                                        // Reset error count since we're starting fresh
+                                        consecutive_errors = 0;
+                                        
+                                        // Break from segment processing to restart playlist fetching with new URL
+                                        AddDebugLog(L"[AD_RECOVERY] Breaking from segment loop to restart with fresh playlist for " + channel_name);
+                                        break;
+                                    } else {
+                                        AddDebugLog(L"[AD_RECOVERY] Warning: Could not find suitable quality in fresh playlist for " + channel_name);
+                                    }
                                 } else {
-                                    AddDebugLog(L"[AD_RECOVERY] Warning: Could not find suitable quality in fresh playlist for " + channel_name);
+                                    AddDebugLog(L"[AD_RECOVERY] Warning: Fresh playlist contains no quality information for " + channel_name);
                                 }
                             } else {
-                                AddDebugLog(L"[AD_RECOVERY] Failed to download fresh master playlist for " + channel_name);
+                                AddDebugLog(L"[AD_RECOVERY] Failed to fetch fresh master playlist for " + channel_name);
                             }
+                        } else if (fresh_access_token == L"OFFLINE") {
+                            AddDebugLog(L"[AD_RECOVERY] Channel " + channel_name + L" is offline, cannot fetch fresh playlist");
                         } else {
-                            AddDebugLog(L"[AD_RECOVERY] Failed to fetch fresh quality list for " + channel_name);
+                            AddDebugLog(L"[AD_RECOVERY] Failed to obtain fresh access token for " + channel_name);
                         }
                     } else {
                         AddDebugLog(L"[AD_RECOVERY] Warning: Missing channel name or selected quality for ad recovery");
