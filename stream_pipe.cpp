@@ -158,7 +158,7 @@ private:
             "\r\n";
         send(client_socket, response.c_str(), (int)response.length(), 0);
         
-        // Stream data from queue with continuous flow to prevent freezing
+        // Stream data from queue
         int segments_sent = 0;
         int empty_queue_count = 0;
         const int max_empty_waits = 100; // 5 seconds max wait for data (50ms * 100)
@@ -176,20 +176,64 @@ private:
             }
             
             if (!data.empty()) {
-                int sent = send(client_socket, data.data(), (int)data.size(), 0);
-                if (sent <= 0) {
-                    AddDebugLog(L"[HTTP] Client disconnected after " + std::to_wstring(segments_sent) + L" segments");
-                    break; // Client disconnected
+                // Send data with retry logic to handle slow writes and write failures
+                bool data_sent = false;
+                int send_attempts = 0;
+                const int max_send_attempts = 3;
+                const char* data_ptr = data.data();
+                int remaining_bytes = (int)data.size();
+                
+                while (!data_sent && send_attempts < max_send_attempts && remaining_bytes > 0) {
+                    int sent = send(client_socket, data_ptr, remaining_bytes, 0);
+                    
+                    if (sent > 0) {
+                        data_ptr += sent;
+                        remaining_bytes -= sent;
+                        
+                        if (remaining_bytes == 0) {
+                            data_sent = true;
+                        }
+                        // Continue sending remaining bytes if partial send occurred
+                    } else {
+                        send_attempts++;
+                        int error = WSAGetLastError();
+                        
+                        if (error == WSAECONNRESET || error == WSAECONNABORTED || error == WSAENOTCONN) {
+                            AddDebugLog(L"[HTTP] Client disconnected (error=" + std::to_wstring(error) + L") after " + 
+                                       std::to_wstring(segments_sent) + L" segments");
+                            break; // Client disconnected, no point retrying
+                        }
+                        
+                        if (error == WSAEWOULDBLOCK || error == WSAEINPROGRESS) {
+                            AddDebugLog(L"[HTTP] Socket send would block, attempt " + std::to_wstring(send_attempts) + 
+                                       L"/" + std::to_wstring(max_send_attempts));
+                            if (send_attempts < max_send_attempts) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(50)); // Wait for socket to become ready
+                            }
+                        } else {
+                            AddDebugLog(L"[HTTP] Send error " + std::to_wstring(error) + L", attempt " + 
+                                       std::to_wstring(send_attempts) + L"/" + std::to_wstring(max_send_attempts));
+                            if (send_attempts < max_send_attempts) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            }
+                        }
+                    }
+                }
+                
+                if (!data_sent) {
+                    AddDebugLog(L"[HTTP] Failed to send data after " + std::to_wstring(max_send_attempts) + 
+                               L" attempts, client likely disconnected");
+                    break;
                 }
                 segments_sent++;
             } else {
-                // No data available - use shorter wait to prevent video freezing
+                // No data available - wait for more data
                 empty_queue_count++;
                 if (empty_queue_count >= max_empty_waits) {
-                    AddDebugLog(L"[HTTP] No data for too long, ending client session to prevent freeze");
+                    AddDebugLog(L"[HTTP] No data for too long, ending client session");
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
         
@@ -197,6 +241,58 @@ private:
         closesocket(client_socket);
     }
 };
+
+/*
+ * WRITE FAILURE PREVENTION MECHANISMS:
+ * 
+ * This implementation focuses on preventing slow writes and write failures instead of 
+ * reducing timing delays to prevent video freezing:
+ *
+ * 1. WriteFile Retry Logic: Each write operation attempts up to 3 times with error recovery
+ * 2. Timeout Handling: WriteFileWithTimeout prevents indefinite blocking on slow writes  
+ * 3. Partial Write Handling: Socket sends handle partial writes by continuing from offset
+ * 4. Error-Specific Recovery: Different error types (broken pipe, timeout, etc.) handled appropriately
+ * 5. Buffered Pipes: Larger pipe buffer (1MB) reduces chance of write blocking
+ * 6. Resource Monitoring: Track write attempts and failures for diagnostics
+ *
+ * Previous approach reduced delays from 50ms to 10ms to prevent freezing, but this 
+ * approach maintains 50ms delays and focuses on robust write operations instead.
+ */
+
+// Helper function to perform WriteFile with timeout for slow write prevention
+static bool WriteFileWithTimeout(HANDLE hFile, const void* lpBuffer, DWORD nNumberOfBytesToWrite, 
+                                DWORD* lpNumberOfBytesWritten, DWORD timeoutMs = 5000) {
+    OVERLAPPED overlapped = { 0 };
+    overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!overlapped.hEvent) {
+        return FALSE;
+    }
+    
+    BOOL result = WriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, &overlapped);
+    
+    if (!result) {
+        DWORD error = GetLastError();
+        if (error == ERROR_IO_PENDING) {
+            // Wait for the write to complete with timeout
+            DWORD waitResult = WaitForSingleObject(overlapped.hEvent, timeoutMs);
+            if (waitResult == WAIT_OBJECT_0) {
+                result = GetOverlappedResult(hFile, &overlapped, lpNumberOfBytesWritten, FALSE);
+            } else if (waitResult == WAIT_TIMEOUT) {
+                // Cancel the I/O operation if it times out
+                CancelIo(hFile);
+                SetLastError(ERROR_TIMEOUT);
+                result = FALSE;
+            } else {
+                result = FALSE;
+            }
+        } else {
+            result = FALSE;
+        }
+    }
+    
+    CloseHandle(overlapped.hEvent);
+    return result;
+}
 
 // Utility: HTTP GET (returns as binary), with error retries
 static bool HttpGetBinary(const std::wstring& url, std::vector<char>& out, int max_attempts = 3, std::atomic<bool>* cancel_token = nullptr) {
@@ -554,7 +650,9 @@ bool BufferAndPipeStreamToPlayer(
     saAttr.bInheritHandle = TRUE;
     saAttr.lpSecurityDescriptor = NULL;
     
-    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, 0)) {
+    // Create pipe with larger buffer size to help prevent slow writes
+    const DWORD PIPE_BUFFER_SIZE = 1024 * 1024; // 1MB buffer to handle slow writes
+    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, PIPE_BUFFER_SIZE)) {
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create pipe for " + channel_name);
         std::lock_guard<std::mutex> lock(g_stream_mutex);
         --g_active_streams;
@@ -820,9 +918,9 @@ bool BufferAndPipeStreamToPlayer(
         auto feeder_startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(feeder_start_time - thread_start_time);
         
         bool started = false;
-        const size_t min_buffer_size = 3; // Minimum 3 segments to prevent video freezing (from PR #21)
+        const size_t min_buffer_size = 3; // Minimum 3 segments for smooth streaming
         int empty_buffer_count = 0;
-        const int max_empty_waits = 500; // 5 seconds max wait for data (10ms * 500)
+        const int max_empty_waits = 100; // 5 seconds max wait for data (50ms * 100)
         
         AddDebugLog(L"[FEEDER] Starting IPC feeder thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(feeder_startup_delay.count()) + L"ms");
@@ -866,7 +964,7 @@ bool BufferAndPipeStreamToPlayer(
                 }
             }
             
-            // Multi-segment feeding to maintain continuous flow (adapted from PR #21)
+            // Multi-segment feeding to maintain continuous flow
             std::vector<std::vector<char>> segments_to_feed;
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
@@ -889,19 +987,59 @@ bool BufferAndPipeStreamToPlayer(
             }
             
             if (!segments_to_feed.empty()) {
-                // Write segments directly to player stdin pipe
+                // Write segments directly to player stdin pipe with retry logic
+                bool write_failed = false;
                 for (const auto& segment_data : segments_to_feed) {
-                    DWORD bytes_written = 0;
-                    BOOL write_result = WriteFile(stdin_pipe, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, NULL);
+                    bool segment_written = false;
+                    int write_attempts = 0;
+                    const int max_write_attempts = 3;
                     
-                    if (!write_result || bytes_written != segment_data.size()) {
-                        DWORD error = GetLastError();
-                        AddDebugLog(L"[IPC] Failed to write to stdin pipe for " + channel_name + 
-                                   L", Error=" + std::to_wstring(error) + 
-                                   L", BytesWritten=" + std::to_wstring(bytes_written) + 
-                                   L"/" + std::to_wstring(segment_data.size()));
+                    while (!segment_written && write_attempts < max_write_attempts && !cancel_token.load()) {
+                        DWORD bytes_written = 0;
+                        // Use WriteFile with timeout to prevent slow writes from blocking indefinitely
+                        BOOL write_result = WriteFileWithTimeout(stdin_pipe, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, 3000); // 3 second timeout
+                        
+                        if (write_result && bytes_written == segment_data.size()) {
+                            segment_written = true;
+                        } else {
+                            write_attempts++;
+                            DWORD error = GetLastError();
+                            
+                            if (error == ERROR_NO_DATA || error == ERROR_BROKEN_PIPE) {
+                                AddDebugLog(L"[IPC] Pipe closed/broken for " + channel_name + L", error=" + std::to_wstring(error));
+                                write_failed = true;
+                                break; // Pipe is broken, no point retrying
+                            }
+                            
+                            if (error == ERROR_TIMEOUT) {
+                                AddDebugLog(L"[IPC] Write timeout (3s) on attempt " + std::to_wstring(write_attempts) + 
+                                           L"/" + std::to_wstring(max_write_attempts) + L" for " + channel_name + 
+                                           L" - slow write detected");
+                            } else {
+                                AddDebugLog(L"[IPC] Write attempt " + std::to_wstring(write_attempts) + L"/" + std::to_wstring(max_write_attempts) + 
+                                           L" failed for " + channel_name + 
+                                           L", Error=" + std::to_wstring(error) + 
+                                           L", BytesWritten=" + std::to_wstring(bytes_written) + 
+                                           L"/" + std::to_wstring(segment_data.size()));
+                            }
+                            
+                            if (write_attempts < max_write_attempts) {
+                                // Wait briefly before retry to handle temporary write issues
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            }
+                        }
+                    }
+                    
+                    if (!segment_written) {
+                        AddDebugLog(L"[IPC] Failed to write segment after " + std::to_wstring(max_write_attempts) + L" attempts for " + channel_name);
+                        write_failed = true;
                         break;
                     }
+                }
+                
+                if (write_failed) {
+                    AddDebugLog(L"[IPC] Write failure detected, stopping feeder for " + channel_name);
+                    break;
                 }
                 
                 size_t remaining_buffer = buffer_size - segments_to_feed.size();
@@ -916,14 +1054,14 @@ bool BufferAndPipeStreamToPlayer(
                 // Shorter wait when actively feeding to maintain flow
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             } else {
-                // No data available - use shorter wait to prevent video freezing (from PR #21)
+                // No data available - wait for more data
                 empty_buffer_count++;
                 if (empty_buffer_count >= max_empty_waits) {
-                    AddDebugLog(L"[IPC] No data for too long (" + std::to_wstring(empty_buffer_count * 10) + 
-                               L"ms), ending to prevent freeze for " + channel_name);
+                    AddDebugLog(L"[IPC] No data for too long (" + std::to_wstring(empty_buffer_count * 50) + 
+                               L"ms), ending stream for " + channel_name);
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Reduced from 50ms to 10ms (from PR #21)
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
         
