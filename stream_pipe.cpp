@@ -427,12 +427,12 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         
         // This is a segment URL
         if (skip_next_segment || in_scte35_out) {
-            // Skip this segment as it contains ad content and signal that buffer should be reset
-            AddDebugLog(L"[FILTER] Skipping ad segment: " + std::wstring(line.begin(), line.end()));
+            // Ad segment detected - trigger fresh playlist fetch instead of skipping
+            AddDebugLog(L"[FILTER] Ad segment detected: " + std::wstring(line.begin(), line.end()));
+            AddDebugLog(L"[FILTER] Triggering fresh playlist fetch to bypass ads");
             
-            // Add a special marker to signal buffer reset is needed instead of placeholders
-            // This prevents buffer depletion issues when multiple ad segments are filtered out
-            segs.push_back(L"__AD_RESET_BUFFER__");
+            // Add a special marker to signal fresh playlist fetch is needed
+            segs.push_back(L"__FETCH_FRESH_PLAYLIST__");
             
             skip_next_segment = false;
             continue;
@@ -874,9 +874,9 @@ bool BufferAndPipeStreamToPlayer(
                 if (seen_urls.count(seg)) continue;
                 
                 // Handle ad segment detection - fetch fresh playlist to bypass ads
-                if (seg == L"__AD_RESET_BUFFER__") {
+                if (seg == L"__FETCH_FRESH_PLAYLIST__") {
                     seen_urls.insert(seg);
-                    AddDebugLog(L"[AD_RECOVERY] Ad segment detected - checking if fresh playlist fetch is needed for " + channel_name);
+                    AddDebugLog(L"[AD_RECOVERY] Fresh playlist fetch requested - bypassing ads for " + channel_name);
                     
                     // Check fresh playlist fetch limits and cooldown
                     auto current_time = std::chrono::steady_clock::now();
@@ -967,7 +967,7 @@ bool BufferAndPipeStreamToPlayer(
                                     
                                     // Clear seen URLs to allow re-downloading from fresh playlist
                                     seen_urls.clear();
-                                    seen_urls.insert(L"__AD_RESET_BUFFER__"); // Keep this marker to avoid re-processing
+                                    seen_urls.insert(L"__FETCH_FRESH_PLAYLIST__"); // Keep this marker to avoid re-processing
                                     
                                     // Reset error count since we're starting fresh
                                     consecutive_errors = 0;
