@@ -373,7 +373,7 @@ static bool HttpGetBinary(const std::wstring& url, std::vector<char>& out, int m
 }
 
 // Utility: HTTP GET (returns as string)
-static bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token = nullptr) {
+static bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token) {
     std::vector<char> data;
     if (!HttpGetBinary(url, data, 3, cancel_token)) return false;
     out.assign(data.begin(), data.end());
