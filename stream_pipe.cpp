@@ -425,12 +425,12 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         
         // This is a segment URL
         if (skip_next_segment || in_scte35_out) {
-            // Skip this segment as it contains ad content but add a placeholder to maintain buffer flow
+            // Skip this segment as it contains ad content and signal that buffer should be reset
             AddDebugLog(L"[FILTER] Skipping ad segment: " + std::wstring(line.begin(), line.end()));
             
-            // Add a special placeholder segment to maintain buffer continuity
-            // This prevents buffer depletion when multiple ad segments are filtered out
-            segs.push_back(L"__AD_PLACEHOLDER__");
+            // Add a special marker to signal buffer reset is needed instead of placeholders
+            // This prevents buffer depletion issues when multiple ad segments are filtered out
+            segs.push_back(L"__AD_RESET_BUFFER__");
             
             skip_next_segment = false;
             continue;
@@ -829,17 +829,17 @@ bool BufferAndPipeStreamToPlayer(
 
             auto segments = ParseSegments(playlist);
             
-            // Count placeholders for monitoring ad filtering effectiveness
-            int placeholder_count = 0;
+            // Count buffer reset markers for monitoring ad filtering effectiveness
+            int ad_reset_count = 0;
             for (const auto& seg : segments) {
-                if (seg == L"__AD_PLACEHOLDER__") {
-                    placeholder_count++;
+                if (seg == L"__AD_RESET_BUFFER__") {
+                    ad_reset_count++;
                 }
             }
             
             AddDebugLog(L"[DOWNLOAD] Parsed " + std::to_wstring(segments.size()) + 
                        L" segments from playlist for " + channel_name + 
-                       (placeholder_count > 0 ? L" (including " + std::to_wstring(placeholder_count) + L" ad placeholders)" : L""));
+                       (ad_reset_count > 0 ? L" (including " + std::to_wstring(ad_reset_count) + L" ad resets)" : L""));
             
             // Download new segments
             int new_segments_downloaded = 0;
@@ -859,25 +859,22 @@ bool BufferAndPipeStreamToPlayer(
                 
                 if (seen_urls.count(seg)) continue;
                 
-                // Handle ad placeholder segments - create empty buffer entry to maintain flow
-                if (seg == L"__AD_PLACEHOLDER__") {
+                // Handle ad buffer reset marker - clear buffer when ads are encountered
+                if (seg == L"__AD_RESET_BUFFER__") {
                     seen_urls.insert(seg);
-                    AddDebugLog(L"[DOWNLOAD] Processing ad placeholder to maintain buffer continuity for " + channel_name);
+                    AddDebugLog(L"[DOWNLOAD] Ad segment detected - resetting buffer to prevent depletion for " + channel_name);
                     
-                    // Add an empty segment to buffer to maintain segment count and timing
-                    std::vector<char> empty_segment; // Empty placeholder segment
+                    // Clear the buffer queue to reset state when ads are skipped
+                    size_t cleared_segments = 0;
                     {
                         std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer_queue.push(std::move(empty_segment));
+                        cleared_segments = buffer_queue.size();
+                        std::queue<std::vector<char>> empty_queue;
+                        buffer_queue.swap(empty_queue); // Clear the queue efficiently
                     }
-                    new_segments_downloaded++;
                     
-                    size_t current_buffer_size;
-                    {
-                        std::lock_guard<std::mutex> lock(buffer_mutex);
-                        current_buffer_size = buffer_queue.size();
-                    }
-                    AddDebugLog(L"[DOWNLOAD] Added ad placeholder, buffer=" + std::to_wstring(current_buffer_size) + L" for " + channel_name);
+                    AddDebugLog(L"[DOWNLOAD] Buffer reset complete - cleared " + std::to_wstring(cleared_segments) + 
+                               L" segments for " + channel_name);
                     continue;
                 }
                 
@@ -1006,38 +1003,19 @@ bool BufferAndPipeStreamToPlayer(
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
                 
-                // Count real content segments (non-empty) for better buffer management
-                int real_content_segments = 0;
-                std::queue<std::vector<char>> temp_queue = buffer_queue;
-                while (!temp_queue.empty()) {
-                    if (!temp_queue.front().empty()) {
-                        real_content_segments++;
-                    }
-                    temp_queue.pop();
-                }
-                
                 // Feed multiple segments when buffer is low to prevent freezing
                 int max_segments_to_feed = 1;
                 if (buffer_size < min_buffer_size) {
                     // When buffer is low, be more aggressive about feeding segments
-                    // Especially important when many ad placeholders are present
-                    if (real_content_segments == 0 && buffer_size > 0) {
-                        // Buffer contains only placeholders - feed more aggressively to get to real content
-                        max_segments_to_feed = std::min((int)buffer_queue.size(), 5);
-                    } else {
-                        max_segments_to_feed = std::min((int)buffer_queue.size(), 3); // Feed up to 3 segments when low
-                    }
+                    max_segments_to_feed = std::min((int)buffer_queue.size(), 3); // Feed up to 3 segments when low
                     
                     AddDebugLog(L"[FEEDER] Buffer low (" + std::to_wstring(buffer_size) + 
                                L" < " + std::to_wstring(min_buffer_size) + 
-                               L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name +
-                               L" (real content: " + std::to_wstring(real_content_segments) + L")");
+                               L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
                     
-                    // Special warning if buffer reaches 0 and no real content available
+                    // Warning if buffer reaches 0
                     if (buffer_size == 0) {
-                        AddDebugLog(L"[FEEDER] *** WARNING: Buffer reached 0 - ad placeholder system may need adjustment for " + channel_name + L" ***");
-                    } else if (real_content_segments == 0) {
-                        AddDebugLog(L"[FEEDER] *** INFO: Buffer contains only ad placeholders (" + std::to_wstring(buffer_size) + L" total), feeding aggressively for " + channel_name + L" ***");
+                        AddDebugLog(L"[FEEDER] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
                     }
                 }
                 
@@ -1055,13 +1033,10 @@ bool BufferAndPipeStreamToPlayer(
                 int segments_processed = 0;
                 
                 for (const auto& segment_data : segments_to_feed) {
-                    // Handle ad placeholder segments - skip writing with minimal delay
+                    // Skip empty segments (shouldn't happen with buffer reset approach)
                     if (segment_data.empty()) {
-                        AddDebugLog(L"[IPC] Processing ad placeholder (empty segment) for " + channel_name);
+                        AddDebugLog(L"[IPC] Warning: Found empty segment in buffer for " + channel_name);
                         segments_processed++;
-                        // Use minimal delay for ad placeholders to prevent buffer starvation
-                        // Long delays cause buffer depletion when many consecutive ads are present
-                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
                         continue;
                     }
                     
@@ -1125,7 +1100,7 @@ bool BufferAndPipeStreamToPlayer(
                 
                 empty_buffer_count = 0; // Reset counter when data is fed
                 AddDebugLog(L"[IPC] Fed " + std::to_wstring(segments_processed) + 
-                           L" segments (including placeholders) to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer));
+                           L" segments to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer));
                 
                 // Shorter wait when actively feeding to maintain flow
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
