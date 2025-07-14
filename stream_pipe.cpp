@@ -24,6 +24,28 @@ std::wstring GetAccessToken(const std::wstring& channel);
 std::wstring FetchPlaylist(const std::wstring& channel, const std::wstring& accessToken);
 std::map<std::wstring, std::wstring> ParsePlaylist(const std::wstring& m3u8);
 
+// Forward declarations for functions defined in other files
+bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token = nullptr);
+std::wstring Utf8ToWide(const std::string& str);
+
+// Helper functions for URL parsing
+std::wstring ExtractDomain(const std::wstring& url) {
+    size_t start = url.find(L"://");
+    if (start == std::wstring::npos) return url;
+    start += 3;
+    size_t end = url.find(L'/', start);
+    if (end == std::wstring::npos) return url.substr(start);
+    return url.substr(start, end - start);
+}
+
+std::wstring ExtractPath(const std::wstring& url) {
+    size_t start = url.find(L"://");
+    if (start == std::wstring::npos) return L"/";
+    start = url.find(L'/', start + 3);
+    if (start == std::wstring::npos) return L"/";
+    return url.substr(start);
+}
+
 // Global stream tracking for multi-stream debugging
 static std::atomic<int> g_active_streams(0);
 static std::mutex g_stream_mutex;
@@ -925,6 +947,7 @@ bool BufferAndPipeStreamToPlayer(
                             
                             if (!fresh_master_playlist.empty()) {
                                 AddDebugLog(L"[AD_RECOVERY] Successfully fetched fresh master playlist for " + channel_name);
+                                AddDebugLog(L"[AD_RECOVERY] Fresh master playlist content (first 500 chars): " + fresh_master_playlist.substr(0, 500));
                                 
                                 // Parse the fresh playlist to get quality URLs
                                 std::map<std::wstring, std::wstring> fresh_qualities = ParsePlaylist(fresh_master_playlist);
@@ -943,10 +966,12 @@ bool BufferAndPipeStreamToPlayer(
                                     // Find the URL for the user's selected quality
                                     std::wstring fresh_playlist_url;
                                     bool quality_found = false;
+                                    std::wstring selected_quality_name;
                                     
                                     // First try exact match
                                     if (fresh_qualities.find(selected_quality) != fresh_qualities.end()) {
                                         fresh_playlist_url = fresh_qualities[selected_quality];
+                                        selected_quality_name = selected_quality;
                                         quality_found = true;
                                         AddDebugLog(L"[AD_RECOVERY] Found exact quality match: " + selected_quality + L" for " + channel_name);
                                     }
@@ -957,6 +982,7 @@ bool BufferAndPipeStreamToPlayer(
                                         for (const auto& priority_quality : priority_qualities) {
                                             if (fresh_qualities.find(priority_quality) != fresh_qualities.end()) {
                                                 fresh_playlist_url = fresh_qualities[priority_quality];
+                                                selected_quality_name = priority_quality;
                                                 quality_found = true;
                                                 AddDebugLog(L"[AD_RECOVERY] Using fallback quality: " + priority_quality + L" for " + channel_name);
                                                 break;
@@ -969,8 +995,10 @@ bool BufferAndPipeStreamToPlayer(
                                         for (const auto& quality_pair : fresh_qualities) {
                                             // Skip audio-only streams - we want video content
                                             if (quality_pair.first.find(L"audio") == std::wstring::npos && 
-                                                quality_pair.first != L"audio_only") {
+                                                quality_pair.first != L"audio_only" &&
+                                                quality_pair.first.find(L"Audio") == std::wstring::npos) {
                                                 fresh_playlist_url = quality_pair.second;
+                                                selected_quality_name = quality_pair.first;
                                                 quality_found = true;
                                                 AddDebugLog(L"[AD_RECOVERY] Using first available video quality: " + quality_pair.first + L" for " + channel_name);
                                                 break;
@@ -980,6 +1008,64 @@ bool BufferAndPipeStreamToPlayer(
                                         // If somehow we only have audio streams available, log this as an error
                                         if (!quality_found) {
                                             AddDebugLog(L"[AD_RECOVERY] ERROR: Only audio streams available in fresh playlist for " + channel_name);
+                                        }
+                                    }
+                                    
+                                    // Additional validation: check if the URL looks like a video stream
+                                    if (quality_found) {
+                                        AddDebugLog(L"[AD_RECOVERY] Selected quality: " + selected_quality_name + L" -> URL: " + fresh_playlist_url);
+                                        
+                                        // Validate URL doesn't contain audio-only indicators
+                                        if (fresh_playlist_url.find(L"audio") != std::wstring::npos ||
+                                            fresh_playlist_url.find(L"Audio") != std::wstring::npos) {
+                                            AddDebugLog(L"[AD_RECOVERY] WARNING: Selected URL appears to be audio-only based on URL content: " + fresh_playlist_url);
+                                            quality_found = false;
+                                            
+                                            // Try to find a different quality that doesn't have audio in the URL
+                                            for (const auto& quality_pair : fresh_qualities) {
+                                                if (quality_pair.second.find(L"audio") == std::wstring::npos &&
+                                                    quality_pair.second.find(L"Audio") == std::wstring::npos &&
+                                                    quality_pair.first.find(L"audio") == std::wstring::npos &&
+                                                    quality_pair.first != L"audio_only") {
+                                                    fresh_playlist_url = quality_pair.second;
+                                                    selected_quality_name = quality_pair.first;
+                                                    quality_found = true;
+                                                    AddDebugLog(L"[AD_RECOVERY] Found alternative video quality: " + quality_pair.first + L" -> " + quality_pair.second);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Additional validation: try to fetch a small sample of the media playlist to verify it contains video
+                                        if (quality_found) {
+                                            AddDebugLog(L"[AD_RECOVERY] Validating that selected playlist contains video content...");
+                                            
+                                            // Quick fetch to validate the media playlist structure
+                                            std::string sample_resp;
+                                            if (HttpGetText(fresh_playlist_url, sample_resp, &cancel_token)) {
+                                                std::wstring sample_playlist = Utf8ToWide(sample_resp);
+                                                
+                                                if (!sample_playlist.empty()) {
+                                                    // Check if this looks like a video media playlist
+                                                    bool has_video_segments = sample_playlist.find(L".ts") != std::wstring::npos ||
+                                                                             sample_playlist.find(L".m4s") != std::wstring::npos;
+                                                    bool has_audio_only_markers = sample_playlist.find(L"AUDIO=") != std::wstring::npos &&
+                                                                                  sample_playlist.find(L"VIDEO=") == std::wstring::npos;
+                                                    
+                                                    if (has_video_segments && !has_audio_only_markers) {
+                                                        AddDebugLog(L"[AD_RECOVERY] ✓ Selected playlist appears to contain video segments");
+                                                    } else {
+                                                        AddDebugLog(L"[AD_RECOVERY] ✗ WARNING: Selected playlist might be audio-only (segments=" + 
+                                                                   std::to_wstring(has_video_segments) + L", audio_only_markers=" + 
+                                                                   std::to_wstring(has_audio_only_markers) + L")");
+                                                        AddDebugLog(L"[AD_RECOVERY] Sample playlist content: " + sample_playlist.substr(0, 300));
+                                                    }
+                                                } else {
+                                                    AddDebugLog(L"[AD_RECOVERY] WARNING: Could not fetch sample content from selected playlist URL");
+                                                }
+                                            } else {
+                                                AddDebugLog(L"[AD_RECOVERY] WARNING: Failed to fetch sample content from selected playlist URL");
+                                            }
                                         }
                                     }
                                     
