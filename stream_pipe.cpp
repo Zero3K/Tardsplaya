@@ -828,8 +828,18 @@ bool BufferAndPipeStreamToPlayer(
             }
 
             auto segments = ParseSegments(playlist);
+            
+            // Count placeholders for monitoring ad filtering effectiveness
+            int placeholder_count = 0;
+            for (const auto& seg : segments) {
+                if (seg == L"__AD_PLACEHOLDER__") {
+                    placeholder_count++;
+                }
+            }
+            
             AddDebugLog(L"[DOWNLOAD] Parsed " + std::to_wstring(segments.size()) + 
-                       L" segments from playlist for " + channel_name);
+                       L" segments from playlist for " + channel_name + 
+                       (placeholder_count > 0 ? L" (including " + std::to_wstring(placeholder_count) + L" ad placeholders)" : L""));
             
             // Download new segments
             int new_segments_downloaded = 0;
@@ -1003,6 +1013,11 @@ bool BufferAndPipeStreamToPlayer(
                     AddDebugLog(L"[FEEDER] Buffer low (" + std::to_wstring(buffer_size) + 
                                L" < " + std::to_wstring(min_buffer_size) + 
                                L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
+                    
+                    // Special warning if buffer reaches 0 - this should be prevented by ad placeholders
+                    if (buffer_size == 0) {
+                        AddDebugLog(L"[FEEDER] *** WARNING: Buffer reached 0 - ad placeholder system may need adjustment for " + channel_name + L" ***");
+                    }
                 }
                 
                 int segments_fed = 0;
