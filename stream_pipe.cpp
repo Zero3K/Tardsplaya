@@ -990,70 +990,24 @@ bool BufferAndPipeStreamToPlayer(
                                         }
                                     }
                                     
-                                    // If still no match, find the best video quality (prioritize higher resolutions)
+                                    // If still no match, find the first NON-AUDIO quality (avoid audio_only)
                                     if (!quality_found && !fresh_qualities.empty()) {
-                                        // Enhanced video quality detection - check for common video quality patterns
-                                        std::vector<std::wstring> video_quality_patterns = {
-                                            L"source", L"1080p", L"720p", L"480p", L"360p", L"160p", 
-                                            L"chunked", L"high", L"medium", L"low", L"mobile"
-                                        };
-                                        
-                                        for (const auto& pattern : video_quality_patterns) {
-                                            for (const auto& quality_pair : fresh_qualities) {
-                                                // Check if quality name contains video quality indicators
-                                                bool is_video_quality = quality_pair.first.find(pattern) != std::wstring::npos;
-                                                bool not_audio = quality_pair.first.find(L"audio") == std::wstring::npos && 
-                                                                quality_pair.first != L"audio_only" &&
-                                                                quality_pair.first.find(L"Audio") == std::wstring::npos;
-                                                bool url_not_audio = quality_pair.second.find(L"audio") == std::wstring::npos &&
-                                                                    quality_pair.second.find(L"Audio") == std::wstring::npos;
-                                                
-                                                if (is_video_quality && not_audio && url_not_audio) {
-                                                    fresh_playlist_url = quality_pair.second;
-                                                    selected_quality_name = quality_pair.first;
-                                                    quality_found = true;
-                                                    AddDebugLog(L"[AD_RECOVERY] Using video quality pattern match: " + quality_pair.first + L" for " + channel_name);
-                                                    break;
-                                                }
-                                            }
-                                            if (quality_found) break;
-                                        }
-                                        
-                                        // If pattern matching failed, use strict filtering for any non-audio stream
-                                        if (!quality_found) {
-                                            AddDebugLog(L"[AD_RECOVERY] Pattern matching failed, using strict audio filtering for " + channel_name);
-                                            for (const auto& quality_pair : fresh_qualities) {
-                                                // Very strict audio filtering
-                                                bool definitely_not_audio = 
-                                                    quality_pair.first.find(L"audio") == std::wstring::npos && 
-                                                    quality_pair.first != L"audio_only" &&
-                                                    quality_pair.first.find(L"Audio") == std::wstring::npos &&
-                                                    quality_pair.first.find(L"sound") == std::wstring::npos &&
-                                                    quality_pair.first.find(L"Sound") == std::wstring::npos &&
-                                                    quality_pair.second.find(L"audio") == std::wstring::npos &&
-                                                    quality_pair.second.find(L"Audio") == std::wstring::npos &&
-                                                    quality_pair.second.find(L"sound") == std::wstring::npos &&
-                                                    quality_pair.second.find(L"Sound") == std::wstring::npos;
-                                                
-                                                if (definitely_not_audio) {
-                                                    fresh_playlist_url = quality_pair.second;
-                                                    selected_quality_name = quality_pair.first;
-                                                    quality_found = true;
-                                                    AddDebugLog(L"[AD_RECOVERY] Using strictly filtered quality: " + quality_pair.first + L" for " + channel_name);
-                                                    break;
-                                                }
+                                        for (const auto& quality_pair : fresh_qualities) {
+                                            // Skip audio-only streams - we want video content
+                                            if (quality_pair.first.find(L"audio") == std::wstring::npos && 
+                                                quality_pair.first != L"audio_only" &&
+                                                quality_pair.first.find(L"Audio") == std::wstring::npos) {
+                                                fresh_playlist_url = quality_pair.second;
+                                                selected_quality_name = quality_pair.first;
+                                                quality_found = true;
+                                                AddDebugLog(L"[AD_RECOVERY] Using first available video quality: " + quality_pair.first + L" for " + channel_name);
+                                                break;
                                             }
                                         }
                                         
                                         // If somehow we only have audio streams available, log this as an error
                                         if (!quality_found) {
                                             AddDebugLog(L"[AD_RECOVERY] ERROR: Only audio streams available in fresh playlist for " + channel_name);
-                                            
-                                            // Log all available qualities for debugging
-                                            AddDebugLog(L"[AD_RECOVERY] Available qualities for analysis:");
-                                            for (const auto& quality_pair : fresh_qualities) {
-                                                AddDebugLog(L"[AD_RECOVERY]   - " + quality_pair.first + L" -> " + quality_pair.second.substr(0, 100) + L"...");
-                                            }
                                         }
                                     }
                                     
@@ -1061,80 +1015,28 @@ bool BufferAndPipeStreamToPlayer(
                                     if (quality_found) {
                                         AddDebugLog(L"[AD_RECOVERY] Selected quality: " + selected_quality_name + L" -> URL: " + fresh_playlist_url);
                                         
-                                        // Enhanced validation: check if URL/quality contains audio-only indicators
-                                        bool url_seems_audio = fresh_playlist_url.find(L"audio") != std::wstring::npos ||
-                                                              fresh_playlist_url.find(L"Audio") != std::wstring::npos ||
-                                                              fresh_playlist_url.find(L"sound") != std::wstring::npos ||
-                                                              fresh_playlist_url.find(L"Sound") != std::wstring::npos;
-                                        
-                                        bool quality_seems_audio = selected_quality_name.find(L"audio") != std::wstring::npos ||
-                                                                  selected_quality_name == L"audio_only" ||
-                                                                  selected_quality_name.find(L"Audio") != std::wstring::npos ||
-                                                                  selected_quality_name.find(L"sound") != std::wstring::npos;
-                                        
-                                        if (url_seems_audio || quality_seems_audio) {
-                                            AddDebugLog(L"[AD_RECOVERY] WARNING: Selected quality appears to be audio-only - Quality: " + 
-                                                       selected_quality_name + L", URL: " + fresh_playlist_url.substr(0, 100) + L"...");
+                                        // Validate URL doesn't contain audio-only indicators
+                                        if (fresh_playlist_url.find(L"audio") != std::wstring::npos ||
+                                            fresh_playlist_url.find(L"Audio") != std::wstring::npos) {
+                                            AddDebugLog(L"[AD_RECOVERY] WARNING: Selected URL appears to be audio-only based on URL content: " + fresh_playlist_url);
                                             quality_found = false;
                                             
-                                            // Try to find a different quality using enhanced filtering
-                                            AddDebugLog(L"[AD_RECOVERY] Searching for alternative video quality...");
+                                            // Try to find a different quality that doesn't have audio in the URL
                                             for (const auto& quality_pair : fresh_qualities) {
-                                                bool quality_safe = quality_pair.first.find(L"audio") == std::wstring::npos &&
-                                                                   quality_pair.first != L"audio_only" &&
-                                                                   quality_pair.first.find(L"Audio") == std::wstring::npos &&
-                                                                   quality_pair.first.find(L"sound") == std::wstring::npos &&
-                                                                   quality_pair.first.find(L"Sound") == std::wstring::npos;
-                                                
-                                                bool url_safe = quality_pair.second.find(L"audio") == std::wstring::npos &&
-                                                               quality_pair.second.find(L"Audio") == std::wstring::npos &&
-                                                               quality_pair.second.find(L"sound") == std::wstring::npos &&
-                                                               quality_pair.second.find(L"Sound") == std::wstring::npos;
-                                                
-                                                // Additionally prefer qualities with video indicators
-                                                bool has_video_indicators = quality_pair.first.find(L"p") != std::wstring::npos || // 720p, 1080p, etc.
-                                                                           quality_pair.first.find(L"source") != std::wstring::npos ||
-                                                                           quality_pair.first.find(L"chunked") != std::wstring::npos ||
-                                                                           quality_pair.first.find(L"high") != std::wstring::npos ||
-                                                                           quality_pair.first.find(L"medium") != std::wstring::npos ||
-                                                                           quality_pair.first.find(L"low") != std::wstring::npos;
-                                                
-                                                if (quality_safe && url_safe && has_video_indicators) {
+                                                if (quality_pair.second.find(L"audio") == std::wstring::npos &&
+                                                    quality_pair.second.find(L"Audio") == std::wstring::npos &&
+                                                    quality_pair.first.find(L"audio") == std::wstring::npos &&
+                                                    quality_pair.first != L"audio_only") {
                                                     fresh_playlist_url = quality_pair.second;
                                                     selected_quality_name = quality_pair.first;
                                                     quality_found = true;
-                                                    AddDebugLog(L"[AD_RECOVERY] Found safe video quality: " + quality_pair.first + L" -> " + quality_pair.second.substr(0, 100) + L"...");
+                                                    AddDebugLog(L"[AD_RECOVERY] Found alternative video quality: " + quality_pair.first + L" -> " + quality_pair.second);
                                                     break;
-                                                }
-                                            }
-                                            
-                                            // If no video indicators found, try any non-audio quality
-                                            if (!quality_found) {
-                                                AddDebugLog(L"[AD_RECOVERY] No qualities with video indicators found, trying any non-audio quality...");
-                                                for (const auto& quality_pair : fresh_qualities) {
-                                                    bool quality_safe = quality_pair.first.find(L"audio") == std::wstring::npos &&
-                                                                       quality_pair.first != L"audio_only" &&
-                                                                       quality_pair.first.find(L"Audio") == std::wstring::npos &&
-                                                                       quality_pair.first.find(L"sound") == std::wstring::npos &&
-                                                                       quality_pair.first.find(L"Sound") == std::wstring::npos;
-                                                    
-                                                    bool url_safe = quality_pair.second.find(L"audio") == std::wstring::npos &&
-                                                                   quality_pair.second.find(L"Audio") == std::wstring::npos &&
-                                                                   quality_pair.second.find(L"sound") == std::wstring::npos &&
-                                                                   quality_pair.second.find(L"Sound") == std::wstring::npos;
-                                                    
-                                                    if (quality_safe && url_safe) {
-                                                        fresh_playlist_url = quality_pair.second;
-                                                        selected_quality_name = quality_pair.first;
-                                                        quality_found = true;
-                                                        AddDebugLog(L"[AD_RECOVERY] Found fallback video quality: " + quality_pair.first + L" -> " + quality_pair.second.substr(0, 100) + L"...");
-                                                        break;
-                                                    }
                                                 }
                                             }
                                         }
                                         
-                                        // Enhanced media playlist validation to verify video content
+                                        // Additional validation: try to fetch a small sample of the media playlist to verify it contains video
                                         if (quality_found) {
                                             AddDebugLog(L"[AD_RECOVERY] Validating that selected playlist contains video content...");
                                             
@@ -1144,48 +1046,19 @@ bool BufferAndPipeStreamToPlayer(
                                                 std::wstring sample_playlist = Utf8ToWide(sample_resp);
                                                 
                                                 if (!sample_playlist.empty()) {
-                                                    // Enhanced video content detection
+                                                    // Check if this looks like a video media playlist
                                                     bool has_video_segments = sample_playlist.find(L".ts") != std::wstring::npos ||
-                                                                             sample_playlist.find(L".m4s") != std::wstring::npos ||
-                                                                             sample_playlist.find(L".mp4") != std::wstring::npos;
+                                                                             sample_playlist.find(L".m4s") != std::wstring::npos;
+                                                    bool has_audio_only_markers = sample_playlist.find(L"AUDIO=") != std::wstring::npos &&
+                                                                                  sample_playlist.find(L"VIDEO=") == std::wstring::npos;
                                                     
-                                                    // Check for audio-only markers in the playlist
-                                                    bool has_audio_only_markers = (sample_playlist.find(L"AUDIO=") != std::wstring::npos &&
-                                                                                  sample_playlist.find(L"VIDEO=") == std::wstring::npos) ||
-                                                                                 sample_playlist.find(L"audio-only") != std::wstring::npos ||
-                                                                                 sample_playlist.find(L"AUDIO-ONLY") != std::wstring::npos;
-                                                    
-                                                    // Check for video resolution indicators
-                                                    bool has_video_resolution = sample_playlist.find(L"RESOLUTION=") != std::wstring::npos ||
-                                                                               sample_playlist.find(L"BANDWIDTH=") != std::wstring::npos;
-                                                    
-                                                    // Check for codec indicators
-                                                    bool has_video_codecs = sample_playlist.find(L"avc1") != std::wstring::npos || // H.264
-                                                                          sample_playlist.find(L"hvc1") != std::wstring::npos || // H.265
-                                                                          sample_playlist.find(L"vp9") != std::wstring::npos ||  // VP9
-                                                                          sample_playlist.find(L"av01") != std::wstring::npos;  // AV1
-                                                    
-                                                    bool content_seems_video = has_video_segments && !has_audio_only_markers && 
-                                                                              (has_video_resolution || has_video_codecs);
-                                                    
-                                                    if (content_seems_video) {
-                                                        AddDebugLog(L"[AD_RECOVERY] ✓ Selected playlist appears to contain video content (segments=" + 
-                                                                   std::to_wstring(has_video_segments) + L", resolution=" + 
-                                                                   std::to_wstring(has_video_resolution) + L", codecs=" + 
-                                                                   std::to_wstring(has_video_codecs) + L")");
+                                                    if (has_video_segments && !has_audio_only_markers) {
+                                                        AddDebugLog(L"[AD_RECOVERY] ✓ Selected playlist appears to contain video segments");
                                                     } else {
-                                                        AddDebugLog(L"[AD_RECOVERY] ✗ WARNING: Selected playlist might be audio-only or invalid!");
-                                                        AddDebugLog(L"[AD_RECOVERY] Analysis: segments=" + std::to_wstring(has_video_segments) + 
-                                                                   L", audio_only_markers=" + std::to_wstring(has_audio_only_markers) + 
-                                                                   L", resolution=" + std::to_wstring(has_video_resolution) + 
-                                                                   L", codecs=" + std::to_wstring(has_video_codecs));
-                                                        AddDebugLog(L"[AD_RECOVERY] Sample playlist content (first 500 chars): " + sample_playlist.substr(0, 500));
-                                                        
-                                                        // If validation fails, mark quality as not found to prevent using this stream
-                                                        if (!has_video_segments || has_audio_only_markers) {
-                                                            AddDebugLog(L"[AD_RECOVERY] Rejecting playlist due to failed video validation");
-                                                            quality_found = false;
-                                                        }
+                                                        AddDebugLog(L"[AD_RECOVERY] ✗ WARNING: Selected playlist might be audio-only (segments=" + 
+                                                                   std::to_wstring(has_video_segments) + L", audio_only_markers=" + 
+                                                                   std::to_wstring(has_audio_only_markers) + L")");
+                                                        AddDebugLog(L"[AD_RECOVERY] Sample playlist content: " + sample_playlist.substr(0, 300));
                                                     }
                                                 } else {
                                                     AddDebugLog(L"[AD_RECOVERY] WARNING: Could not fetch sample content from selected playlist URL");
