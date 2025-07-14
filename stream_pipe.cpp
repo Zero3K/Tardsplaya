@@ -783,6 +783,11 @@ bool BufferAndPipeStreamToPlayer(
         int consecutive_errors = 0;
         const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
         
+        int fresh_playlist_attempts = 0;
+        const int max_fresh_playlist_attempts = 5; // Limit fresh playlist fetches to prevent infinite loops
+        auto last_fresh_playlist_time = std::chrono::steady_clock::now();
+        const std::chrono::seconds fresh_playlist_cooldown(30); // 30 second cooldown between attempts
+        
         AddDebugLog(L"[DOWNLOAD] Starting download thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(startup_delay.count()) + L"ms");
         
@@ -871,7 +876,30 @@ bool BufferAndPipeStreamToPlayer(
                 // Handle ad segment detection - fetch fresh playlist to bypass ads
                 if (seg == L"__AD_RESET_BUFFER__") {
                     seen_urls.insert(seg);
-                    AddDebugLog(L"[AD_RECOVERY] Ad segment detected - fetching fresh playlist to bypass ads for " + channel_name);
+                    AddDebugLog(L"[AD_RECOVERY] Ad segment detected - checking if fresh playlist fetch is needed for " + channel_name);
+                    
+                    // Check fresh playlist fetch limits and cooldown
+                    auto current_time = std::chrono::steady_clock::now();
+                    auto time_since_last_fetch = current_time - last_fresh_playlist_time;
+                    bool cooldown_passed = time_since_last_fetch >= fresh_playlist_cooldown;
+                    bool attempts_remaining = fresh_playlist_attempts < max_fresh_playlist_attempts;
+                    
+                    if (!attempts_remaining) {
+                        AddDebugLog(L"[AD_RECOVERY] Maximum fresh playlist attempts reached (" + 
+                                   std::to_wstring(fresh_playlist_attempts) + L"), skipping for " + channel_name);
+                        continue;
+                    }
+                    
+                    if (!cooldown_passed) {
+                        auto remaining_cooldown = std::chrono::duration_cast<std::chrono::seconds>(fresh_playlist_cooldown - time_since_last_fetch);
+                        AddDebugLog(L"[AD_RECOVERY] Fresh playlist cooldown active, " + 
+                                   std::to_wstring(remaining_cooldown.count()) + L" seconds remaining for " + channel_name);
+                        continue;
+                    }
+                    
+                    AddDebugLog(L"[AD_RECOVERY] Proceeding with fresh playlist fetch (attempt " + 
+                               std::to_wstring(fresh_playlist_attempts + 1) + L"/" + 
+                               std::to_wstring(max_fresh_playlist_attempts) + L") for " + channel_name);
                     
                     // Implement user's suggestion: fetch fresh quality list and switch to clean playlist
                     if (!channel_name.empty() && !selected_quality.empty()) {
@@ -933,12 +961,20 @@ bool BufferAndPipeStreamToPlayer(
                                     AddDebugLog(L"[AD_RECOVERY] Successfully switched to fresh playlist URL to bypass ads for " + channel_name);
                                     AddDebugLog(L"[AD_RECOVERY] New playlist URL: " + fresh_playlist_url);
                                     
+                                    // Update fresh playlist tracking
+                                    fresh_playlist_attempts++;
+                                    last_fresh_playlist_time = current_time;
+                                    
                                     // Clear seen URLs to allow re-downloading from fresh playlist
                                     seen_urls.clear();
                                     seen_urls.insert(L"__AD_RESET_BUFFER__"); // Keep this marker to avoid re-processing
                                     
-                                    // Continue with the fresh playlist
-                                    continue;
+                                    // Reset error count since we're starting fresh
+                                    consecutive_errors = 0;
+                                    
+                                    // Break from segment processing to restart playlist fetching with new URL
+                                    AddDebugLog(L"[AD_RECOVERY] Breaking from segment loop to restart with fresh playlist for " + channel_name);
+                                    break;
                                 } else {
                                     AddDebugLog(L"[AD_RECOVERY] Warning: Could not find suitable quality in fresh playlist for " + channel_name);
                                 }
