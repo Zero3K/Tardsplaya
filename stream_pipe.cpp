@@ -760,6 +760,7 @@ bool BufferAndPipeStreamToPlayer(
     std::set<std::wstring> seen_urls;
     std::atomic<bool> download_running(true);
     std::atomic<bool> stream_ended_normally(false);
+    std::atomic<bool> urgent_download_needed(false); // Signal for immediate download when buffer reaches 0
     
     // Store pipe handle for cleanup
     HANDLE stdin_pipe = hStdinWrite;
@@ -797,6 +798,12 @@ bool BufferAndPipeStreamToPlayer(
                    L", startup_delay=" + std::to_wstring(startup_delay.count()) + L"ms");
         
         while (true) {
+            // Check for urgent download request first
+            bool urgent_needed = urgent_download_needed.load();
+            if (urgent_needed) {
+                AddDebugLog(L"[DOWNLOAD] *** URGENT DOWNLOAD REQUESTED *** - buffer reached 0 for " + channel_name);
+            }
+            
             // Check all exit conditions individually for detailed logging
             bool download_running_check = download_running.load();
             bool cancel_token_check = cancel_token.load();
@@ -1003,14 +1010,15 @@ bool BufferAndPipeStreamToPlayer(
                 // Check if this is a regular segment we've already seen
                 if (seen_urls.count(seg)) continue;
                 
-                // Check buffer size before downloading more
+                // Check buffer size before downloading more (unless urgent download is needed)
                 size_t current_buffer_size;
                 {
                     std::lock_guard<std::mutex> lock(buffer_mutex);
                     current_buffer_size = buffer_queue.size();
                 }
                 
-                if (current_buffer_size >= max_buffer_segments) {
+                bool urgent_bypass = urgent_download_needed.load();
+                if (current_buffer_size >= max_buffer_segments && !urgent_bypass) {
                     auto current_time = std::chrono::steady_clock::now();
                     
                     // Start timing if this is the first time buffer is full
@@ -1053,6 +1061,12 @@ bool BufferAndPipeStreamToPlayer(
                         buffer_full_timer_active = false;
                         AddDebugLog(L"[BUFFER] Buffer no longer full, resetting timeout timer for " + channel_name);
                     }
+                    
+                    // Log if urgent download is bypassing normal buffer checks
+                    if (urgent_bypass) {
+                        AddDebugLog(L"[DOWNLOAD] Urgent download bypassing buffer fullness check (buffer=" + 
+                                   std::to_wstring(current_buffer_size) + L"/" + std::to_wstring(max_buffer_segments) + L") for " + channel_name);
+                    }
                 }
                 
                 seen_urls.insert(seg);
@@ -1087,9 +1101,16 @@ bool BufferAndPipeStreamToPlayer(
             AddDebugLog(L"[DOWNLOAD] Segment batch complete - downloaded " + std::to_wstring(new_segments_downloaded) + 
                        L" new segments for " + channel_name);
             
-            // Poll playlist more frequently for live streams
-            AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            // Poll playlist more frequently for live streams or when urgent download is needed
+            bool urgent_needed = urgent_download_needed.load();
+            if (urgent_needed) {
+                urgent_download_needed.store(false); // Reset the flag
+                AddDebugLog(L"[DOWNLOAD] Urgent download completed, immediately fetching next playlist for " + channel_name);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Very short delay for urgent downloads
+            } else {
+                AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            }
         }
         
         // Log exactly why the download loop ended
@@ -1179,6 +1200,9 @@ bool BufferAndPipeStreamToPlayer(
                     // Warning if buffer reaches 0
                     if (buffer_size == 0) {
                         AddDebugLog(L"[FEEDER] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
+                        // Signal download thread to urgently fetch more segments
+                        urgent_download_needed.store(true);
+                        AddDebugLog(L"[FEEDER] Triggered urgent download to refill empty buffer for " + channel_name);
                     }
                 }
                 
