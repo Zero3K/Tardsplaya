@@ -1006,17 +1006,30 @@ bool BufferAndPipeStreamToPlayer(
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
                 
+                // Count real content segments (non-empty) for better buffer management
+                int real_content_segments = 0;
+                std::queue<std::vector<char>> temp_queue = buffer_queue;
+                while (!temp_queue.empty()) {
+                    if (!temp_queue.front().empty()) {
+                        real_content_segments++;
+                    }
+                    temp_queue.pop();
+                }
+                
                 // Feed multiple segments when buffer is low to prevent freezing
                 int max_segments_to_feed = 1;
                 if (buffer_size < min_buffer_size) {
                     max_segments_to_feed = std::min((int)buffer_queue.size(), 3); // Feed up to 3 segments when low
                     AddDebugLog(L"[FEEDER] Buffer low (" + std::to_wstring(buffer_size) + 
                                L" < " + std::to_wstring(min_buffer_size) + 
-                               L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
+                               L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name +
+                               L" (real content: " + std::to_wstring(real_content_segments) + L")");
                     
-                    // Special warning if buffer reaches 0 - this should be prevented by ad placeholders
+                    // Special warning if buffer reaches 0 and no real content available
                     if (buffer_size == 0) {
                         AddDebugLog(L"[FEEDER] *** WARNING: Buffer reached 0 - ad placeholder system may need adjustment for " + channel_name + L" ***");
+                    } else if (real_content_segments == 0) {
+                        AddDebugLog(L"[FEEDER] *** INFO: Buffer contains only ad placeholders (" + std::to_wstring(buffer_size) + L" total) for " + channel_name + L" ***");
                     }
                 }
                 
@@ -1034,12 +1047,13 @@ bool BufferAndPipeStreamToPlayer(
                 int segments_processed = 0;
                 
                 for (const auto& segment_data : segments_to_feed) {
-                    // Handle ad placeholder segments - skip writing but maintain timing
+                    // Handle ad placeholder segments - skip writing but maintain realistic timing
                     if (segment_data.empty()) {
                         AddDebugLog(L"[IPC] Processing ad placeholder (empty segment) for " + channel_name);
                         segments_processed++;
-                        // Add a short delay to maintain approximate timing where ad would have been
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        // Use realistic segment duration (2-6 seconds typical for HLS segments)
+                        // This prevents rapid buffer depletion when processing multiple ad placeholders
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
                         continue;
                     }
                     
