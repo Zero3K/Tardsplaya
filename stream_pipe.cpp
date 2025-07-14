@@ -1102,7 +1102,7 @@ bool BufferAndPipeStreamToPlayer(
                        L" new segments for " + channel_name);
             
             // Poll playlist more frequently for live streams or when urgent download is needed
-            bool urgent_needed = urgent_download_needed.load();
+            urgent_needed = urgent_download_needed.load();
             if (urgent_needed) {
                 urgent_download_needed.store(false); // Reset the flag
                 AddDebugLog(L"[DOWNLOAD] Urgent download completed, immediately fetching next playlist for " + channel_name);
