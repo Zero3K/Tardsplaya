@@ -871,11 +871,9 @@ bool BufferAndPipeStreamToPlayer(
                     break;
                 }
                 
-                if (seen_urls.count(seg)) continue;
-                
                 // Handle ad segment detection - fetch fresh playlist to bypass ads
                 if (seg == L"__FETCH_FRESH_PLAYLIST__") {
-                    seen_urls.insert(seg);
+                    // Don't add to seen_urls yet - process this marker every time
                     AddDebugLog(L"[AD_RECOVERY] Fresh playlist fetch requested - bypassing ads for " + channel_name);
                     
                     // Check fresh playlist fetch limits and cooldown
@@ -967,7 +965,7 @@ bool BufferAndPipeStreamToPlayer(
                                     
                                     // Clear seen URLs to allow re-downloading from fresh playlist
                                     seen_urls.clear();
-                                    seen_urls.insert(L"__FETCH_FRESH_PLAYLIST__"); // Keep this marker to avoid re-processing
+                                    // Don't re-insert __FETCH_FRESH_PLAYLIST__ marker to allow future processing
                                     
                                     // Reset error count since we're starting fresh
                                     consecutive_errors = 0;
@@ -992,6 +990,9 @@ bool BufferAndPipeStreamToPlayer(
                     AddDebugLog(L"[AD_RECOVERY] Continuing with existing playlist for " + channel_name);
                     continue;
                 }
+                
+                // Check if this is a regular segment we've already seen
+                if (seen_urls.count(seg)) continue;
                 
                 // Check buffer size before downloading more
                 size_t current_buffer_size;
