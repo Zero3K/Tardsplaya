@@ -926,7 +926,24 @@ bool BufferAndPipeStreamToPlayer(
                         auto remaining_cooldown = std::chrono::duration_cast<std::chrono::seconds>(fresh_playlist_cooldown - time_since_last_fetch);
                         AddDebugLog(L"[AD_RECOVERY] Fresh playlist cooldown active, " + 
                                    std::to_wstring(remaining_cooldown.count()) + L" seconds remaining for " + channel_name);
-                        continue;
+                        
+                        // Don't continue immediately - check buffer status first to prevent video freezing
+                        size_t current_buffer_size;
+                        {
+                            std::lock_guard<std::mutex> lock(buffer_mutex);
+                            current_buffer_size = buffer_queue.size();
+                        }
+                        
+                        // If buffer is getting low, force fresh playlist fetch to prevent video freeze
+                        if (current_buffer_size <= 2) {
+                            AddDebugLog(L"[AD_RECOVERY] Buffer critically low (" + std::to_wstring(current_buffer_size) + 
+                                       L" segments), forcing fresh playlist fetch despite cooldown to prevent video freeze for " + channel_name);
+                            // Continue with fresh playlist fetch logic below
+                        } else {
+                            AddDebugLog(L"[AD_RECOVERY] Buffer sufficient (" + std::to_wstring(current_buffer_size) + 
+                                       L" segments), skipping fresh playlist fetch for " + channel_name);
+                            continue;
+                        }
                     }
                     
                     AddDebugLog(L"[AD_RECOVERY] Proceeding with fresh playlist fetch (attempt " + 
@@ -1212,6 +1229,10 @@ bool BufferAndPipeStreamToPlayer(
                 urgent_download_needed.store(false); // Reset the flag
                 AddDebugLog(L"[DOWNLOAD] Urgent download completed, immediately fetching next playlist for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Very short delay for urgent downloads
+            } else if (new_segments_downloaded == 0) {
+                // If no new segments were downloaded (likely due to ad filtering), poll more frequently
+                AddDebugLog(L"[DOWNLOAD] No new segments downloaded (likely ads), sleeping 500ms before next playlist fetch for " + channel_name);
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             } else {
                 AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(1500));
