@@ -82,6 +82,12 @@ static std::vector<uint8_t> GenerateBlackFrame() {
     
     return black_frame;
 }
+
+// Generate a simple text message for ad replacement (fallback option)
+// Creates a simple text message that can be logged for user notification
+static std::string GenerateAdSkipMessage() {
+    return "[AD SKIPPED] Commercial break in progress - displaying placeholder content";
+}
 static std::mutex g_stream_mutex;
 
 // Robust HTTP server for localhost streaming with persistent buffering
@@ -924,6 +930,10 @@ bool BufferAndPipeStreamToPlayer(
                     
                     // Generate black frame data
                     std::vector<uint8_t> black_frame_data = GenerateBlackFrame();
+                    
+                    // Also generate and log a user-friendly message
+                    std::string ad_message = GenerateAdSkipMessage();
+                    AddDebugLog(L"[AD_REPLACE] " + std::wstring(ad_message.begin(), ad_message.end()));
                     
                     // Add black frame to buffer
                     {
