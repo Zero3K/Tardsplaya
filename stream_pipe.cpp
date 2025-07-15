@@ -6,6 +6,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <tlhelp32.h>
+#include <psapi.h>
 #include <string>
 #include <vector>
 #include <set>
@@ -48,6 +49,115 @@ std::wstring ExtractPath(const std::wstring& url) {
 
 // Global stream tracking for multi-stream debugging
 static std::atomic<int> g_active_streams(0);
+
+// Enhanced process health monitoring inspired by MPC-HC
+struct ProcessHealthMetrics {
+    DWORD cpu_usage_percent = 0;
+    SIZE_T memory_usage_kb = 0;
+    DWORD handle_count = 0;
+    std::chrono::steady_clock::time_point last_update;
+    bool is_healthy = true;
+    
+    ProcessHealthMetrics() : last_update(std::chrono::steady_clock::now()) {}
+};
+
+// Pipe performance monitoring
+struct PipeLatencyMetrics {
+    std::chrono::steady_clock::time_point last_write_start;
+    std::chrono::steady_clock::time_point last_write_end;
+    std::chrono::milliseconds average_write_latency{0};
+    std::chrono::milliseconds max_write_latency{0};
+    size_t successful_writes = 0;
+    size_t failed_writes = 0;
+    bool write_latency_high = false;
+    
+    void RecordWriteLatency(std::chrono::milliseconds latency) {
+        successful_writes++;
+        if (latency > max_write_latency) {
+            max_write_latency = latency;
+        }
+        
+        // Calculate rolling average (last 10 writes)
+        if (successful_writes == 1) {
+            average_write_latency = latency;
+        } else {
+            auto weight = std::min(successful_writes, 10ULL);
+            average_write_latency = std::chrono::milliseconds(
+                (average_write_latency.count() * (weight - 1) + latency.count()) / weight
+            );
+        }
+        
+        // Flag high latency if consistently above 100ms
+        write_latency_high = (average_write_latency > std::chrono::milliseconds(100));
+    }
+};
+
+// Buffer prediction heuristics
+struct BufferPredictionMetrics {
+    double segment_feed_rate = 0.0; // segments per second
+    std::chrono::steady_clock::time_point last_feed_time;
+    size_t segments_fed_in_window = 0;
+    std::chrono::steady_clock::time_point window_start;
+    bool starvation_predicted = false;
+    
+    BufferPredictionMetrics() : 
+        last_feed_time(std::chrono::steady_clock::now()),
+        window_start(std::chrono::steady_clock::now()) {}
+        
+    void RecordSegmentFed() {
+        auto now = std::chrono::steady_clock::now();
+        segments_fed_in_window++;
+        
+        // Update feed rate every 10 seconds
+        auto window_duration = std::chrono::duration_cast<std::chrono::seconds>(now - window_start);
+        if (window_duration.count() >= 10) {
+            segment_feed_rate = segments_fed_in_window / static_cast<double>(window_duration.count());
+            segments_fed_in_window = 0;
+            window_start = now;
+        }
+        
+        last_feed_time = now;
+    }
+    
+    bool PredictStarvation(size_t current_buffer, double consumption_rate = 1.0) {
+        auto now = std::chrono::steady_clock::now();
+        auto seconds_since_feed = std::chrono::duration_cast<std::chrono::seconds>(now - last_feed_time);
+        
+        // Predict starvation if feed rate is lower than consumption and buffer is low
+        if (segment_feed_rate > 0.0 && current_buffer <= 3) {
+            double net_rate = segment_feed_rate - consumption_rate;
+            if (net_rate <= 0.0 || seconds_since_feed.count() > 30) {
+                starvation_predicted = true;
+                return true;
+            }
+        }
+        
+        starvation_predicted = false;
+        return false;
+    }
+};
+
+// Comprehensive health status
+struct MediaPlayerHealthStatus {
+    ProcessHealthMetrics process_health;
+    PipeLatencyMetrics pipe_latency;
+    BufferPredictionMetrics buffer_prediction;
+    bool overall_healthy = true;
+    std::chrono::steady_clock::time_point last_assessment;
+    
+    MediaPlayerHealthStatus() : last_assessment(std::chrono::steady_clock::now()) {}
+    
+    bool AssessOverallHealth() {
+        auto now = std::chrono::steady_clock::now();
+        last_assessment = now;
+        
+        overall_healthy = process_health.is_healthy && 
+                         !pipe_latency.write_latency_high && 
+                         !buffer_prediction.starvation_predicted;
+        
+        return overall_healthy;
+    }
+};
 static std::mutex g_stream_mutex;
 
 // Robust HTTP server for localhost streaming with persistent buffering
@@ -386,6 +496,85 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     size_t pos = base.rfind(L'/');
     if (pos == std::wstring::npos) return rel;
     return base.substr(0, pos + 1) + rel;
+}
+
+// Enhanced process monitoring functions inspired by MPC-HC
+bool UpdateProcessHealthMetrics(HANDLE process_handle, DWORD process_id, ProcessHealthMetrics& metrics) {
+    auto now = std::chrono::steady_clock::now();
+    
+    // Don't update too frequently (every 2 seconds)
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - metrics.last_update).count() < 2) {
+        return metrics.is_healthy;
+    }
+    
+    metrics.last_update = now;
+    
+    // Get memory usage
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(process_handle, &pmc, sizeof(pmc))) {
+        metrics.memory_usage_kb = pmc.WorkingSetSize / 1024;
+    }
+    
+    // Get handle count
+    GetProcessHandleCount(process_handle, &metrics.handle_count);
+    
+    // CPU usage requires more complex tracking, simplified check for responsiveness
+    DWORD exit_code;
+    bool responsive = GetExitCodeProcess(process_handle, &exit_code) && exit_code == STILL_ACTIVE;
+    
+    // Health assessment
+    metrics.is_healthy = responsive && 
+                        (metrics.memory_usage_kb < 1024 * 1024) && // Less than 1GB
+                        (metrics.handle_count < 10000); // Reasonable handle count
+    
+    return metrics.is_healthy;
+}
+
+bool MonitorPipeWriteLatency(HANDLE pipe_handle, const char* data, size_t data_size, 
+                           PipeLatencyMetrics& metrics, const std::wstring& context) {
+    auto write_start = std::chrono::steady_clock::now();
+    
+    DWORD bytes_written = 0;
+    BOOL write_success = WriteFile(pipe_handle, data, static_cast<DWORD>(data_size), &bytes_written, nullptr);
+    
+    auto write_end = std::chrono::steady_clock::now();
+    auto write_duration = std::chrono::duration_cast<std::chrono::milliseconds>(write_end - write_start);
+    
+    if (write_success && bytes_written == data_size) {
+        metrics.RecordWriteLatency(write_duration);
+        
+        if (write_duration > std::chrono::milliseconds(250)) {
+            AddDebugLog(L"[PIPE_MONITOR] High write latency detected: " + 
+                       std::to_wstring(write_duration.count()) + L"ms for " + context);
+        }
+        
+        return true;
+    } else {
+        metrics.failed_writes++;
+        AddDebugLog(L"[PIPE_MONITOR] Write failed for " + context + 
+                   L", bytes_written=" + std::to_wstring(bytes_written) + 
+                   L", data_size=" + std::to_wstring(data_size) + 
+                   L", error=" + std::to_wstring(GetLastError()));
+        return false;
+    }
+}
+
+bool PredictAndPreventStarvation(MediaPlayerHealthStatus& health_status, size_t current_buffer, 
+                               const std::wstring& context) {
+    bool starvation_risk = health_status.buffer_prediction.PredictStarvation(current_buffer);
+    
+    if (starvation_risk || !health_status.process_health.is_healthy || health_status.pipe_latency.write_latency_high) {
+        AddDebugLog(L"[HEALTH_MONITOR] Risk factors detected for " + context + 
+                   L": starvation_predicted=" + (starvation_risk ? L"true" : L"false") +
+                   L", process_healthy=" + (health_status.process_health.is_healthy ? L"true" : L"false") +
+                   L", pipe_latency_high=" + (health_status.pipe_latency.write_latency_high ? L"true" : L"false") +
+                   L", buffer_size=" + std::to_wstring(current_buffer) +
+                   L", avg_write_latency=" + std::to_wstring(health_status.pipe_latency.average_write_latency.count()) + L"ms" +
+                   L", memory_usage=" + std::to_wstring(health_status.process_health.memory_usage_kb) + L"KB");
+        return true;
+    }
+    
+    return false;
 }
 
 // Parse media segment URLs from m3u8 playlist, filtering out ad segments
@@ -809,7 +998,7 @@ bool BufferAndPipeStreamToPlayer(
     AddDebugLog(L"[THREAD] Creating download and feeder threads for " + channel_name);
 
     // Background playlist monitor and segment downloader thread
-    std::thread download_thread([&]() {
+    std::thread download_thread([&, health_status_ptr = std::make_shared<MediaPlayerHealthStatus>(health_status)]() mutable {
         auto thread_actual_start = std::chrono::high_resolution_clock::now();
         auto startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(thread_actual_start - thread_start_time);
         
@@ -910,14 +1099,18 @@ bool BufferAndPipeStreamToPlayer(
                     AddDebugLog(L"[AD_RECOVERY] Fresh playlist cooldown active, " + 
                                std::to_wstring(remaining_cooldown.count()) + L" seconds remaining for " + channel_name);
                     
-                    // If buffer is getting low, force fresh playlist fetch to prevent video freeze
-                    if (current_buffer_size <= 2) {
-                        AddDebugLog(L"[AD_RECOVERY] Buffer critically low (" + std::to_wstring(current_buffer_size) + 
-                                   L" segments), forcing fresh playlist fetch despite cooldown to prevent video freeze for " + channel_name);
+                    // Enhanced buffer assessment including health monitoring
+                    bool health_risk = health_status_ptr && PredictAndPreventStarvation(*health_status_ptr, current_buffer_size, channel_name);
+                    
+                    // If buffer is getting low OR health monitoring detects risk, force fresh playlist fetch
+                    if (current_buffer_size <= 2 || health_risk) {
+                        AddDebugLog(L"[AD_RECOVERY] Risk detected - Buffer: " + std::to_wstring(current_buffer_size) + 
+                                   L" segments, Health Risk: " + (health_risk ? L"YES" : L"NO") +
+                                   L", forcing fresh playlist fetch despite cooldown to prevent video freeze for " + channel_name);
                         should_fetch = true;
                     } else {
                         AddDebugLog(L"[AD_RECOVERY] Buffer sufficient (" + std::to_wstring(current_buffer_size) + 
-                                   L" segments), skipping immediate fresh playlist fetch for " + channel_name);
+                                   L" segments) and health OK, skipping immediate fresh playlist fetch for " + channel_name);
                     }
                 } else {
                     should_fetch = true;
@@ -1129,9 +1322,19 @@ bool BufferAndPipeStreamToPlayer(
                 AddDebugLog(L"[DOWNLOAD] Urgent download completed, immediately fetching next playlist for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Very short delay for urgent downloads
             } else if (new_segments_downloaded == 0) {
-                // If no new segments were downloaded (likely due to ad filtering), poll more frequently
-                AddDebugLog(L"[DOWNLOAD] No new segments downloaded (likely ads), sleeping 500ms before next playlist fetch for " + channel_name);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                // Enhanced polling frequency based on health monitoring
+                bool health_risk = health_status_ptr && !health_status_ptr->AssessOverallHealth();
+                std::chrono::milliseconds sleep_duration;
+                
+                if (health_risk) {
+                    sleep_duration = std::chrono::milliseconds(250); // Even more aggressive polling when health at risk
+                    AddDebugLog(L"[DOWNLOAD] No segments + health risk detected, aggressive polling (250ms) for " + channel_name);
+                } else {
+                    sleep_duration = std::chrono::milliseconds(500); // Standard faster polling during ad periods
+                    AddDebugLog(L"[DOWNLOAD] No new segments downloaded (likely ads), sleeping 500ms before next playlist fetch for " + channel_name);
+                }
+                
+                std::this_thread::sleep_for(sleep_duration);
             } else {
                 AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(1500));
@@ -1155,8 +1358,12 @@ bool BufferAndPipeStreamToPlayer(
                    L", PID=" + std::to_wstring(pi.dwProcessId));
     });
 
+    // Initialize enhanced health monitoring system inspired by MPC-HC
+    MediaPlayerHealthStatus health_status;
+    AddDebugLog(L"[HEALTH_MONITOR] Initializing enhanced monitoring system for " + channel_name);
+
     // Main buffer feeding thread - writes directly to player stdin pipe with anti-freezing mechanisms
-    std::thread feeder_thread([&]() {
+    std::thread feeder_thread([&, health_status = std::make_shared<MediaPlayerHealthStatus>(health_status)]() mutable {
         auto feeder_start_time = std::chrono::high_resolution_clock::now();
         auto feeder_startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(feeder_start_time - thread_start_time);
         
@@ -1173,6 +1380,9 @@ bool BufferAndPipeStreamToPlayer(
             bool cancel_token_check = cancel_token.load();
             bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId);
             bool data_available_check = (download_running.load() || !buffer_queue.empty());
+            
+            // Update process health metrics regularly
+            UpdateProcessHealthMetrics(pi.hProcess, pi.dwProcessId, health_status->process_health);
             
             if (cancel_token_check) {
                 AddDebugLog(L"[FEEDER] Exit condition: cancel_token=true for " + channel_name);
@@ -1191,6 +1401,12 @@ bool BufferAndPipeStreamToPlayer(
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
                 buffer_size = buffer_queue.size();
+            }
+            
+            // Check for starvation risk and overall health
+            bool starvation_risk = PredictAndPreventStarvation(*health_status, buffer_size, channel_name);
+            if (starvation_risk && started) {
+                AddDebugLog(L"[HEALTH_MONITOR] Starvation risk detected, triggering preventive measures for " + channel_name);
             }
             
             // Wait for initial buffer before starting - increased for stability
@@ -1265,13 +1481,19 @@ bool BufferAndPipeStreamToPlayer(
                     const int max_write_attempts = 3;
                     
                     while (!segment_written && write_attempts < max_write_attempts && !cancel_token.load()) {
-                        DWORD bytes_written = 0;
-                        // Use WriteFile with timeout to prevent slow writes from blocking indefinitely
-                        BOOL write_result = WriteFileWithTimeout(stdin_pipe, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, 3000); // 3 second timeout
+                        // Use enhanced pipe monitoring instead of basic WriteFileWithTimeout
+                        bool write_success = MonitorPipeWriteLatency(stdin_pipe, 
+                                                                    reinterpret_cast<const char*>(segment_data.data()), 
+                                                                    segment_data.size(), 
+                                                                    health_status->pipe_latency, 
+                                                                    channel_name);
                         
-                        if (write_result && bytes_written == segment_data.size()) {
+                        if (write_success) {
                             segment_written = true;
                             segments_processed++;
+                            
+                            // Record successful segment feed for buffer prediction
+                            health_status->buffer_prediction.RecordSegmentFed();
                         } else {
                             write_attempts++;
                             DWORD error = GetLastError();
@@ -1325,8 +1547,14 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 
                 empty_buffer_count = 0; // Reset counter when data is fed
+                
+                // Enhanced logging with health metrics
+                health_status->AssessOverallHealth();
                 AddDebugLog(L"[IPC] Fed " + std::to_wstring(segments_processed) + 
-                           L" segments to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer));
+                           L" segments to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer) +
+                           L", health=" + (health_status->overall_healthy ? L"OK" : L"RISK") +
+                           L", pipe_latency=" + std::to_wstring(health_status->pipe_latency.average_write_latency.count()) + L"ms" +
+                           L", feed_rate=" + std::to_wstring(health_status->buffer_prediction.segment_feed_rate) + L"seg/s");
                 
                 // Shorter wait when actively feeding to maintain flow
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
