@@ -880,7 +880,9 @@ bool BufferAndPipeStreamToPlayer(
                 break;
             }
 
-            auto [segments, ads_detected] = ParseSegmentsWithAdDetection(playlist);
+            std::pair<std::vector<std::wstring>, bool> segment_result = ParseSegmentsWithAdDetection(playlist);
+            std::vector<std::wstring> segments = segment_result.first;
+            bool ads_detected = segment_result.second;
             
             // If ads were detected, attempt immediate fresh playlist fetch to prevent buffer starvation
             if (ads_detected) {
@@ -986,7 +988,7 @@ bool BufferAndPipeStreamToPlayer(
             
             // Count buffer reset markers for monitoring ad filtering effectiveness
             int ad_reset_count = 0;
-            for (const auto& seg : segments) {
+            for (const std::wstring& seg : segments) {
                 if (seg == L"__AD_RESET_BUFFER__") {
                     ad_reset_count++;
                 }
@@ -998,7 +1000,7 @@ bool BufferAndPipeStreamToPlayer(
             
             // Download new segments
             int new_segments_downloaded = 0;
-            for (auto& seg : segments) {
+            for (const std::wstring& seg : segments) {
                 if (!download_running || cancel_token.load()) {
                     AddDebugLog(L"[DOWNLOAD] Breaking segment loop - download_running=" + 
                                std::to_wstring(download_running.load()) + L", cancel=" + 
