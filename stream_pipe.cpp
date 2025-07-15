@@ -976,7 +976,29 @@ bool BufferAndPipeStreamToPlayer(
                 
                 // Handle ad segment replacement with black frame
                 if (seg == L"__BLACK_FRAME__") {
-                    AddDebugLog(L"[AD_REPLACE] Inserting black frame for ad segment for " + channel_name);
+                    AddDebugLog(L"[AD_REPLACE] Processing black frame for ad segment for " + channel_name);
+                    
+                    // Check current buffer size to prevent overflow from rapid black frame generation
+                    size_t current_buffer_size;
+                    {
+                        std::lock_guard<std::mutex> lock(buffer_mutex);
+                        current_buffer_size = buffer_queue.size();
+                    }
+                    
+                    // Limit black frames in buffer to prevent chunk queue buildup
+                    const size_t max_black_frames_in_buffer = 3;
+                    if (current_buffer_size >= max_black_frames_in_buffer) {
+                        AddDebugLog(L"[AD_REPLACE] Buffer has " + std::to_wstring(current_buffer_size) + 
+                                   L" segments, delaying black frame generation to prevent overflow for " + channel_name);
+                        
+                        // Add artificial delay to match normal segment timing (2-4 seconds)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+                        
+                        // Check if we should still process after delay
+                        if (cancel_token.load()) {
+                            break;
+                        }
+                    }
                     
                     // Generate black frame data
                     std::vector<uint8_t> black_frame_data = GenerateBlackFrame();
