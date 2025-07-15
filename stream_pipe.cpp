@@ -1231,6 +1231,14 @@ bool BufferAndPipeStreamToPlayer(
                     }
                 }
                 
+                // Safety: Never drain buffer below 1 segment unless it's already empty
+                // This prevents complete starvation during ad periods
+                if (buffer_size > 1 && max_segments_to_feed >= buffer_size) {
+                    max_segments_to_feed = (int)buffer_size - 1;
+                    AddDebugLog(L"[FEEDER] Safety limit: preserving 1 segment in buffer (" + std::to_wstring(buffer_size) + 
+                               L" -> " + std::to_wstring(max_segments_to_feed) + L") for " + channel_name);
+                }
+                
                 int segments_fed = 0;
                 while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
                     segments_to_feed.push_back(std::move(buffer_queue.front()));
@@ -1305,7 +1313,13 @@ bool BufferAndPipeStreamToPlayer(
                     break;
                 }
                 
-                size_t remaining_buffer = buffer_size - segments_to_feed.size();
+                // Get current buffer size after segments were removed from queue
+                size_t remaining_buffer;
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex);
+                    remaining_buffer = buffer_queue.size();
+                }
+                
                 if (chunk_count) {
                     chunk_count->store((int)remaining_buffer);
                 }
