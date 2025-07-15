@@ -434,14 +434,17 @@ struct AdBlockState {
     bool skip_next_segment = false; 
     int consecutive_black_frames = 0;
     std::chrono::steady_clock::time_point scte35_start_time;
+    bool just_started_ad_block = false; // Flag to indicate we just started an ad block
     static const int MAX_CONSECUTIVE_BLACK_FRAMES = 15; // ~30 seconds for 2-second segments
     static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
 };
 
 // Parse media segment URLs from m3u8 playlist, replacing ad segments with placeholder
-static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
+// Returns pair of (segments, should_clear_buffer)
+static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist) {
     static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segs;
+    bool should_clear_buffer = false;
     std::istringstream ss(playlist);
     std::string line;
     
@@ -451,11 +454,17 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         if (line[0] == '#') {
             // SCTE-35 ad marker detection (start of ad block)
             if (line.find("#EXT-X-SCTE35-OUT") == 0) {
+                if (!ad_state.in_scte35_out) {
+                    // Just entering ad block - signal to clear buffer
+                    should_clear_buffer = true;
+                    AddDebugLog(L"[AD_REPLACE] Found SCTE35-OUT marker, entering ad block - will clear buffer");
+                } else {
+                    AddDebugLog(L"[AD_REPLACE] Found SCTE35-OUT marker, already in ad block");
+                }
                 ad_state.in_scte35_out = true;
                 ad_state.skip_next_segment = true;
                 ad_state.consecutive_black_frames = 0;
                 ad_state.scte35_start_time = std::chrono::steady_clock::now();
-                AddDebugLog(L"[AD_REPLACE] Found SCTE35-OUT marker, entering ad block");
                 continue;
             }
             // SCTE-35 ad marker detection (end of ad block)
@@ -549,7 +558,7 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         std::wstring wline(line.begin(), line.end());
         segs.push_back(wline);
     }
-    return segs;
+    return std::make_pair(segs, should_clear_buffer);
 }
 
 // Returns true if process handle is still alive
@@ -952,7 +961,22 @@ bool BufferAndPipeStreamToPlayer(
                 break;
             }
 
-            auto segments = ParseSegments(playlist);
+            auto parse_result = ParseSegments(playlist);
+            auto segments = parse_result.first;
+            bool should_clear_buffer = parse_result.second;
+            
+            // Clear buffer if we just started an ad block to prevent showing old content
+            if (should_clear_buffer) {
+                size_t cleared_segments;
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex);
+                    cleared_segments = buffer_queue.size();
+                    std::queue<std::vector<char>> empty_queue;
+                    buffer_queue.swap(empty_queue); // Clear the queue efficiently
+                }
+                AddDebugLog(L"[AD_REPLACE] Cleared " + std::to_wstring(cleared_segments) + 
+                           L" buffered segments at start of ad block for " + channel_name);
+            }
             
             AddDebugLog(L"[DOWNLOAD] Parsed " + std::to_wstring(segments.size()) + 
                        L" segments from playlist for " + channel_name);
