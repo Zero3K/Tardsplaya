@@ -585,6 +585,7 @@ bool PredictAndPreventStarvation(MediaPlayerHealthStatus& health_status, size_t 
 bool AttemptAdRecoveryFetch(const std::wstring& channel_name, const std::wstring& selected_quality,
                            std::wstring& media_playlist_url, int& fresh_playlist_attempts,
                            std::chrono::steady_clock::time_point& last_fresh_playlist_time,
+                           std::chrono::steady_clock::time_point& first_attempt_time,
                            const int max_fresh_playlist_attempts, 
                            const std::chrono::seconds& fresh_playlist_cooldown,
                            const std::mutex& buffer_mutex, const std::queue<std::vector<char>>& buffer_queue,
@@ -599,45 +600,60 @@ bool AttemptAdRecoveryFetch(const std::wstring& channel_name, const std::wstring
     bool cooldown_passed = time_since_last_fetch >= fresh_playlist_cooldown;
     bool attempts_remaining = fresh_playlist_attempts < max_fresh_playlist_attempts;
     
-    // Check buffer status to determine if we should bypass cooldown
+    // Check buffer status to determine if we should bypass limits
     size_t current_buffer_size;
     {
         std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(buffer_mutex));
         current_buffer_size = buffer_queue.size();
     }
     
+    // Enhanced buffer assessment including health monitoring
+    bool health_risk = health_status_shared && PredictAndPreventStarvation(*health_status_shared, current_buffer_size, channel_name);
+    bool buffer_critical = current_buffer_size <= 2;
+    bool emergency_override = buffer_critical || health_risk;
+    
     bool should_fetch = false;
-    if (!attempts_remaining) {
-        AddDebugLog(L"[AD_RECOVERY] Maximum fresh playlist attempts reached (" + 
-                   std::to_wstring(fresh_playlist_attempts) + L"), skipping for " + channel_name);
-    } else if (!cooldown_passed) {
+    std::wstring skip_reason;
+    
+    // Priority 1: Emergency override - buffer health supersedes all limits
+    if (emergency_override) {
+        AddDebugLog(L"[AD_RECOVERY] EMERGENCY OVERRIDE - Buffer: " + std::to_wstring(current_buffer_size) + 
+                   L" segments, Health Risk: " + (health_risk ? L"YES" : L"NO") +
+                   L", forcing fresh playlist fetch to prevent video freeze for " + channel_name);
+        should_fetch = true;
+    }
+    // Priority 2: Normal operation with attempt limits
+    else if (!attempts_remaining) {
+        skip_reason = L"Maximum fresh playlist attempts reached (" + std::to_wstring(fresh_playlist_attempts) + L")";
+        AddDebugLog(L"[AD_RECOVERY] " + skip_reason + L", and buffer sufficient (" + 
+                   std::to_wstring(current_buffer_size) + L" segments), skipping for " + channel_name);
+    }
+    // Priority 3: Cooldown restrictions (but only if no emergency)
+    else if (!cooldown_passed) {
         auto remaining_cooldown = std::chrono::duration_cast<std::chrono::seconds>(fresh_playlist_cooldown - time_since_last_fetch);
-        AddDebugLog(L"[AD_RECOVERY] Fresh playlist cooldown active, " + 
-                   std::to_wstring(remaining_cooldown.count()) + L" seconds remaining for " + channel_name);
-        
-        // Enhanced buffer assessment including health monitoring
-        bool health_risk = health_status_shared && PredictAndPreventStarvation(*health_status_shared, current_buffer_size, channel_name);
-        
-        // If buffer is getting low OR health monitoring detects risk, force fresh playlist fetch
-        if (current_buffer_size <= 2 || health_risk) {
-            AddDebugLog(L"[AD_RECOVERY] Risk detected - Buffer: " + std::to_wstring(current_buffer_size) + 
-                       L" segments, Health Risk: " + (health_risk ? L"YES" : L"NO") +
-                       L", forcing fresh playlist fetch despite cooldown to prevent video freeze for " + channel_name);
-            should_fetch = true;
-        } else {
-            AddDebugLog(L"[AD_RECOVERY] Buffer sufficient (" + std::to_wstring(current_buffer_size) + 
-                       L" segments) and health OK, skipping immediate fresh playlist fetch for " + channel_name);
-        }
-    } else {
+        skip_reason = L"Fresh playlist cooldown active, " + std::to_wstring(remaining_cooldown.count()) + L" seconds remaining";
+        AddDebugLog(L"[AD_RECOVERY] " + skip_reason + L", and buffer sufficient (" + 
+                   std::to_wstring(current_buffer_size) + L" segments), skipping for " + channel_name);
+    }
+    // Priority 4: Normal fetch (attempts remaining and cooldown passed)
+    else {
         should_fetch = true;
     }
     
     if (should_fetch) {
-        AddDebugLog(L"[AD_RECOVERY] Proceeding with immediate fresh playlist fetch (attempt " + 
-                   std::to_wstring(fresh_playlist_attempts + 1) + L"/" + 
-                   std::to_wstring(max_fresh_playlist_attempts) + L") for " + channel_name);
-                   
-        fresh_playlist_attempts++;
+        if (emergency_override) {
+            AddDebugLog(L"[AD_RECOVERY] Proceeding with EMERGENCY fresh playlist fetch (emergency overrides do not count toward limit) for " + channel_name);
+            // Emergency overrides don't count against the attempt limit
+        } else {
+            // Track first attempt for reset purposes
+            if (fresh_playlist_attempts == 0) {
+                first_attempt_time = current_time;
+            }
+            AddDebugLog(L"[AD_RECOVERY] Proceeding with immediate fresh playlist fetch (attempt " + 
+                       std::to_wstring(fresh_playlist_attempts + 1) + L"/" + 
+                       std::to_wstring(max_fresh_playlist_attempts) + L") for " + channel_name);
+            fresh_playlist_attempts++;
+        }
         last_fresh_playlist_time = current_time;
         
         // Attempt fresh playlist fetch using existing functions
@@ -1125,7 +1141,9 @@ bool BufferAndPipeStreamToPlayer(
         int fresh_playlist_attempts = 0;
         const int max_fresh_playlist_attempts = 5; // Limit fresh playlist fetches to prevent infinite loops
         auto last_fresh_playlist_time = std::chrono::steady_clock::now();
+        auto first_attempt_time = std::chrono::steady_clock::now(); // Track when attempts started
         const std::chrono::seconds fresh_playlist_cooldown(30); // 30 second cooldown between attempts
+        const std::chrono::minutes attempt_reset_period(5); // Reset attempt counter after 5 minutes
         
         // Track consecutive "no new segments" to detect ads at download level
         int consecutive_no_segments = 0;
@@ -1135,6 +1153,17 @@ bool BufferAndPipeStreamToPlayer(
                    L", startup_delay=" + std::to_wstring(startup_delay.count()) + L"ms");
         
         while (true) {
+            // Reset fresh playlist attempt counter if enough time has passed
+            auto current_time = std::chrono::steady_clock::now();
+            if (fresh_playlist_attempts > 0 && 
+                (current_time - first_attempt_time) >= attempt_reset_period) {
+                AddDebugLog(L"[AD_RECOVERY] Resetting attempt counter after " + 
+                           std::to_wstring(std::chrono::duration_cast<std::chrono::minutes>(current_time - first_attempt_time).count()) + 
+                           L" minutes for " + channel_name);
+                fresh_playlist_attempts = 0;
+                first_attempt_time = current_time;
+            }
+            
             // Check for urgent download request first
             bool urgent_needed = urgent_download_needed.load();
             if (urgent_needed) {
@@ -1197,7 +1226,7 @@ bool BufferAndPipeStreamToPlayer(
             // If ads were detected, attempt immediate fresh playlist fetch to prevent buffer starvation
             if (ads_detected) {
                 bool fetch_successful = AttemptAdRecoveryFetch(channel_name, selected_quality, media_playlist_url, 
-                                                              fresh_playlist_attempts, last_fresh_playlist_time,
+                                                              fresh_playlist_attempts, last_fresh_playlist_time, first_attempt_time,
                                                               max_fresh_playlist_attempts, fresh_playlist_cooldown,
                                                               buffer_mutex, buffer_queue, health_status_shared,
                                                               L"Ads detected in playlist");
@@ -1363,7 +1392,7 @@ bool BufferAndPipeStreamToPlayer(
                     AddDebugLog(L"[DOWNLOAD] Multiple consecutive no-segment fetches detected, treating as ad period for " + channel_name);
                     
                     bool fetch_successful = AttemptAdRecoveryFetch(channel_name, selected_quality, media_playlist_url, 
-                                                                  fresh_playlist_attempts, last_fresh_playlist_time,
+                                                                  fresh_playlist_attempts, last_fresh_playlist_time, first_attempt_time,
                                                                   max_fresh_playlist_attempts, fresh_playlist_cooldown,
                                                                   buffer_mutex, buffer_queue, health_status_shared,
                                                                   L"Consecutive no-segments detected (" + std::to_wstring(consecutive_no_segments) + L")");
