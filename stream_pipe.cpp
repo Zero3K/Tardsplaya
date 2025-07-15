@@ -931,6 +931,9 @@ bool BufferAndPipeStreamToPlayer(
                     // Generate black frame data
                     std::vector<uint8_t> black_frame_data = GenerateBlackFrame();
                     
+                    // Convert to char vector for buffer_queue compatibility
+                    std::vector<char> black_frame_char_data(black_frame_data.begin(), black_frame_data.end());
+                    
                     // Also generate and log a user-friendly message
                     std::string ad_message = GenerateAdSkipMessage();
                     AddDebugLog(L"[AD_REPLACE] " + std::wstring(ad_message.begin(), ad_message.end()));
@@ -938,12 +941,8 @@ bool BufferAndPipeStreamToPlayer(
                     // Add black frame to buffer
                     {
                         std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer.push(black_frame_data);
-                        if (chunk_count) {
-                            chunk_count->store(buffer.size());
-                        }
+                        buffer_queue.push(std::move(black_frame_char_data));
                     }
-                    buffer_cv.notify_all();
                     
                     // Mark as seen to avoid reprocessing
                     seen_urls.insert(seg);
