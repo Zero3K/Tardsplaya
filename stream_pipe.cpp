@@ -857,7 +857,8 @@ bool BufferAndPipeStreamToPlayer(
             // Check all exit conditions individually for detailed logging
             bool download_running_check = download_running.load();
             bool cancel_token_check = cancel_token.load();
-            bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" download_thread", pi.dwProcessId);
+            // Commented out process death check to prevent premature termination when process is incorrectly marked as dead
+            // bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" download_thread", pi.dwProcessId);
             bool error_limit_check = consecutive_errors < max_consecutive_errors;
             
             if (!download_running_check) {
@@ -868,10 +869,11 @@ bool BufferAndPipeStreamToPlayer(
                 AddDebugLog(L"[DOWNLOAD] Exit condition: cancel_token=true for " + channel_name);
                 break;
             }
-            if (!process_running_check) {
-                AddDebugLog(L"[DOWNLOAD] Exit condition: process died for " + channel_name);
-                break;
-            }
+            // Commented out to prevent premature exit when process is incorrectly detected as dead
+            // if (!process_running_check) {
+            //     AddDebugLog(L"[DOWNLOAD] Exit condition: process died for " + channel_name);
+            //     break;
+            // }
             if (!error_limit_check) {
                 AddDebugLog(L"[DOWNLOAD] Exit condition: too many consecutive errors (" + 
                            std::to_wstring(consecutive_errors) + L") for " + channel_name);
@@ -918,11 +920,12 @@ bool BufferAndPipeStreamToPlayer(
                     break;
                 }
                 
-                bool process_still_running = ProcessStillRunning(pi.hProcess, channel_name + L" segment_download", pi.dwProcessId);
-                if (!process_still_running) {
-                    AddDebugLog(L"[DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
-                    break;
-                }
+                // Commented out process death check to prevent premature loop exit when process is incorrectly marked as dead
+                // bool process_still_running = ProcessStillRunning(pi.hProcess, channel_name + L" segment_download", pi.dwProcessId);
+                // if (!process_still_running) {
+                //     AddDebugLog(L"[DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
+                //     break;
+                // }
                 
                 // Handle ad segment replacement with black frame
                 if (seg == L"__BLACK_FRAME__") {
@@ -1063,6 +1066,7 @@ bool BufferAndPipeStreamToPlayer(
         AddDebugLog(L"[DOWNLOAD] Exit conditions: download_running=" + std::to_wstring(download_running.load()) +
                    L", cancel_token=" + std::to_wstring(cancel_token.load()) +
                    L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" final_check", pi.dwProcessId)) +
+                   L" (process check disabled in main loop)" +
                    L", consecutive_errors=" + std::to_wstring(consecutive_errors) + L"/" + std::to_wstring(max_consecutive_errors) +
                    L", stream_ended_normally=" + std::to_wstring(stream_ended_normally.load()));
         
@@ -1091,17 +1095,19 @@ bool BufferAndPipeStreamToPlayer(
         while (true) {
             // Check all exit conditions individually for detailed logging  
             bool cancel_token_check = cancel_token.load();
-            bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId);
+            // Commented out process death check to prevent premature termination when process is incorrectly marked as dead
+            // bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId);
             bool data_available_check = (download_running.load() || !buffer_queue.empty());
             
             if (cancel_token_check) {
                 AddDebugLog(L"[FEEDER] Exit condition: cancel_token=true for " + channel_name);
                 break;
             }
-            if (!process_running_check) {
-                AddDebugLog(L"[FEEDER] Exit condition: process died for " + channel_name);
-                break;
-            }
+            // Commented out to prevent premature exit when process is incorrectly detected as dead
+            // if (!process_running_check) {
+            //     AddDebugLog(L"[FEEDER] Exit condition: process died for " + channel_name);
+            //     break;
+            // }
             if (!data_available_check) {
                 AddDebugLog(L"[FEEDER] Exit condition: no more data available (download stopped and buffer empty) for " + channel_name);
                 break;
@@ -1251,6 +1257,7 @@ bool BufferAndPipeStreamToPlayer(
         AddDebugLog(L"[FEEDER] IPC feeder thread ending for " + channel_name +
                    L", cancel=" + std::to_wstring(cancel_token.load()) + 
                    L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" feeder_final", pi.dwProcessId)) +
+                   L" (process check disabled in main loop)" +
                    L", download_running=" + std::to_wstring(download_running.load()) +
                    L", buffer_queue_empty=" + std::to_wstring(buffer_queue.empty()) +
                    L", empty_buffer_count=" + std::to_wstring(empty_buffer_count));
