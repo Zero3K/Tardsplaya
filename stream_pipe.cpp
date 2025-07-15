@@ -1327,7 +1327,7 @@ bool BufferAndPipeStreamToPlayer(
                 std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Very short delay for urgent downloads
             } else if (new_segments_downloaded == 0) {
                 // Enhanced polling frequency based on health monitoring
-                bool health_risk = health_status_ptr && !health_status_ptr->AssessOverallHealth();
+                bool health_risk = health_status_shared && !health_status_shared->AssessOverallHealth();
                 std::chrono::milliseconds sleep_duration;
                 
                 if (health_risk) {
@@ -1407,7 +1407,7 @@ bool BufferAndPipeStreamToPlayer(
             }
             
             // Check for starvation risk and overall health
-            bool starvation_risk = PredictAndPreventStarvation(*health_status, buffer_size, channel_name);
+            bool starvation_risk = PredictAndPreventStarvation(*health_status_shared, buffer_size, channel_name);
             if (starvation_risk && started) {
                 AddDebugLog(L"[HEALTH_MONITOR] Starvation risk detected, triggering preventive measures for " + channel_name);
             }
