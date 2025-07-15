@@ -428,13 +428,22 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     return base.substr(0, pos + 1) + rel;
 }
 
+// Ad block state tracking for preventing infinite black frames
+struct AdBlockState {
+    bool in_scte35_out = false;
+    bool skip_next_segment = false; 
+    int consecutive_black_frames = 0;
+    std::chrono::steady_clock::time_point scte35_start_time;
+    static const int MAX_CONSECUTIVE_BLACK_FRAMES = 15; // ~30 seconds for 2-second segments
+    static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
+};
+
 // Parse media segment URLs from m3u8 playlist, replacing ad segments with placeholder
 static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
+    static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segs;
     std::istringstream ss(playlist);
     std::string line;
-    bool in_scte35_out = false;
-    bool skip_next_segment = false;
     
     while (std::getline(ss, line)) {
         if (line.empty()) continue;
@@ -442,60 +451,98 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         if (line[0] == '#') {
             // SCTE-35 ad marker detection (start of ad block)
             if (line.find("#EXT-X-SCTE35-OUT") == 0) {
-                in_scte35_out = true;
-                skip_next_segment = true;
+                ad_state.in_scte35_out = true;
+                ad_state.skip_next_segment = true;
+                ad_state.consecutive_black_frames = 0;
+                ad_state.scte35_start_time = std::chrono::steady_clock::now();
                 AddDebugLog(L"[AD_REPLACE] Found SCTE35-OUT marker, entering ad block");
                 continue;
             }
             // SCTE-35 ad marker detection (end of ad block)
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
-                in_scte35_out = false;
+                ad_state.in_scte35_out = false;
+                ad_state.consecutive_black_frames = 0;
                 AddDebugLog(L"[AD_REPLACE] Found SCTE35-IN marker, exiting ad block");
                 continue;
             }
-            // Stitched ad segments
+            // Stitched ad segments (single segment ads)
             else if (line.find("stitched-ad") != std::string::npos) {
-                skip_next_segment = true;
+                ad_state.skip_next_segment = true;
                 AddDebugLog(L"[AD_REPLACE] Found stitched-ad marker");
             }
             // EXTINF tags with specific durations that indicate ads (2.001, 2.002 seconds)
             else if (line.find("#EXTINF:2.00") == 0 && 
                      (line.find("2.001") != std::string::npos || 
                       line.find("2.002") != std::string::npos)) {
-                skip_next_segment = true;
+                ad_state.skip_next_segment = true;
                 AddDebugLog(L"[AD_REPLACE] Found ad-duration EXTINF marker");
             }
             // DATERANGE markers for stitched ads
             else if (line.find("#EXT-X-DATERANGE:ID=\"stitched-ad") == 0) {
-                skip_next_segment = true;
+                ad_state.skip_next_segment = true;
                 AddDebugLog(L"[AD_REPLACE] Found stitched-ad DATERANGE marker");
             }
             // General stitched content detection
             else if (line.find("stitched") != std::string::npos ||
                      line.find("STITCHED") != std::string::npos) {
-                skip_next_segment = true;
+                ad_state.skip_next_segment = true;
                 AddDebugLog(L"[AD_REPLACE] Found general stitched content marker");
             }
             // MIDROLL ad markers
             else if (line.find("EXT-X-DATERANGE") != std::string::npos && 
                      (line.find("MIDROLL") != std::string::npos ||
                       line.find("midroll") != std::string::npos)) {
-                skip_next_segment = true;
+                ad_state.skip_next_segment = true;
                 AddDebugLog(L"[AD_REPLACE] Found MIDROLL ad marker");
             }
             continue;
         }
         
         // This is a segment URL
-        if (skip_next_segment || in_scte35_out) {
-            // Ad segment detected - replace with black frame marker instead of trying to bypass
-            AddDebugLog(L"[AD_REPLACE] Ad segment detected, replacing with black frame");
+        bool should_replace_with_black_frame = false;
+        
+        // Check if we should replace this segment with a black frame
+        if (ad_state.skip_next_segment) {
+            // Single ad segment (stitched ads, duration-based ads, etc.)
+            should_replace_with_black_frame = true;
+            ad_state.skip_next_segment = false; // Reset after processing one segment
+        } else if (ad_state.in_scte35_out) {
+            // SCTE35 ad block - check safety limits to prevent infinite black frames
+            auto current_time = std::chrono::steady_clock::now();
+            auto ad_block_duration = current_time - ad_state.scte35_start_time;
+            
+            if (ad_state.consecutive_black_frames >= AdBlockState::MAX_CONSECUTIVE_BLACK_FRAMES) {
+                AddDebugLog(L"[AD_REPLACE] Safety limit reached: " + std::to_wstring(ad_state.consecutive_black_frames) + 
+                           L" consecutive black frames, exiting ad block");
+                ad_state.in_scte35_out = false;
+                ad_state.consecutive_black_frames = 0;
+            } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
+                AddDebugLog(L"[AD_REPLACE] Safety timeout reached: " + 
+                           std::to_wstring(std::chrono::duration_cast<std::chrono::seconds>(ad_block_duration).count()) + 
+                           L" seconds in ad block, exiting");
+                ad_state.in_scte35_out = false;
+                ad_state.consecutive_black_frames = 0;
+            } else {
+                should_replace_with_black_frame = true;
+            }
+        }
+        
+        if (should_replace_with_black_frame) {
+            // Ad segment detected - replace with black frame marker
+            AddDebugLog(L"[AD_REPLACE] Ad segment detected, replacing with black frame (#" + 
+                       std::to_wstring(ad_state.consecutive_black_frames + 1) + L")");
             
             // Add a special marker to signal black frame should be sent
             segs.push_back(L"__BLACK_FRAME__");
-            
-            skip_next_segment = false;
+            ad_state.consecutive_black_frames++;
             continue;
+        }
+        
+        // Normal content segment - reset black frame counter
+        if (ad_state.consecutive_black_frames > 0) {
+            AddDebugLog(L"[AD_REPLACE] Returning to normal content after " + 
+                       std::to_wstring(ad_state.consecutive_black_frames) + L" black frames");
+            ad_state.consecutive_black_frames = 0;
         }
         
         // Should be a .ts or .aac segment
