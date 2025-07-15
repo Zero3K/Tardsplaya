@@ -81,7 +81,7 @@ struct PipeLatencyMetrics {
         if (successful_writes == 1) {
             average_write_latency = latency;
         } else {
-            auto weight = std::min(successful_writes, 10ULL);
+            size_t weight = (successful_writes < 10) ? successful_writes : 10;
             average_write_latency = std::chrono::milliseconds(
                 (average_write_latency.count() * (weight - 1) + latency.count()) / weight
             );
@@ -531,11 +531,15 @@ bool UpdateProcessHealthMetrics(HANDLE process_handle, DWORD process_id, Process
 }
 
 bool MonitorPipeWriteLatency(HANDLE pipe_handle, const char* data, size_t data_size, 
-                           PipeLatencyMetrics& metrics, const std::wstring& context) {
+                           PipeLatencyMetrics& metrics, const std::wstring& context, DWORD* bytes_written_out = nullptr) {
     auto write_start = std::chrono::steady_clock::now();
     
     DWORD bytes_written = 0;
     BOOL write_success = WriteFile(pipe_handle, data, static_cast<DWORD>(data_size), &bytes_written, nullptr);
+    
+    if (bytes_written_out) {
+        *bytes_written_out = bytes_written;
+    }
     
     auto write_end = std::chrono::steady_clock::now();
     auto write_duration = std::chrono::duration_cast<std::chrono::milliseconds>(write_end - write_start);
@@ -998,7 +1002,7 @@ bool BufferAndPipeStreamToPlayer(
     AddDebugLog(L"[THREAD] Creating download and feeder threads for " + channel_name);
 
     // Background playlist monitor and segment downloader thread
-    std::thread download_thread([&, health_status_ptr = std::make_shared<MediaPlayerHealthStatus>(health_status)]() mutable {
+    std::thread download_thread([&, health_status_shared = std::make_shared<MediaPlayerHealthStatus>()]() mutable {
         auto thread_actual_start = std::chrono::high_resolution_clock::now();
         auto startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(thread_actual_start - thread_start_time);
         
@@ -1100,7 +1104,7 @@ bool BufferAndPipeStreamToPlayer(
                                std::to_wstring(remaining_cooldown.count()) + L" seconds remaining for " + channel_name);
                     
                     // Enhanced buffer assessment including health monitoring
-                    bool health_risk = health_status_ptr && PredictAndPreventStarvation(*health_status_ptr, current_buffer_size, channel_name);
+                    bool health_risk = health_status_shared && PredictAndPreventStarvation(*health_status_shared, current_buffer_size, channel_name);
                     
                     // If buffer is getting low OR health monitoring detects risk, force fresh playlist fetch
                     if (current_buffer_size <= 2 || health_risk) {
@@ -1359,11 +1363,10 @@ bool BufferAndPipeStreamToPlayer(
     });
 
     // Initialize enhanced health monitoring system inspired by MPC-HC
-    MediaPlayerHealthStatus health_status;
     AddDebugLog(L"[HEALTH_MONITOR] Initializing enhanced monitoring system for " + channel_name);
 
     // Main buffer feeding thread - writes directly to player stdin pipe with anti-freezing mechanisms
-    std::thread feeder_thread([&, health_status = std::make_shared<MediaPlayerHealthStatus>(health_status)]() mutable {
+    std::thread feeder_thread([&, health_status_shared = std::make_shared<MediaPlayerHealthStatus>()]() mutable {
         auto feeder_start_time = std::chrono::high_resolution_clock::now();
         auto feeder_startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(feeder_start_time - thread_start_time);
         
@@ -1382,7 +1385,7 @@ bool BufferAndPipeStreamToPlayer(
             bool data_available_check = (download_running.load() || !buffer_queue.empty());
             
             // Update process health metrics regularly
-            UpdateProcessHealthMetrics(pi.hProcess, pi.dwProcessId, health_status->process_health);
+            UpdateProcessHealthMetrics(pi.hProcess, pi.dwProcessId, health_status_shared->process_health);
             
             if (cancel_token_check) {
                 AddDebugLog(L"[FEEDER] Exit condition: cancel_token=true for " + channel_name);
@@ -1482,18 +1485,20 @@ bool BufferAndPipeStreamToPlayer(
                     
                     while (!segment_written && write_attempts < max_write_attempts && !cancel_token.load()) {
                         // Use enhanced pipe monitoring instead of basic WriteFileWithTimeout
+                        DWORD bytes_written = 0;
                         bool write_success = MonitorPipeWriteLatency(stdin_pipe, 
                                                                     reinterpret_cast<const char*>(segment_data.data()), 
                                                                     segment_data.size(), 
-                                                                    health_status->pipe_latency, 
-                                                                    channel_name);
+                                                                    health_status_shared->pipe_latency, 
+                                                                    channel_name,
+                                                                    &bytes_written);
                         
                         if (write_success) {
                             segment_written = true;
                             segments_processed++;
                             
                             // Record successful segment feed for buffer prediction
-                            health_status->buffer_prediction.RecordSegmentFed();
+                            health_status_shared->buffer_prediction.RecordSegmentFed();
                         } else {
                             write_attempts++;
                             DWORD error = GetLastError();
@@ -1549,12 +1554,12 @@ bool BufferAndPipeStreamToPlayer(
                 empty_buffer_count = 0; // Reset counter when data is fed
                 
                 // Enhanced logging with health metrics
-                health_status->AssessOverallHealth();
+                health_status_shared->AssessOverallHealth();
                 AddDebugLog(L"[IPC] Fed " + std::to_wstring(segments_processed) + 
                            L" segments to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer) +
-                           L", health=" + (health_status->overall_healthy ? L"OK" : L"RISK") +
-                           L", pipe_latency=" + std::to_wstring(health_status->pipe_latency.average_write_latency.count()) + L"ms" +
-                           L", feed_rate=" + std::to_wstring(health_status->buffer_prediction.segment_feed_rate) + L"seg/s");
+                           L", health=" + (health_status_shared->overall_healthy ? L"OK" : L"RISK") +
+                           L", pipe_latency=" + std::to_wstring(health_status_shared->pipe_latency.average_write_latency.count()) + L"ms" +
+                           L", feed_rate=" + std::to_wstring(health_status_shared->buffer_prediction.segment_feed_rate) + L"seg/s");
                 
                 // Shorter wait when actively feeding to maintain flow
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
