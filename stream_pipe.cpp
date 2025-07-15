@@ -963,8 +963,8 @@ bool BufferAndPipeStreamToPlayer(
                                 if (fresh_qualities.find(selected_quality) != fresh_qualities.end()) {
                                     AddDebugLog(L"[AD_RECOVERY] Found matching quality '" + selected_quality + L"', updating playlist URL for " + channel_name);
                                     // Update the playlist URL for the next fetch
-                                    playlist_url = fresh_qualities[selected_quality];
-                                    AddDebugLog(L"[AD_RECOVERY] Fresh playlist fetch successful, updated URL: " + playlist_url.substr(0, 100) + L"...");
+                                    media_playlist_url = fresh_qualities[selected_quality];
+                                    AddDebugLog(L"[AD_RECOVERY] Fresh playlist fetch successful, updated URL: " + media_playlist_url.substr(0, 100) + L"...");
                                     
                                     // Continue with next playlist fetch using the fresh URL
                                     std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Short delay
