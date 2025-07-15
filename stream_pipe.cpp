@@ -581,6 +581,119 @@ bool PredictAndPreventStarvation(MediaPlayerHealthStatus& health_status, size_t 
     return false;
 }
 
+// Reusable ad recovery logic for both playlist-level and download-level ad detection
+bool AttemptAdRecoveryFetch(const std::wstring& channel_name, const std::wstring& selected_quality,
+                           std::wstring& media_playlist_url, int& fresh_playlist_attempts,
+                           std::chrono::steady_clock::time_point& last_fresh_playlist_time,
+                           const int max_fresh_playlist_attempts, 
+                           const std::chrono::seconds& fresh_playlist_cooldown,
+                           const std::mutex& buffer_mutex, const std::queue<std::vector<char>>& buffer_queue,
+                           std::shared_ptr<MediaPlayerHealthStatus> health_status_shared,
+                           const std::wstring& reason_context) {
+    
+    AddDebugLog(L"[AD_RECOVERY] " + reason_context + L", attempting immediate fresh playlist fetch for " + channel_name);
+    
+    // Check fresh playlist fetch limits and cooldown
+    auto current_time = std::chrono::steady_clock::now();
+    auto time_since_last_fetch = current_time - last_fresh_playlist_time;
+    bool cooldown_passed = time_since_last_fetch >= fresh_playlist_cooldown;
+    bool attempts_remaining = fresh_playlist_attempts < max_fresh_playlist_attempts;
+    
+    // Check buffer status to determine if we should bypass cooldown
+    size_t current_buffer_size;
+    {
+        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(buffer_mutex));
+        current_buffer_size = buffer_queue.size();
+    }
+    
+    bool should_fetch = false;
+    if (!attempts_remaining) {
+        AddDebugLog(L"[AD_RECOVERY] Maximum fresh playlist attempts reached (" + 
+                   std::to_wstring(fresh_playlist_attempts) + L"), skipping for " + channel_name);
+    } else if (!cooldown_passed) {
+        auto remaining_cooldown = std::chrono::duration_cast<std::chrono::seconds>(fresh_playlist_cooldown - time_since_last_fetch);
+        AddDebugLog(L"[AD_RECOVERY] Fresh playlist cooldown active, " + 
+                   std::to_wstring(remaining_cooldown.count()) + L" seconds remaining for " + channel_name);
+        
+        // Enhanced buffer assessment including health monitoring
+        bool health_risk = health_status_shared && PredictAndPreventStarvation(*health_status_shared, current_buffer_size, channel_name);
+        
+        // If buffer is getting low OR health monitoring detects risk, force fresh playlist fetch
+        if (current_buffer_size <= 2 || health_risk) {
+            AddDebugLog(L"[AD_RECOVERY] Risk detected - Buffer: " + std::to_wstring(current_buffer_size) + 
+                       L" segments, Health Risk: " + (health_risk ? L"YES" : L"NO") +
+                       L", forcing fresh playlist fetch despite cooldown to prevent video freeze for " + channel_name);
+            should_fetch = true;
+        } else {
+            AddDebugLog(L"[AD_RECOVERY] Buffer sufficient (" + std::to_wstring(current_buffer_size) + 
+                       L" segments) and health OK, skipping immediate fresh playlist fetch for " + channel_name);
+        }
+    } else {
+        should_fetch = true;
+    }
+    
+    if (should_fetch) {
+        AddDebugLog(L"[AD_RECOVERY] Proceeding with immediate fresh playlist fetch (attempt " + 
+                   std::to_wstring(fresh_playlist_attempts + 1) + L"/" + 
+                   std::to_wstring(max_fresh_playlist_attempts) + L") for " + channel_name);
+                   
+        fresh_playlist_attempts++;
+        last_fresh_playlist_time = current_time;
+        
+        // Attempt fresh playlist fetch using existing functions
+        AddDebugLog(L"[AD_RECOVERY] Getting fresh access token for " + channel_name);
+        std::wstring fresh_access_token = GetAccessToken(channel_name);
+        
+        if (!fresh_access_token.empty() && fresh_access_token != L"OFFLINE") {
+            AddDebugLog(L"[AD_RECOVERY] Successfully obtained fresh access token for " + channel_name);
+            
+            // Fetch fresh master playlist using the authenticated token
+            std::wstring fresh_master_playlist = FetchPlaylist(channel_name, fresh_access_token);
+            
+            if (!fresh_master_playlist.empty()) {
+                AddDebugLog(L"[AD_RECOVERY] Successfully fetched fresh master playlist for " + channel_name);
+                AddDebugLog(L"[AD_RECOVERY] Fresh master playlist content (first 500 chars): " + fresh_master_playlist.substr(0, 500));
+                
+                // Parse the fresh playlist to get quality URLs
+                std::map<std::wstring, std::wstring> fresh_qualities = ParsePlaylist(fresh_master_playlist);
+                
+                if (!fresh_qualities.empty()) {
+                    AddDebugLog(L"[AD_RECOVERY] Successfully parsed " + std::to_wstring(fresh_qualities.size()) + L" qualities from fresh playlist for " + channel_name);
+                    
+                    // Build list of available qualities for debugging
+                    std::wstring qualities_list = L"[AD_RECOVERY] Available qualities: ";
+                    for (const auto& quality_pair : fresh_qualities) {
+                        qualities_list += quality_pair.first + L", ";
+                    }
+                    AddDebugLog(qualities_list);
+                    AddDebugLog(L"[AD_RECOVERY] Originally selected quality: " + selected_quality);
+                    
+                    // Find matching quality and update playlist URL
+                    if (fresh_qualities.find(selected_quality) != fresh_qualities.end()) {
+                        AddDebugLog(L"[AD_RECOVERY] Found matching quality '" + selected_quality + L"', updating playlist URL for " + channel_name);
+                        // Update the playlist URL for the next fetch
+                        media_playlist_url = fresh_qualities[selected_quality];
+                        AddDebugLog(L"[AD_RECOVERY] Fresh playlist fetch successful, updated URL: " + media_playlist_url.substr(0, 100) + L"...");
+                        return true; // Success
+                    } else {
+                        AddDebugLog(L"[AD_RECOVERY] Warning: Selected quality '" + selected_quality + L"' not found in fresh playlist for " + channel_name);
+                    }
+                } else {
+                    AddDebugLog(L"[AD_RECOVERY] Failed to parse fresh master playlist for " + channel_name);
+                }
+            } else {
+                AddDebugLog(L"[AD_RECOVERY] Failed to fetch fresh master playlist for " + channel_name);
+            }
+        } else if (fresh_access_token == L"OFFLINE") {
+            AddDebugLog(L"[AD_RECOVERY] Channel " + channel_name + L" is offline, cannot fetch fresh playlist");
+        } else {
+            AddDebugLog(L"[AD_RECOVERY] Failed to get fresh access token for " + channel_name);
+        }
+    }
+    
+    return false; // No fetch attempted or failed
+}
+
 // Parse media segment URLs from m3u8 playlist, filtering out ad segments
 // Based on Twitch HLS AdBlock extension logic
 // Returns pair: (segments, ads_detected_flag)
@@ -1014,6 +1127,10 @@ bool BufferAndPipeStreamToPlayer(
         auto last_fresh_playlist_time = std::chrono::steady_clock::now();
         const std::chrono::seconds fresh_playlist_cooldown(30); // 30 second cooldown between attempts
         
+        // Track consecutive "no new segments" to detect ads at download level
+        int consecutive_no_segments = 0;
+        const int max_consecutive_no_segments = 3; // Trigger ad recovery after 3 consecutive no-segment fetches
+        
         AddDebugLog(L"[DOWNLOAD] Starting download thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(startup_delay.count()) + L"ms");
         
@@ -1079,107 +1196,16 @@ bool BufferAndPipeStreamToPlayer(
             
             // If ads were detected, attempt immediate fresh playlist fetch to prevent buffer starvation
             if (ads_detected) {
-                AddDebugLog(L"[AD_RECOVERY] Ads detected in playlist, attempting immediate fresh playlist fetch for " + channel_name);
+                bool fetch_successful = AttemptAdRecoveryFetch(channel_name, selected_quality, media_playlist_url, 
+                                                              fresh_playlist_attempts, last_fresh_playlist_time,
+                                                              max_fresh_playlist_attempts, fresh_playlist_cooldown,
+                                                              buffer_mutex, buffer_queue, health_status_shared,
+                                                              L"Ads detected in playlist");
                 
-                // Check fresh playlist fetch limits and cooldown
-                auto current_time = std::chrono::steady_clock::now();
-                auto time_since_last_fetch = current_time - last_fresh_playlist_time;
-                bool cooldown_passed = time_since_last_fetch >= fresh_playlist_cooldown;
-                bool attempts_remaining = fresh_playlist_attempts < max_fresh_playlist_attempts;
-                
-                // Check buffer status to determine if we should bypass cooldown
-                size_t current_buffer_size;
-                {
-                    std::lock_guard<std::mutex> lock(buffer_mutex);
-                    current_buffer_size = buffer_queue.size();
-                }
-                
-                bool should_fetch = false;
-                if (!attempts_remaining) {
-                    AddDebugLog(L"[AD_RECOVERY] Maximum fresh playlist attempts reached (" + 
-                               std::to_wstring(fresh_playlist_attempts) + L"), skipping for " + channel_name);
-                } else if (!cooldown_passed) {
-                    auto remaining_cooldown = std::chrono::duration_cast<std::chrono::seconds>(fresh_playlist_cooldown - time_since_last_fetch);
-                    AddDebugLog(L"[AD_RECOVERY] Fresh playlist cooldown active, " + 
-                               std::to_wstring(remaining_cooldown.count()) + L" seconds remaining for " + channel_name);
-                    
-                    // Enhanced buffer assessment including health monitoring
-                    bool health_risk = health_status_shared && PredictAndPreventStarvation(*health_status_shared, current_buffer_size, channel_name);
-                    
-                    // If buffer is getting low OR health monitoring detects risk, force fresh playlist fetch
-                    if (current_buffer_size <= 2 || health_risk) {
-                        AddDebugLog(L"[AD_RECOVERY] Risk detected - Buffer: " + std::to_wstring(current_buffer_size) + 
-                                   L" segments, Health Risk: " + (health_risk ? L"YES" : L"NO") +
-                                   L", forcing fresh playlist fetch despite cooldown to prevent video freeze for " + channel_name);
-                        should_fetch = true;
-                    } else {
-                        AddDebugLog(L"[AD_RECOVERY] Buffer sufficient (" + std::to_wstring(current_buffer_size) + 
-                                   L" segments) and health OK, skipping immediate fresh playlist fetch for " + channel_name);
-                    }
-                } else {
-                    should_fetch = true;
-                }
-                
-                if (should_fetch) {
-                    AddDebugLog(L"[AD_RECOVERY] Proceeding with immediate fresh playlist fetch (attempt " + 
-                               std::to_wstring(fresh_playlist_attempts + 1) + L"/" + 
-                               std::to_wstring(max_fresh_playlist_attempts) + L") for " + channel_name);
-                               
-                    fresh_playlist_attempts++;
-                    last_fresh_playlist_time = current_time;
-                    
-                    // Attempt fresh playlist fetch using existing functions
-                    AddDebugLog(L"[AD_RECOVERY] Getting fresh access token for " + channel_name);
-                    std::wstring fresh_access_token = GetAccessToken(channel_name);
-                    
-                    if (!fresh_access_token.empty() && fresh_access_token != L"OFFLINE") {
-                        AddDebugLog(L"[AD_RECOVERY] Successfully obtained fresh access token for " + channel_name);
-                        
-                        // Fetch fresh master playlist using the authenticated token
-                        std::wstring fresh_master_playlist = FetchPlaylist(channel_name, fresh_access_token);
-                        
-                        if (!fresh_master_playlist.empty()) {
-                            AddDebugLog(L"[AD_RECOVERY] Successfully fetched fresh master playlist for " + channel_name);
-                            AddDebugLog(L"[AD_RECOVERY] Fresh master playlist content (first 500 chars): " + fresh_master_playlist.substr(0, 500));
-                            
-                            // Parse the fresh playlist to get quality URLs
-                            std::map<std::wstring, std::wstring> fresh_qualities = ParsePlaylist(fresh_master_playlist);
-                            
-                            if (!fresh_qualities.empty()) {
-                                AddDebugLog(L"[AD_RECOVERY] Successfully parsed " + std::to_wstring(fresh_qualities.size()) + L" qualities from fresh playlist for " + channel_name);
-                                
-                                // Build list of available qualities for debugging
-                                std::wstring qualities_list = L"[AD_RECOVERY] Available qualities: ";
-                                for (const auto& quality_pair : fresh_qualities) {
-                                    qualities_list += quality_pair.first + L", ";
-                                }
-                                AddDebugLog(qualities_list);
-                                AddDebugLog(L"[AD_RECOVERY] Originally selected quality: " + selected_quality);
-                                
-                                // Find matching quality and update playlist URL
-                                if (fresh_qualities.find(selected_quality) != fresh_qualities.end()) {
-                                    AddDebugLog(L"[AD_RECOVERY] Found matching quality '" + selected_quality + L"', updating playlist URL for " + channel_name);
-                                    // Update the playlist URL for the next fetch
-                                    media_playlist_url = fresh_qualities[selected_quality];
-                                    AddDebugLog(L"[AD_RECOVERY] Fresh playlist fetch successful, updated URL: " + media_playlist_url.substr(0, 100) + L"...");
-                                    
-                                    // Continue with next playlist fetch using the fresh URL
-                                    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Short delay
-                                    continue; // Skip to next iteration with fresh URL
-                                } else {
-                                    AddDebugLog(L"[AD_RECOVERY] Warning: Selected quality '" + selected_quality + L"' not found in fresh playlist for " + channel_name);
-                                }
-                            } else {
-                                AddDebugLog(L"[AD_RECOVERY] Failed to parse fresh master playlist for " + channel_name);
-                            }
-                        } else {
-                            AddDebugLog(L"[AD_RECOVERY] Failed to fetch fresh master playlist for " + channel_name);
-                        }
-                    } else if (fresh_access_token == L"OFFLINE") {
-                        AddDebugLog(L"[AD_RECOVERY] Channel " + channel_name + L" is offline, cannot fetch fresh playlist");
-                    } else {
-                        AddDebugLog(L"[AD_RECOVERY] Failed to get fresh access token for " + channel_name);
-                    }
+                if (fetch_successful) {
+                    // Continue with next playlist fetch using the fresh URL
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Short delay
+                    continue; // Skip to next iteration with fresh URL
                 }
             }
             
@@ -1326,6 +1352,33 @@ bool BufferAndPipeStreamToPlayer(
                 AddDebugLog(L"[DOWNLOAD] Urgent download completed, immediately fetching next playlist for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Very short delay for urgent downloads
             } else if (new_segments_downloaded == 0) {
+                // Track consecutive "no new segments" which likely indicates ads
+                consecutive_no_segments++;
+                AddDebugLog(L"[DOWNLOAD] No new segments downloaded (likely ads) - consecutive count: " + 
+                           std::to_wstring(consecutive_no_segments) + L"/" + std::to_wstring(max_consecutive_no_segments) + 
+                           L" for " + channel_name);
+                
+                // After several consecutive "no new segments", trigger ad recovery like playlist-level detection
+                if (consecutive_no_segments >= max_consecutive_no_segments) {
+                    AddDebugLog(L"[DOWNLOAD] Multiple consecutive no-segment fetches detected, treating as ad period for " + channel_name);
+                    
+                    bool fetch_successful = AttemptAdRecoveryFetch(channel_name, selected_quality, media_playlist_url, 
+                                                                  fresh_playlist_attempts, last_fresh_playlist_time,
+                                                                  max_fresh_playlist_attempts, fresh_playlist_cooldown,
+                                                                  buffer_mutex, buffer_queue, health_status_shared,
+                                                                  L"Consecutive no-segments detected (" + std::to_wstring(consecutive_no_segments) + L")");
+                    
+                    if (fetch_successful) {
+                        // Reset counter and continue with fresh URL
+                        consecutive_no_segments = 0;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Short delay
+                        continue; // Skip to next iteration with fresh URL
+                    } else {
+                        // Reset counter even if fetch failed to prevent spam
+                        consecutive_no_segments = 0;
+                    }
+                }
+                
                 // Enhanced polling frequency based on health monitoring
                 bool health_risk = health_status_shared && !health_status_shared->AssessOverallHealth();
                 std::chrono::milliseconds sleep_duration;
@@ -1340,6 +1393,13 @@ bool BufferAndPipeStreamToPlayer(
                 
                 std::this_thread::sleep_for(sleep_duration);
             } else {
+                // Reset consecutive no-segments counter when we successfully download segments
+                if (consecutive_no_segments > 0) {
+                    AddDebugLog(L"[DOWNLOAD] Segments downloaded successfully, resetting no-segments counter (was " + 
+                               std::to_wstring(consecutive_no_segments) + L") for " + channel_name);
+                    consecutive_no_segments = 0;
+                }
+                
                 AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(1500));
             }
