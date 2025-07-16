@@ -413,11 +413,10 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
     std::vector<std::wstring> segs;
     bool should_clear_buffer = false;
     
-    // Check if we just exited an ad block - clear buffer to remove any remaining old segments
+    // Don't clear buffer when exiting ad blocks to maintain stream continuity
     if (ad_state.just_exited_ad_block) {
-        should_clear_buffer = true;
         ad_state.just_exited_ad_block = false; // Reset flag
-        AddDebugLog(L"[AD_SKIP] Just exited ad block, will clear buffer to remove remaining old segments");
+        AddDebugLog(L"[AD_SKIP] Just exited ad block, continuing with existing buffer to maintain continuity");
     }
     
     std::istringstream ss(playlist);
@@ -430,9 +429,8 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
             // SCTE-35 ad marker detection (start of ad block)
             if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 if (!ad_state.in_scte35_out) {
-                    // Just entering ad block - signal to clear buffer
-                    should_clear_buffer = true;
-                    AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, entering ad block - will clear buffer");
+                    // Just entering ad block - don't clear buffer to maintain continuity
+                    AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, entering ad block - maintaining buffer continuity");
                 } else {
                     AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, already in ad block");
                 }
@@ -447,8 +445,8 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
                 ad_state.in_scte35_out = false;
                 ad_state.consecutive_skipped_segments = 0;
                 ad_state.just_exited_ad_block = true;
-                should_clear_buffer = true; // Clear buffer to remove any remaining segments
-                AddDebugLog(L"[AD_SKIP] Found SCTE35-IN marker, exiting ad block and clearing buffer");
+                // Don't clear buffer to maintain stream continuity
+                AddDebugLog(L"[AD_SKIP] Found SCTE35-IN marker, exiting ad block - maintaining buffer continuity");
                 continue;
             }
             // Stitched ad segments (single segment ads)
@@ -516,19 +514,20 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
         }
         
         if (should_skip_ad_segment) {
-            // Ad segment detected - skip it entirely to prevent media player sync issues
-            AddDebugLog(L"[AD_SKIP] Skipping ad segment entirely (skipped #" + 
+            // Ad segment detected - replace with minimal placeholder to maintain stream timing
+            AddDebugLog(L"[AD_SKIP] Replacing ad segment with placeholder (replaced #" + 
                        std::to_wstring(ad_state.consecutive_skipped_segments + 1) + L")");
             
-            // Don't add segment to the list - skip it completely
+            // Use a placeholder marker that will generate minimal content
+            segs.push_back(L"__AD_PLACEHOLDER__");
             ad_state.consecutive_skipped_segments++;
             continue;
         }
         
         // Normal content segment - reset skip counter
         if (ad_state.consecutive_skipped_segments > 0) {
-            AddDebugLog(L"[AD_SKIP] Returning to normal content after skipping " + 
-                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments");
+            AddDebugLog(L"[AD_SKIP] Returning to normal content after replacing " + 
+                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments with placeholders");
             ad_state.consecutive_skipped_segments = 0;
         }
         
@@ -974,6 +973,24 @@ bool BufferAndPipeStreamToPlayer(
                 // if (!process_still_running) {
                 //     AddDebugLog(L"[DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
                 //     break;
+                
+                // Handle ad placeholder markers by generating minimal content
+                if (seg == L"__AD_PLACEHOLDER__") {
+                    AddDebugLog(L"[AD_SKIP] Generating minimal placeholder content for ad segment");
+                    
+                    // Generate minimal valid content (just a few null bytes to maintain timing)
+                    std::vector<char> placeholder_data(1024, 0); // 1KB of null data
+                    
+                    // Add to buffer
+                    {
+                        std::lock_guard<std::mutex> lock(buffer_mutex);
+                        buffer_queue.push(std::move(placeholder_data));
+                    }
+                    
+                    new_segments_downloaded++;
+                    AddDebugLog(L"[AD_SKIP] Placeholder content added to buffer for " + channel_name);
+                    continue;
+                }
                 
                 // Skip segments that aren't regular .ts/.aac files
                 if (seg.find(L"http") != 0) {
