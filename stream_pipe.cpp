@@ -49,104 +49,6 @@ std::wstring ExtractPath(const std::wstring& url) {
 // Global stream tracking for multi-stream debugging
 static std::atomic<int> g_active_streams(0);
 
-// MPEG-TS packet sequence tracking for proper stream continuity
-struct MPEGTSSequence {
-    static std::atomic<uint16_t> continuity_counter;
-    static std::atomic<uint64_t> pcr_base;
-    static std::atomic<uint64_t> pts_base;
-    static std::atomic<bool> in_ad_block;
-    
-    // Reset sequence state for consistent ad block insertion
-    static void ResetForAdBlock() {
-        continuity_counter.store(0);
-        // Use predictable timing values that won't drift
-        auto now = std::chrono::steady_clock::now();
-        auto time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        uint64_t base_time = (time_ms * 90) % 0x1FFFFFFFF; // 90KHz clock, wrap at 33-bit boundary
-        pcr_base.store(base_time);
-        pts_base.store(base_time);
-        in_ad_block.store(true);
-    }
-    
-    static void ExitAdBlock() {
-        in_ad_block.store(false);
-        // Reset sequence to prevent discontinuity issues when returning to real content
-        // The artificial sequence numbers from black frames can confuse media players
-        continuity_counter.store(0);
-        auto now = std::chrono::steady_clock::now();
-        auto time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        uint64_t base_time = (time_ms * 90) % 0x1FFFFFFFF; // 90KHz clock, wrap at 33-bit boundary
-        pcr_base.store(base_time);
-        pts_base.store(base_time);
-    }
-};
-
-std::atomic<uint16_t> MPEGTSSequence::continuity_counter{0};
-std::atomic<uint64_t> MPEGTSSequence::pcr_base{0};
-std::atomic<uint64_t> MPEGTSSequence::pts_base{0};
-std::atomic<bool> MPEGTSSequence::in_ad_block{false};
-
-// Generate properly formatted MPEG-TS black frame with correct sequencing
-static std::vector<uint8_t> GenerateBlackFrame() {
-    const size_t TS_PACKET_SIZE = 188;
-    const size_t PACKETS_PER_FRAME = 50;
-    const size_t FRAME_SIZE = TS_PACKET_SIZE * PACKETS_PER_FRAME;
-    
-    std::vector<uint8_t> frame_data(FRAME_SIZE);
-    
-    // Get next sequence values with smaller, more predictable increments
-    uint16_t continuity = MPEGTSSequence::continuity_counter.fetch_add(1) & 0x0F;
-    
-    // Use smaller time increments for black frames to prevent large timing jumps
-    // 90000 = 1 second at 90KHz, but use 180000 = 2 seconds to match segment duration
-    uint64_t pcr = MPEGTSSequence::pcr_base.fetch_add(180000);
-    uint64_t pts = MPEGTSSequence::pts_base.fetch_add(180000);
-    
-    for (size_t i = 0; i < PACKETS_PER_FRAME; i++) {
-        uint8_t* packet = &frame_data[i * TS_PACKET_SIZE];
-        
-        // MPEG-TS packet header
-        packet[0] = 0x47; // Sync byte
-        packet[1] = 0x40; // Payload unit start indicator
-        packet[2] = 0x00; // PID (PAT)
-        packet[3] = 0x10 | (continuity & 0x0F); // Adaptation field control + continuity
-        
-        // Add PCR in adaptation field for first packet
-        if (i == 0) {
-            packet[3] |= 0x20; // Set adaptation field flag
-            packet[4] = 0x07; // Adaptation field length
-            packet[5] = 0x10; // PCR flag
-            
-            // PCR encoding (33-bit base + 6-bit extension) - use more conservative values
-            uint64_t pcr_base_part = (pcr / 300) & 0x1FFFFFFFF; // Mask to 33 bits
-            uint64_t pcr_ext = pcr % 300;
-            
-            packet[6] = (pcr_base_part >> 25) & 0xFF;
-            packet[7] = (pcr_base_part >> 17) & 0xFF;
-            packet[8] = (pcr_base_part >> 9) & 0xFF;
-            packet[9] = (pcr_base_part >> 1) & 0xFF;
-            packet[10] = ((pcr_base_part & 0x01) << 7) | 0x7E | ((pcr_ext >> 8) & 0x01);
-            packet[11] = pcr_ext & 0xFF;
-            
-            // Fill rest with stuffing bytes
-            for (size_t j = 12; j < TS_PACKET_SIZE; j++) {
-                packet[j] = 0xFF;
-            }
-        } else {
-            // Null packet for padding
-            packet[1] = 0x1F; // Null PID
-            packet[2] = 0xFF;
-            for (size_t j = 4; j < TS_PACKET_SIZE; j++) {
-                packet[j] = 0xFF;
-            }
-        }
-        
-        continuity = (continuity + 1) & 0x0F;
-    }
-    
-    return frame_data;
-}
-
 // Generate a simple text message for ad skip events
 static std::string GenerateAdSkipMessage() {
     return "[AD REPLACED] Commercial break - displaying placeholder content with proper sequencing";
@@ -504,18 +406,18 @@ struct AdBlockState {
     static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
 };
 
-// Parse media segment URLs from m3u8 playlist, replacing ad segments with black frame markers
+// Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
 // Returns pair of (segments, should_clear_buffer)
 static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist) {
     static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segs;
     bool should_clear_buffer = false;
     
-    // Check if we just exited an ad block - clear buffer to remove remaining black frames
+    // Check if we just exited an ad block - clear buffer to remove any remaining old segments
     if (ad_state.just_exited_ad_block) {
         should_clear_buffer = true;
         ad_state.just_exited_ad_block = false; // Reset flag
-        AddDebugLog(L"[AD_REPLACE] Just exited ad block, will clear buffer to remove remaining black frames");
+        AddDebugLog(L"[AD_SKIP] Just exited ad block, will clear buffer to remove remaining old segments");
     }
     
     std::istringstream ss(playlist);
@@ -528,12 +430,11 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
             // SCTE-35 ad marker detection (start of ad block)
             if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 if (!ad_state.in_scte35_out) {
-                    // Just entering ad block - signal to clear buffer and reset sequencing
+                    // Just entering ad block - signal to clear buffer
                     should_clear_buffer = true;
-                    MPEGTSSequence::ResetForAdBlock();
-                    AddDebugLog(L"[AD_REPLACE] Found SCTE35-OUT marker, entering ad block - will clear buffer and reset MPEG-TS sequencing");
+                    AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, entering ad block - will clear buffer");
                 } else {
-                    AddDebugLog(L"[AD_REPLACE] Found SCTE35-OUT marker, already in ad block");
+                    AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, already in ad block");
                 }
                 ad_state.in_scte35_out = true;
                 ad_state.skip_next_segment = true;
@@ -546,40 +447,39 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
                 ad_state.in_scte35_out = false;
                 ad_state.consecutive_skipped_segments = 0;
                 ad_state.just_exited_ad_block = true;
-                MPEGTSSequence::ExitAdBlock();
-                should_clear_buffer = true; // Clear buffer to remove any remaining black frames
-                AddDebugLog(L"[AD_REPLACE] Found SCTE35-IN marker, exiting ad block, resetting sequence state and clearing buffer");
+                should_clear_buffer = true; // Clear buffer to remove any remaining segments
+                AddDebugLog(L"[AD_SKIP] Found SCTE35-IN marker, exiting ad block and clearing buffer");
                 continue;
             }
             // Stitched ad segments (single segment ads)
             else if (line.find("stitched-ad") != std::string::npos) {
                 ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_REPLACE] Found stitched-ad marker");
+                AddDebugLog(L"[AD_SKIP] Found stitched-ad marker");
             }
             // EXTINF tags with specific durations that indicate ads (2.001, 2.002 seconds)
             else if (line.find("#EXTINF:2.00") == 0 && 
                      (line.find("2.001") != std::string::npos || 
                       line.find("2.002") != std::string::npos)) {
                 ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_REPLACE] Found ad-duration EXTINF marker");
+                AddDebugLog(L"[AD_SKIP] Found ad-duration EXTINF marker");
             }
             // DATERANGE markers for stitched ads
             else if (line.find("#EXT-X-DATERANGE:ID=\"stitched-ad") == 0) {
                 ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_REPLACE] Found stitched-ad DATERANGE marker");
+                AddDebugLog(L"[AD_SKIP] Found stitched-ad DATERANGE marker");
             }
             // General stitched content detection
             else if (line.find("stitched") != std::string::npos ||
                      line.find("STITCHED") != std::string::npos) {
                 ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_REPLACE] Found general stitched content marker");
+                AddDebugLog(L"[AD_SKIP] Found general stitched content marker");
             }
             // MIDROLL ad markers
             else if (line.find("EXT-X-DATERANGE") != std::string::npos && 
                      (line.find("MIDROLL") != std::string::npos ||
                       line.find("midroll") != std::string::npos)) {
                 ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_REPLACE] Found MIDROLL ad marker");
+                AddDebugLog(L"[AD_SKIP] Found MIDROLL ad marker");
             }
             continue;
         }
@@ -598,40 +498,37 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
             auto ad_block_duration = current_time - ad_state.scte35_start_time;
             
             if (ad_state.consecutive_skipped_segments >= AdBlockState::MAX_CONSECUTIVE_SKIPPED_SEGMENTS) {
-                AddDebugLog(L"[AD_REPLACE] Safety limit reached: " + std::to_wstring(ad_state.consecutive_skipped_segments) + 
-                           L" consecutive replaced segments, exiting ad block");
+                AddDebugLog(L"[AD_SKIP] Safety limit reached: " + std::to_wstring(ad_state.consecutive_skipped_segments) + 
+                           L" consecutive skipped segments, exiting ad block");
                 ad_state.in_scte35_out = false;
                 ad_state.consecutive_skipped_segments = 0;
                 ad_state.just_exited_ad_block = true;
-                MPEGTSSequence::ExitAdBlock();
             } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
-                AddDebugLog(L"[AD_REPLACE] Safety timeout reached: " + 
+                AddDebugLog(L"[AD_SKIP] Safety timeout reached: " + 
                            std::to_wstring(std::chrono::duration_cast<std::chrono::seconds>(ad_block_duration).count()) + 
                            L" seconds in ad block, exiting");
                 ad_state.in_scte35_out = false;
                 ad_state.consecutive_skipped_segments = 0;
                 ad_state.just_exited_ad_block = true;
-                MPEGTSSequence::ExitAdBlock();
             } else {
                 should_skip_ad_segment = true;
             }
         }
         
         if (should_skip_ad_segment) {
-            // Ad segment detected - replace with black frame marker
-            AddDebugLog(L"[AD_REPLACE] Replacing ad segment with black frame (replaced #" + 
+            // Ad segment detected - skip it entirely to prevent media player sync issues
+            AddDebugLog(L"[AD_SKIP] Skipping ad segment entirely (skipped #" + 
                        std::to_wstring(ad_state.consecutive_skipped_segments + 1) + L")");
             
-            // Add black frame marker instead of skipping
-            segs.push_back(L"__BLACK_FRAME__");
+            // Don't add segment to the list - skip it completely
             ad_state.consecutive_skipped_segments++;
             continue;
         }
         
         // Normal content segment - reset skip counter
         if (ad_state.consecutive_skipped_segments > 0) {
-            AddDebugLog(L"[AD_REPLACE] Returning to normal content after replacing " + 
-                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments with black frames");
+            AddDebugLog(L"[AD_SKIP] Returning to normal content after skipping " + 
+                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments");
             ad_state.consecutive_skipped_segments = 0;
         }
         
@@ -1055,8 +952,8 @@ bool BufferAndPipeStreamToPlayer(
                     std::queue<std::vector<char>> empty_queue;
                     buffer_queue.swap(empty_queue); // Clear the queue efficiently
                 }
-                AddDebugLog(L"[AD_REPLACE] Cleared " + std::to_wstring(cleared_segments) + 
-                           L" buffered segments at start of ad block for " + channel_name);
+                AddDebugLog(L"[AD_SKIP] Cleared " + std::to_wstring(cleared_segments) + 
+                           L" buffered segments when entering/exiting ad block for " + channel_name);
             }
             
             AddDebugLog(L"[DOWNLOAD] Parsed " + std::to_wstring(segments.size()) + 
@@ -1077,43 +974,6 @@ bool BufferAndPipeStreamToPlayer(
                 // if (!process_still_running) {
                 //     AddDebugLog(L"[DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
                 //     break;
-                // }
-                
-                // Handle special markers
-                if (seg == L"__BLACK_FRAME__") {
-                    bool is_in_ad_block = MPEGTSSequence::in_ad_block.load();
-                    AddDebugLog(L"[AD_REPLACE] Inserting black frame for ad segment (ad_block_state=" + 
-                               (is_in_ad_block ? std::wstring(L"true") : std::wstring(L"false")) + L")");
-                    
-                    // Generate properly sequenced MPEG-TS black frame
-                    std::vector<uint8_t> black_frame_data = GenerateBlackFrame();
-                    
-                    // Validate black frame data
-                    if (black_frame_data.size() == 9400) { // 188 * 50 = 9400 bytes
-                        // Convert to char vector for buffer compatibility
-                        std::vector<char> char_data(black_frame_data.begin(), black_frame_data.end());
-                        
-                        // Add to buffer with rate limiting to prevent queue overflow
-                        size_t new_buffer_size;
-                        {
-                            std::lock_guard<std::mutex> lock(buffer_mutex);
-                            buffer_queue.push(char_data);
-                            new_buffer_size = buffer_queue.size();
-                        }
-                        
-                        new_segments_downloaded++;
-                        AddDebugLog(L"[AD_REPLACE] Black frame inserted successfully (size=" + 
-                                   std::to_wstring(black_frame_data.size()) + L" bytes), buffer size now: " + 
-                                   std::to_wstring(new_buffer_size));
-                        
-                        // Add small delay to match normal segment timing (~2 seconds)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-                    } else {
-                        AddDebugLog(L"[AD_REPLACE] ERROR: Black frame generation failed, unexpected size: " + 
-                                   std::to_wstring(black_frame_data.size()) + L" bytes");
-                    }
-                    continue;
-                }
                 
                 // Skip segments that aren't regular .ts/.aac files
                 if (seg.find(L"http") != 0) {
