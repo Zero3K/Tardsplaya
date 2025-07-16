@@ -49,10 +49,80 @@ std::wstring ExtractPath(const std::wstring& url) {
 // Global stream tracking for multi-stream debugging
 static std::atomic<int> g_active_streams(0);
 
+// MPEG-TS packet sequence tracking for proper stream continuity
+struct MPEGTSSequence {
+    static std::atomic<uint16_t> continuity_counter;
+    static std::atomic<uint64_t> pcr_base;
+    static std::atomic<uint64_t> pts_base;
+};
+
+std::atomic<uint16_t> MPEGTSSequence::continuity_counter{0};
+std::atomic<uint64_t> MPEGTSSequence::pcr_base{0};
+std::atomic<uint64_t> MPEGTSSequence::pts_base{0};
+
+// Generate properly formatted MPEG-TS black frame with correct sequencing
+static std::vector<uint8_t> GenerateBlackFrame() {
+    const size_t TS_PACKET_SIZE = 188;
+    const size_t PACKETS_PER_FRAME = 50;
+    const size_t FRAME_SIZE = TS_PACKET_SIZE * PACKETS_PER_FRAME;
+    
+    std::vector<uint8_t> frame_data(FRAME_SIZE);
+    
+    // Get next sequence values
+    uint16_t continuity = MPEGTSSequence::continuity_counter.fetch_add(1) & 0x0F;
+    uint64_t pcr = MPEGTSSequence::pcr_base.fetch_add(90000); // 90KHz clock, ~1 second increment
+    uint64_t pts = MPEGTSSequence::pts_base.fetch_add(90000);
+    
+    for (size_t i = 0; i < PACKETS_PER_FRAME; i++) {
+        uint8_t* packet = &frame_data[i * TS_PACKET_SIZE];
+        
+        // MPEG-TS packet header
+        packet[0] = 0x47; // Sync byte
+        packet[1] = 0x40; // Payload unit start indicator
+        packet[2] = 0x00; // PID (PAT)
+        packet[3] = 0x10 | (continuity & 0x0F); // Adaptation field control + continuity
+        
+        // Add PCR in adaptation field for first packet
+        if (i == 0) {
+            packet[3] |= 0x20; // Set adaptation field flag
+            packet[4] = 0x07; // Adaptation field length
+            packet[5] = 0x10; // PCR flag
+            
+            // PCR encoding (33-bit base + 6-bit extension)
+            uint64_t pcr_base_part = pcr / 300;
+            uint64_t pcr_ext = pcr % 300;
+            
+            packet[6] = (pcr_base_part >> 25) & 0xFF;
+            packet[7] = (pcr_base_part >> 17) & 0xFF;
+            packet[8] = (pcr_base_part >> 9) & 0xFF;
+            packet[9] = (pcr_base_part >> 1) & 0xFF;
+            packet[10] = ((pcr_base_part & 0x01) << 7) | 0x7E | ((pcr_ext >> 8) & 0x01);
+            packet[11] = pcr_ext & 0xFF;
+            
+            // Fill rest with stuffing bytes
+            for (size_t j = 12; j < TS_PACKET_SIZE; j++) {
+                packet[j] = 0xFF;
+            }
+        } else {
+            // Null packet for padding
+            packet[1] = 0x1F; // Null PID
+            packet[2] = 0xFF;
+            for (size_t j = 4; j < TS_PACKET_SIZE; j++) {
+                packet[j] = 0xFF;
+            }
+        }
+        
+        continuity = (continuity + 1) & 0x0F;
+    }
+    
+    return frame_data;
+}
+
 // Generate a simple text message for ad skip events
 static std::string GenerateAdSkipMessage() {
-    return "[AD SKIPPED] Commercial break in progress - content will resume automatically";
+    return "[AD REPLACED] Commercial break - displaying placeholder content with proper sequencing";
 }
+
 static std::mutex g_stream_mutex;
 
 // Robust HTTP server for localhost streaming with persistent buffering
@@ -404,7 +474,7 @@ struct AdBlockState {
     static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
 };
 
-// Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
+// Parse media segment URLs from m3u8 playlist, replacing ad segments with black frame markers
 // Returns pair of (segments, should_clear_buffer)
 static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist) {
     static AdBlockState ad_state; // Persistent state across playlist refreshes
@@ -487,7 +557,7 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
             
             if (ad_state.consecutive_skipped_segments >= AdBlockState::MAX_CONSECUTIVE_SKIPPED_SEGMENTS) {
                 AddDebugLog(L"[AD_REPLACE] Safety limit reached: " + std::to_wstring(ad_state.consecutive_skipped_segments) + 
-                           L" consecutive skipped segments, exiting ad block");
+                           L" consecutive replaced segments, exiting ad block");
                 ad_state.in_scte35_out = false;
                 ad_state.consecutive_skipped_segments = 0;
             } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
@@ -502,19 +572,20 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
         }
         
         if (should_skip_ad_segment) {
-            // Ad segment detected - skip it entirely to prevent audio/video sync issues
-            AddDebugLog(L"[AD_SKIP] Skipping ad segment to prevent A/V sync issues (skipped #" + 
+            // Ad segment detected - replace with black frame marker
+            AddDebugLog(L"[AD_REPLACE] Replacing ad segment with black frame (replaced #" + 
                        std::to_wstring(ad_state.consecutive_skipped_segments + 1) + L")");
             
-            // Don't add segment to the list - skip it completely
+            // Add black frame marker instead of skipping
+            segs.push_back(L"__BLACK_FRAME__");
             ad_state.consecutive_skipped_segments++;
             continue;
         }
         
         // Normal content segment - reset skip counter
         if (ad_state.consecutive_skipped_segments > 0) {
-            AddDebugLog(L"[AD_SKIP] Returning to normal content after skipping " + 
-                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments");
+            AddDebugLog(L"[AD_REPLACE] Returning to normal content after replacing " + 
+                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments with black frames");
             ad_state.consecutive_skipped_segments = 0;
         }
         
@@ -961,6 +1032,33 @@ bool BufferAndPipeStreamToPlayer(
                 //     AddDebugLog(L"[DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
                 //     break;
                 // }
+                
+                // Handle special markers
+                if (seg == L"__BLACK_FRAME__") {
+                    AddDebugLog(L"[AD_REPLACE] Inserting black frame for ad segment");
+                    
+                    // Generate properly sequenced MPEG-TS black frame
+                    std::vector<uint8_t> black_frame_data = GenerateBlackFrame();
+                    
+                    // Convert to char vector for buffer compatibility
+                    std::vector<char> char_data(black_frame_data.begin(), black_frame_data.end());
+                    
+                    // Add to buffer with rate limiting to prevent queue overflow
+                    size_t new_buffer_size;
+                    {
+                        std::lock_guard<std::mutex> lock(buffer_mutex);
+                        buffer_queue.push(char_data);
+                        new_buffer_size = buffer_queue.size();
+                    }
+                    
+                    new_segments_downloaded++;
+                    AddDebugLog(L"[AD_REPLACE] Black frame inserted successfully, buffer size now: " + 
+                               std::to_wstring(new_buffer_size));
+                    
+                    // Add small delay to match normal segment timing (~2 seconds)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+                    continue;
+                }
                 
                 // Skip segments that aren't regular .ts/.aac files
                 if (seg.find(L"http") != 0) {
