@@ -70,8 +70,14 @@ struct MPEGTSSequence {
     
     static void ExitAdBlock() {
         in_ad_block.store(false);
-        // Don't reset counters here - let them continue from current values
-        // This maintains continuity when returning to normal content
+        // Reset sequence to prevent discontinuity issues when returning to real content
+        // The artificial sequence numbers from black frames can confuse media players
+        continuity_counter.store(0);
+        auto now = std::chrono::steady_clock::now();
+        auto time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        uint64_t base_time = (time_ms * 90) % 0x1FFFFFFFF; // 90KHz clock, wrap at 33-bit boundary
+        pcr_base.store(base_time);
+        pts_base.store(base_time);
     }
 };
 
@@ -493,6 +499,7 @@ struct AdBlockState {
     int consecutive_skipped_segments = 0;
     std::chrono::steady_clock::time_point scte35_start_time;
     bool just_started_ad_block = false; // Flag to indicate we just started an ad block
+    bool just_exited_ad_block = false; // Flag to indicate we just exited an ad block
     static const int MAX_CONSECUTIVE_SKIPPED_SEGMENTS = 15; // ~30 seconds for 2-second segments
     static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
 };
@@ -503,6 +510,14 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
     static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segs;
     bool should_clear_buffer = false;
+    
+    // Check if we just exited an ad block - clear buffer to remove remaining black frames
+    if (ad_state.just_exited_ad_block) {
+        should_clear_buffer = true;
+        ad_state.just_exited_ad_block = false; // Reset flag
+        AddDebugLog(L"[AD_REPLACE] Just exited ad block, will clear buffer to remove remaining black frames");
+    }
+    
     std::istringstream ss(playlist);
     std::string line;
     
@@ -530,8 +545,10 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
                 ad_state.in_scte35_out = false;
                 ad_state.consecutive_skipped_segments = 0;
+                ad_state.just_exited_ad_block = true;
                 MPEGTSSequence::ExitAdBlock();
-                AddDebugLog(L"[AD_REPLACE] Found SCTE35-IN marker, exiting ad block and resetting sequence state");
+                should_clear_buffer = true; // Clear buffer to remove any remaining black frames
+                AddDebugLog(L"[AD_REPLACE] Found SCTE35-IN marker, exiting ad block, resetting sequence state and clearing buffer");
                 continue;
             }
             // Stitched ad segments (single segment ads)
@@ -585,6 +602,7 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
                            L" consecutive replaced segments, exiting ad block");
                 ad_state.in_scte35_out = false;
                 ad_state.consecutive_skipped_segments = 0;
+                ad_state.just_exited_ad_block = true;
                 MPEGTSSequence::ExitAdBlock();
             } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
                 AddDebugLog(L"[AD_REPLACE] Safety timeout reached: " + 
@@ -592,6 +610,7 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
                            L" seconds in ad block, exiting");
                 ad_state.in_scte35_out = false;
                 ad_state.consecutive_skipped_segments = 0;
+                ad_state.just_exited_ad_block = true;
                 MPEGTSSequence::ExitAdBlock();
             } else {
                 should_skip_ad_segment = true;
