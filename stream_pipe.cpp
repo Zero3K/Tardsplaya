@@ -49,44 +49,9 @@ std::wstring ExtractPath(const std::wstring& url) {
 // Global stream tracking for multi-stream debugging
 static std::atomic<int> g_active_streams(0);
 
-// Generate a minimal black frame for ad replacement
-// Creates a simple black MPEG-TS packet that media players can display
-static std::vector<uint8_t> GenerateBlackFrame() {
-    // Create a minimal MPEG-TS packet with black frame data
-    // This is a very basic implementation - just sends null/padding packets
-    std::vector<uint8_t> black_frame;
-    
-    // MPEG-TS packet size is 188 bytes
-    const size_t packet_size = 188;
-    const size_t num_packets = 50; // Send multiple packets for ~2 second duration
-    
-    black_frame.resize(packet_size * num_packets);
-    
-    for (size_t i = 0; i < num_packets; i++) {
-        size_t offset = i * packet_size;
-        
-        // MPEG-TS sync byte
-        black_frame[offset] = 0x47;
-        
-        // Transport Error Indicator (0), Payload Unit Start Indicator (0), Transport Priority (0)
-        // PID = 0x1FFF (null packets)
-        black_frame[offset + 1] = 0x1F;
-        black_frame[offset + 2] = 0xFF;
-        
-        // Transport Scrambling Control (00), Adaptation Field Control (01), Continuity Counter (0000)
-        black_frame[offset + 3] = 0x10;
-        
-        // Fill rest with 0xFF (standard for null packets)
-        std::fill(black_frame.begin() + offset + 4, black_frame.begin() + offset + packet_size, 0xFF);
-    }
-    
-    return black_frame;
-}
-
-// Generate a simple text message for ad replacement (fallback option)
-// Creates a simple text message that can be logged for user notification
+// Generate a simple text message for ad skip events
 static std::string GenerateAdSkipMessage() {
-    return "[AD SKIPPED] Commercial break in progress - displaying placeholder content";
+    return "[AD SKIPPED] Commercial break in progress - content will resume automatically";
 }
 static std::mutex g_stream_mutex;
 
@@ -428,18 +393,18 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     return base.substr(0, pos + 1) + rel;
 }
 
-// Ad block state tracking for preventing infinite black frames
+// Ad block state tracking for preventing infinite ad segment skipping
 struct AdBlockState {
     bool in_scte35_out = false;
     bool skip_next_segment = false; 
-    int consecutive_black_frames = 0;
+    int consecutive_skipped_segments = 0;
     std::chrono::steady_clock::time_point scte35_start_time;
     bool just_started_ad_block = false; // Flag to indicate we just started an ad block
-    static const int MAX_CONSECUTIVE_BLACK_FRAMES = 15; // ~30 seconds for 2-second segments
+    static const int MAX_CONSECUTIVE_SKIPPED_SEGMENTS = 15; // ~30 seconds for 2-second segments
     static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
 };
 
-// Parse media segment URLs from m3u8 playlist, replacing ad segments with placeholder
+// Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
 // Returns pair of (segments, should_clear_buffer)
 static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist) {
     static AdBlockState ad_state; // Persistent state across playlist refreshes
@@ -463,14 +428,14 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
                 }
                 ad_state.in_scte35_out = true;
                 ad_state.skip_next_segment = true;
-                ad_state.consecutive_black_frames = 0;
+                ad_state.consecutive_skipped_segments = 0;
                 ad_state.scte35_start_time = std::chrono::steady_clock::now();
                 continue;
             }
             // SCTE-35 ad marker detection (end of ad block)
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
                 ad_state.in_scte35_out = false;
-                ad_state.consecutive_black_frames = 0;
+                ad_state.consecutive_skipped_segments = 0;
                 AddDebugLog(L"[AD_REPLACE] Found SCTE35-IN marker, exiting ad block");
                 continue;
             }
@@ -508,50 +473,49 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
         }
         
         // This is a segment URL
-        bool should_replace_with_black_frame = false;
+        bool should_skip_ad_segment = false;
         
-        // Check if we should replace this segment with a black frame
+        // Check if we should skip this segment as an ad
         if (ad_state.skip_next_segment) {
             // Single ad segment (stitched ads, duration-based ads, etc.)
-            should_replace_with_black_frame = true;
+            should_skip_ad_segment = true;
             ad_state.skip_next_segment = false; // Reset after processing one segment
         } else if (ad_state.in_scte35_out) {
-            // SCTE35 ad block - check safety limits to prevent infinite black frames
+            // SCTE35 ad block - check safety limits to prevent infinite ad segment skipping
             auto current_time = std::chrono::steady_clock::now();
             auto ad_block_duration = current_time - ad_state.scte35_start_time;
             
-            if (ad_state.consecutive_black_frames >= AdBlockState::MAX_CONSECUTIVE_BLACK_FRAMES) {
-                AddDebugLog(L"[AD_REPLACE] Safety limit reached: " + std::to_wstring(ad_state.consecutive_black_frames) + 
-                           L" consecutive black frames, exiting ad block");
+            if (ad_state.consecutive_skipped_segments >= AdBlockState::MAX_CONSECUTIVE_SKIPPED_SEGMENTS) {
+                AddDebugLog(L"[AD_REPLACE] Safety limit reached: " + std::to_wstring(ad_state.consecutive_skipped_segments) + 
+                           L" consecutive skipped segments, exiting ad block");
                 ad_state.in_scte35_out = false;
-                ad_state.consecutive_black_frames = 0;
+                ad_state.consecutive_skipped_segments = 0;
             } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
                 AddDebugLog(L"[AD_REPLACE] Safety timeout reached: " + 
                            std::to_wstring(std::chrono::duration_cast<std::chrono::seconds>(ad_block_duration).count()) + 
                            L" seconds in ad block, exiting");
                 ad_state.in_scte35_out = false;
-                ad_state.consecutive_black_frames = 0;
+                ad_state.consecutive_skipped_segments = 0;
             } else {
-                should_replace_with_black_frame = true;
+                should_skip_ad_segment = true;
             }
         }
         
-        if (should_replace_with_black_frame) {
-            // Ad segment detected - replace with black frame marker
-            AddDebugLog(L"[AD_REPLACE] Ad segment detected, replacing with black frame (#" + 
-                       std::to_wstring(ad_state.consecutive_black_frames + 1) + L")");
+        if (should_skip_ad_segment) {
+            // Ad segment detected - skip it entirely to prevent audio/video sync issues
+            AddDebugLog(L"[AD_SKIP] Skipping ad segment to prevent A/V sync issues (skipped #" + 
+                       std::to_wstring(ad_state.consecutive_skipped_segments + 1) + L")");
             
-            // Add a special marker to signal black frame should be sent
-            segs.push_back(L"__BLACK_FRAME__");
-            ad_state.consecutive_black_frames++;
+            // Don't add segment to the list - skip it completely
+            ad_state.consecutive_skipped_segments++;
             continue;
         }
         
-        // Normal content segment - reset black frame counter
-        if (ad_state.consecutive_black_frames > 0) {
-            AddDebugLog(L"[AD_REPLACE] Returning to normal content after " + 
-                       std::to_wstring(ad_state.consecutive_black_frames) + L" black frames");
-            ad_state.consecutive_black_frames = 0;
+        // Normal content segment - reset skip counter
+        if (ad_state.consecutive_skipped_segments > 0) {
+            AddDebugLog(L"[AD_SKIP] Returning to normal content after skipping " + 
+                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments");
+            ad_state.consecutive_skipped_segments = 0;
         }
         
         // Should be a .ts or .aac segment
@@ -998,53 +962,9 @@ bool BufferAndPipeStreamToPlayer(
                 //     break;
                 // }
                 
-                // Handle ad segment replacement with black frame
-                if (seg == L"__BLACK_FRAME__") {
-                    AddDebugLog(L"[AD_REPLACE] Processing black frame for ad segment for " + channel_name);
-                    
-                    // Check current buffer size to prevent overflow from rapid black frame generation
-                    size_t current_buffer_size;
-                    {
-                        std::lock_guard<std::mutex> lock(buffer_mutex);
-                        current_buffer_size = buffer_queue.size();
-                    }
-                    
-                    // Limit black frames in buffer to prevent chunk queue buildup
-                    const size_t max_black_frames_in_buffer = 3;
-                    if (current_buffer_size >= max_black_frames_in_buffer) {
-                        AddDebugLog(L"[AD_REPLACE] Buffer has " + std::to_wstring(current_buffer_size) + 
-                                   L" segments, delaying black frame generation to prevent overflow for " + channel_name);
-                        
-                        // Add artificial delay to match normal segment timing (2-4 seconds)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-                        
-                        // Check if we should still process after delay
-                        if (cancel_token.load()) {
-                            break;
-                        }
-                    }
-                    
-                    // Generate black frame data
-                    std::vector<uint8_t> black_frame_data = GenerateBlackFrame();
-                    
-                    // Convert to char vector for buffer_queue compatibility
-                    std::vector<char> black_frame_char_data(black_frame_data.begin(), black_frame_data.end());
-                    
-                    // Also generate and log a user-friendly message
-                    std::string ad_message = GenerateAdSkipMessage();
-                    AddDebugLog(L"[AD_REPLACE] " + std::wstring(ad_message.begin(), ad_message.end()));
-                    
-                    // Add black frame to buffer
-                    {
-                        std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer_queue.push(std::move(black_frame_char_data));
-                    }
-                    
-                    // Mark as seen to avoid reprocessing
-                    seen_urls.insert(seg);
-                    new_segments_downloaded++;
-                    
-                    AddDebugLog(L"[AD_REPLACE] Black frame inserted successfully for " + channel_name);
+                // Skip segments that aren't regular .ts/.aac files
+                if (seg.find(L"http") != 0) {
+                    AddDebugLog(L"[DOWNLOAD] Skipping non-HTTP segment: " + seg.substr(0, 50) + L"...");
                     continue;
                 }
                 
