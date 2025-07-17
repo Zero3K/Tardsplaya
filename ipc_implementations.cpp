@@ -10,6 +10,15 @@
 #include <set>
 #include <sstream>
 #include <memory>
+#include <algorithm>
+
+// Undefine Windows min/max macros to avoid conflicts with std::min/std::max
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 
 #pragma comment(lib, "winhttp.lib")
 
