@@ -115,6 +115,7 @@
     <ClCompile Include="Tardsplaya.cpp" />
     <ClCompile Include="tlsclient\tlsclient.cpp" />
     <ClCompile Include="tlsclient\tlsclient_source.cpp" />
+    <ClCompile Include="tsduck_hls_wrapper.cpp" />
     <ClCompile Include="twitch_api.cpp" />
     <ClCompile Include="urlencode.cpp" />
   </ItemGroup>
@@ -131,6 +132,7 @@
     <ClInclude Include="stream_thread.h" />
     <ClInclude Include="tlsclient\tls.h" />
     <ClInclude Include="tlsclient\tlsclient.h" />
+    <ClInclude Include="tsduck_hls_wrapper.h" />
     <ClInclude Include="twitch_api.h" />
     <ClInclude Include="urlencode.h" />
   </ItemGroup>
