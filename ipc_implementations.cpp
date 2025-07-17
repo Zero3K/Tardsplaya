@@ -14,10 +14,20 @@ IPCMethod g_current_ipc_method = IPCMethod::ANONYMOUS_PIPES;
 
 // Forward declarations from stream_pipe.cpp
 extern void AddDebugLog(const std::wstring& message);
-extern bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token = nullptr);
+extern bool HttpGetText(const std::wstring& url, std::string& out);
 extern std::wstring JoinUrl(const std::wstring& base_url, const std::wstring& relative_url);
 extern bool ProcessStillRunning(HANDLE process_handle, const std::wstring& context, DWORD pid);
 extern void SetPlayerWindowTitle(DWORD process_id, const std::wstring& channel_name);
+
+// Wrapper function to handle cancel token parameter by ignoring it for now
+bool HttpGetTextWithCancel(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token) {
+    // For now, ignore the cancel token and use the global function
+    // In a full implementation, we would check cancel_token periodically
+    if (cancel_token && cancel_token->load()) {
+        return false;
+    }
+    return HttpGetText(url, out);
+}
 
 // Define WriteFileWithTimeout if not available
 BOOL WriteFileWithTimeout(HANDLE handle, const void* buffer, DWORD bytes_to_write, DWORD* bytes_written, DWORD timeout_ms) {
@@ -232,7 +242,7 @@ bool BufferAndMailSlotStreamToPlayer(
         return false;
     }
     
-    if (!HttpGetText(playlist_url, master, &cancel_token)) {
+    if (!HttpGetText(playlist_url, master)) {
         AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Failed to download master playlist");
         CloseHandle(mailslot_client);
         CloseHandle(mailslot_server);
@@ -340,7 +350,7 @@ bool BufferAndNamedPipeStreamToPlayer(
         return false;
     }
     
-    if (!HttpGetText(playlist_url, master, &cancel_token)) {
+    if (!HttpGetText(playlist_url, master)) {
         AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Failed to download master playlist");
         CloseHandle(server_handle);
         return false;

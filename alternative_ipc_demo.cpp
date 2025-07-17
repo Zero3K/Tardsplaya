@@ -5,6 +5,9 @@
 #include <thread>
 #include <fstream>
 
+// Forward declaration for AddDebugLog defined in Tardsplaya.cpp or stream_thread.cpp
+extern void AddDebugLog(const std::wstring& message);
+
 // MailSlot message size - using large size for individual mailslots
 const DWORD MAILSLOT_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB - large enough for typical video segments
 

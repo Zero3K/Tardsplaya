@@ -105,6 +105,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="alternative_ipc_demo.cpp" />
     <ClCompile Include="favorites.cpp" />
     <ClCompile Include="ipc_implementations.cpp" />
     <ClCompile Include="mailslot_comparison.cpp" />
@@ -120,6 +121,7 @@
     <ClCompile Include="urlencode.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="alternative_ipc_demo.h" />
     <ClInclude Include="favorites.h" />
     <ClInclude Include="ipc_implementations.h" />
     <ClInclude Include="json_minimal.h" />
