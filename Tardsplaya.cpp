@@ -1432,15 +1432,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             break;
         case IDC_IPC_ANONYMOUS:
             g_current_ipc_method = IPCMethod::ANONYMOUS_PIPES;
-            AddDebugLog(L"[IPC] Switched to Anonymous Pipes mode");
+            AddDebugLog(L"[IPC-METHOD] User selected: Anonymous Pipes");
             break;
         case IDC_IPC_MAILSLOTS:
             g_current_ipc_method = IPCMethod::MAILSLOTS;
-            AddDebugLog(L"[IPC] Switched to MailSlots mode");
+            AddDebugLog(L"[IPC-METHOD] User selected: MailSlots");
             break;
         case IDC_IPC_NAMED_PIPES:
             g_current_ipc_method = IPCMethod::NAMED_PIPES;
-            AddDebugLog(L"[IPC] Switched to Named Pipes mode");
+            AddDebugLog(L"[IPC-METHOD] User selected: Named Pipes");
             break;
         case IDC_FAVORITES_LIST:
             if (HIWORD(wParam) == LBN_DBLCLK) {
@@ -1555,6 +1555,24 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     g_hMainWnd = hwnd;
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
+    
+    // Log initial IPC method
+    std::wstring initial_method;
+    switch (g_current_ipc_method) {
+        case IPCMethod::ANONYMOUS_PIPES:
+            initial_method = L"Anonymous Pipes";
+            break;
+        case IPCMethod::MAILSLOTS:
+            initial_method = L"MailSlots";
+            break;
+        case IPCMethod::NAMED_PIPES:
+            initial_method = L"Named Pipes";
+            break;
+        default:
+            initial_method = L"Unknown";
+            break;
+    }
+    AddDebugLog(L"[IPC-METHOD] Application started with initial method: " + initial_method);
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) {
         if (!g_hAccel || !TranslateAccelerator(g_hMainWnd, g_hAccel, &msg)) {

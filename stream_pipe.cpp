@@ -1217,18 +1217,18 @@ bool BufferAndPipeStreamToPlayer(
     // Use the globally configured IPC method
     switch (g_current_ipc_method) {
         case IPCMethod::MAILSLOTS:
-            AddDebugLog(L"BufferAndPipeStreamToPlayer: Using MailSlot-based IPC for " + channel_name);
+            AddDebugLog(L"[IPC-METHOD] Starting stream with MailSlots for " + channel_name);
             return BufferAndMailSlotStreamToPlayer(player_path, playlist_url, cancel_token,
                                                  buffer_segments, channel_name, chunk_count, selected_quality);
         
         case IPCMethod::NAMED_PIPES:
-            AddDebugLog(L"BufferAndPipeStreamToPlayer: Using Named Pipe-based IPC for " + channel_name);
+            AddDebugLog(L"[IPC-METHOD] Starting stream with Named Pipes for " + channel_name);
             return BufferAndNamedPipeStreamToPlayer(player_path, playlist_url, cancel_token,
                                                   buffer_segments, channel_name, chunk_count, selected_quality);
         
         case IPCMethod::ANONYMOUS_PIPES:
         default:
-            AddDebugLog(L"BufferAndPipeStreamToPlayer: Using Anonymous Pipe-based IPC (original) for " + channel_name);
+            AddDebugLog(L"[IPC-METHOD] Starting stream with Anonymous Pipes for " + channel_name);
             return BufferAndPipeStreamToPlayerOriginal(player_path, playlist_url, cancel_token,
                                                      buffer_segments, channel_name, chunk_count, selected_quality);
     }

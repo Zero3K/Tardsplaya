@@ -115,7 +115,7 @@ bool BufferAndMailSlotStreamToPlayer(
     std::atomic<int>* chunk_count,
     const std::wstring& selected_quality
 ) {
-    AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Starting MailSlot-based streaming for " + channel_name);
+    AddDebugLog(L"[IPC-METHOD] MailSlot implementation starting for " + channel_name);
     
     // Generate unique MailSlot name
     int mailslot_id = ++g_mailslot_counter;
@@ -277,7 +277,7 @@ bool BufferAndNamedPipeStreamToPlayer(
     std::atomic<int>* chunk_count,
     const std::wstring& selected_quality
 ) {
-    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Starting Named Pipe-based streaming for " + channel_name);
+    AddDebugLog(L"[IPC-METHOD] Named Pipe implementation starting for " + channel_name);
     
     // Generate unique pipe name
     int pipe_id = ++g_namedpipe_counter;
@@ -387,7 +387,14 @@ bool StreamToPlayerWithIPC(
     std::atomic<int>* chunk_count,
     const std::wstring& selected_quality
 ) {
-    AddDebugLog(L"StreamToPlayerWithIPC: Using IPC method " + std::to_wstring((int)method) + L" for " + channel_name);
+    std::wstring method_name;
+    switch (method) {
+        case IPCMethod::ANONYMOUS_PIPES: method_name = L"Anonymous Pipes"; break;
+        case IPCMethod::MAILSLOTS: method_name = L"MailSlots"; break;
+        case IPCMethod::NAMED_PIPES: method_name = L"Named Pipes"; break;
+        default: method_name = L"Unknown"; break;
+    }
+    AddDebugLog(L"[IPC-METHOD] StreamToPlayerWithIPC using " + method_name + L" for " + channel_name);
     
     switch (method) {
         case IPCMethod::MAILSLOTS:
