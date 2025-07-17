@@ -515,6 +515,7 @@ struct BufferedSegment {
 
 // Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
 // Returns pair of (segments, should_clear_buffer)
+// Note: Frame numbers are assigned during download, not during parsing
 static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist, FrameTracker* frame_tracker = nullptr) {
     static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segs;
@@ -629,9 +630,7 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
             if (frame_tracker) {
                 frame_tracker->total_segments_processed++;
                 frame_tracker->total_ad_segments_skipped++;
-                AddDebugLog(L"[FRAME_TAG] Frame #" + std::to_wstring(++frame_tracker->frame_number) + 
-                           L" [AD_PLACEHOLDER] - Total processed: " + std::to_wstring(frame_tracker->total_segments_processed) +
-                           L", Ad segments skipped: " + std::to_wstring(frame_tracker->total_ad_segments_skipped));
+                // Note: Frame number incremented during actual ad placeholder generation, not here
             }
             
             // Use a placeholder marker that will generate minimal content
@@ -666,9 +665,7 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
             }
             frame_tracker->last_segment_url = current_url;
             
-            AddDebugLog(L"[FRAME_TAG] Frame #" + std::to_wstring(++frame_tracker->frame_number) + 
-                       L" [CONTENT] - Total processed: " + std::to_wstring(frame_tracker->total_segments_processed) +
-                       L", Success rate: " + std::to_wstring(frame_tracker->GetDownloadSuccessRate() * 100.0) + L"%");
+            // Note: Frame number incremented during actual segment download, not here
         }
         
         segs.push_back(wline);
@@ -1143,7 +1140,10 @@ bool BufferAndPipeStreamToPlayer(
                         uint64_t current_frame_number;
                         {
                             std::lock_guard<std::mutex> frame_lock(frame_tracker_mutex);
-                            current_frame_number = frame_tracker.frame_number;
+                            current_frame_number = ++frame_tracker.frame_number; // Increment frame number for this ad placeholder
+                            AddDebugLog(L"[FRAME_TAG] Frame #" + std::to_wstring(current_frame_number) + 
+                                       L" [AD_PLACEHOLDER] - Total processed: " + std::to_wstring(frame_tracker.total_segments_processed) +
+                                       L", Ad segments skipped: " + std::to_wstring(frame_tracker.total_ad_segments_skipped));
                         }
                         buffer_queue.emplace(std::move(placeholder_data), current_frame_number, true);
                     }
@@ -1259,7 +1259,10 @@ bool BufferAndPipeStreamToPlayer(
                         std::lock_guard<std::mutex> lock(frame_tracker_mutex);
                         frame_tracker.total_segments_downloaded++;
                         frame_tracker.RecordSegmentDownload(download_duration);
-                        current_frame_number = frame_tracker.frame_number;
+                        current_frame_number = ++frame_tracker.frame_number; // Increment frame number for this segment
+                        AddDebugLog(L"[FRAME_TAG] Frame #" + std::to_wstring(current_frame_number) + 
+                                   L" [CONTENT] - Total processed: " + std::to_wstring(frame_tracker.total_segments_processed) +
+                                   L", Success rate: " + std::to_wstring(frame_tracker.GetDownloadSuccessRate() * 100.0) + L"%");
                     }
                     
                     // Add to buffer with frame number
