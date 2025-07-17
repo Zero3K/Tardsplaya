@@ -112,13 +112,8 @@ void PlaylistParser::ParseInfoLine(const std::string& line, MediaSegment& curren
         current_segment.precise_duration = current_segment.duration;
         current_segment.target_duration = duration_seconds;
         
-        // TSDuck-style ad detection based on suspicious durations
-        if (std::abs(duration_seconds - 2.001) < 0.01 || 
-            std::abs(duration_seconds - 2.002) < 0.01 ||
-            std::abs(duration_seconds - 30.0) < 0.1) {
-            current_segment.is_ad_segment = true;
-            has_ad_markers_ = true;
-        }
+        // Conservative ad detection - only flag based on explicit markers, not duration
+        // Duration-based detection was too aggressive and flagged normal segments
     }
     catch (const std::exception&) {
         // Default to target duration if parsing fails
@@ -170,13 +165,10 @@ double PlaylistParser::ExtractFloatFromTag(const std::string& line, const std::s
 }
 
 bool PlaylistParser::ContainsAdMarkers(const std::string& line) {
-    // TSDuck-inspired comprehensive ad marker detection
+    // Conservative ad marker detection - only check for explicit ad/SCTE markers
     const std::vector<std::string> ad_patterns = {
-        "stitched", "STITCHED",
-        "ad-break", "AD-BREAK", 
-        "commercial", "COMMERCIAL",
-        "advertisement", "ADVERTISEMENT",
         "EXT-X-CUE-OUT", "EXT-X-CUE-IN",
+        "EXT-X-SCTE35-OUT", "EXT-X-SCTE35-IN", 
         "SCTE-35", "scte-35"
     };
     
@@ -214,30 +206,17 @@ void PlaylistParser::CalculatePreciseTiming() {
 }
 
 void PlaylistParser::AnalyzeAdPatterns() {
-    // TSDuck-style ad pattern analysis for better detection
+    // Conservative ad pattern analysis - only detect based on explicit markers
+    // Previous logic was too aggressive and flagged normal segments as ads
+    
     for (size_t i = 0; i < segments_.size(); ++i) {
         auto& segment = segments_[i];
         
-        // Look for ad pattern sequences
-        if (i > 0 && i < segments_.size() - 1) {
-            const auto& prev = segments_[i-1];
-            const auto& next = segments_[i+1];
-            
-            // Pattern: Discontinuity followed by different duration segments often indicates ads
-            if (segment.has_discontinuity && 
-                std::abs(segment.target_duration - prev.target_duration) > 0.5) {
-                segment.is_ad_segment = true;
-                has_ad_markers_ = true;
-            }
-            
-            // Pattern: Segments with significantly different durations
-            if (segment.target_duration > 0 && prev.target_duration > 0) {
-                double duration_ratio = segment.target_duration / prev.target_duration;
-                if (duration_ratio > 15.0 || duration_ratio < 0.067) { // 30s vs 2s segments
-                    segment.is_ad_segment = true;
-                    has_ad_markers_ = true;
-                }
-            }
+        // Only flag as ad if there are explicit SCTE-35 markers
+        // Don't use duration or discontinuity-based detection as it's unreliable
+        if (segment.has_scte35_out && !segment.has_scte35_in) {
+            segment.is_ad_segment = true;
+            has_ad_markers_ = true;
         }
     }
 }
