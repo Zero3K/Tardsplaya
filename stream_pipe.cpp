@@ -1443,7 +1443,7 @@ bool BufferAndPipeStreamToPlayer(
         auto feeder_startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(feeder_start_time - thread_start_time);
         
         bool started = false;
-        const size_t min_buffer_size = 3; // Minimum 3 segments for smooth streaming
+        const size_t min_buffer_size = 1; // Minimum 1 segment to avoid spam warnings
         int empty_buffer_count = 0;
         const int max_empty_waits = 100; // 5 seconds max wait for data (50ms * 100)
         
@@ -1502,12 +1502,12 @@ bool BufferAndPipeStreamToPlayer(
                     // When buffer is low, be more aggressive about feeding segments
                     max_segments_to_feed = std::min((int)buffer_queue.size(), 3); // Feed up to 3 segments when low
                     
-                    AddDebugLog(L"[FEEDER] Buffer low (" + std::to_wstring(buffer_size) + 
-                               L" < " + std::to_wstring(min_buffer_size) + 
-                               L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
-                    
-                    // Warning if buffer reaches 0
+                    // Only log buffer low warning when buffer is actually empty
                     if (buffer_size == 0) {
+                        AddDebugLog(L"[FEEDER] Buffer low (" + std::to_wstring(buffer_size) + 
+                                   L" < " + std::to_wstring(min_buffer_size) + 
+                                   L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
+                        
                         AddDebugLog(L"[FEEDER] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
                         // Signal download thread to urgently fetch more segments
                         urgent_download_needed.store(true);
