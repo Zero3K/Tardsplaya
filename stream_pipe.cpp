@@ -406,9 +406,56 @@ struct AdBlockState {
     static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
 };
 
+// Frame Number Tagging for lag diagnosis and performance monitoring
+struct FrameTracker {
+    uint64_t frame_number = 0;                                      // Sequential frame counter
+    uint64_t total_segments_processed = 0;                          // Total segments seen
+    uint64_t total_segments_downloaded = 0;                         // Total segments successfully downloaded
+    uint64_t total_ad_segments_skipped = 0;                         // Total ad segments replaced
+    std::chrono::steady_clock::time_point stream_start_time;        // When streaming started
+    std::chrono::steady_clock::time_point last_segment_time;        // Last segment download time
+    std::vector<std::chrono::milliseconds> download_times;          // Recent download times (rolling window)
+    uint64_t sequence_gaps = 0;                                     // Number of detected sequence gaps
+    std::string last_segment_url;                                   // Last processed segment URL for gap detection
+    
+    static const size_t MAX_TIMING_HISTORY = 50;                   // Keep last 50 download times
+    
+    void RecordSegmentDownload(const std::chrono::milliseconds& download_time) {
+        download_times.push_back(download_time);
+        if (download_times.size() > MAX_TIMING_HISTORY) {
+            download_times.erase(download_times.begin());
+        }
+        last_segment_time = std::chrono::steady_clock::now();
+    }
+    
+    double GetAverageDownloadTime() const {
+        if (download_times.empty()) return 0.0;
+        auto total = std::chrono::milliseconds(0);
+        for (const auto& time : download_times) {
+            total += time;
+        }
+        return static_cast<double>(total.count()) / download_times.size();
+    }
+    
+    std::chrono::milliseconds GetMaxDownloadTime() const {
+        if (download_times.empty()) return std::chrono::milliseconds(0);
+        return *std::max_element(download_times.begin(), download_times.end());
+    }
+    
+    std::chrono::seconds GetStreamDuration() const {
+        auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration_cast<std::chrono::seconds>(now - stream_start_time);
+    }
+    
+    double GetDownloadSuccessRate() const {
+        if (total_segments_processed == 0) return 1.0;
+        return static_cast<double>(total_segments_downloaded) / total_segments_processed;
+    }
+};
+
 // Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
 // Returns pair of (segments, should_clear_buffer)
-static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist) {
+static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist, FrameTracker* frame_tracker = nullptr) {
     static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segs;
     bool should_clear_buffer = false;
@@ -518,6 +565,15 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
             AddDebugLog(L"[AD_SKIP] Replacing ad segment with placeholder (replaced #" + 
                        std::to_wstring(ad_state.consecutive_skipped_segments + 1) + L")");
             
+            // Frame tracking for ad segments
+            if (frame_tracker) {
+                frame_tracker->total_segments_processed++;
+                frame_tracker->total_ad_segments_skipped++;
+                AddDebugLog(L"[FRAME_TAG] Frame #" + std::to_wstring(++frame_tracker->frame_number) + 
+                           L" [AD_PLACEHOLDER] - Total processed: " + std::to_wstring(frame_tracker->total_segments_processed) +
+                           L", Ad segments skipped: " + std::to_wstring(frame_tracker->total_ad_segments_skipped));
+            }
+            
             // Use a placeholder marker that will generate minimal content
             segs.push_back(L"__AD_PLACEHOLDER__");
             ad_state.consecutive_skipped_segments++;
@@ -533,6 +589,28 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
         
         // Should be a .ts or .aac segment
         std::wstring wline(line.begin(), line.end());
+        
+        // Frame tracking for normal segments
+        if (frame_tracker) {
+            frame_tracker->total_segments_processed++;
+            
+            // Simple sequence gap detection based on URL patterns
+            std::string current_url(line);
+            if (!frame_tracker->last_segment_url.empty()) {
+                // Extract sequence numbers from URLs if possible (basic heuristic)
+                // This is a simple approach - real HLS would parse #EXT-X-MEDIA-SEQUENCE
+                if (current_url.find(frame_tracker->last_segment_url.substr(0, 50)) == std::string::npos) {
+                    // Different URL pattern might indicate a gap or quality change
+                    frame_tracker->sequence_gaps++;
+                }
+            }
+            frame_tracker->last_segment_url = current_url;
+            
+            AddDebugLog(L"[FRAME_TAG] Frame #" + std::to_wstring(++frame_tracker->frame_number) + 
+                       L" [CONTENT] - Total processed: " + std::to_wstring(frame_tracker->total_segments_processed) +
+                       L", Success rate: " + std::to_wstring(frame_tracker->GetDownloadSuccessRate() * 100.0) + L"%");
+        }
+        
         segs.push_back(wline);
     }
     return std::make_pair(segs, should_clear_buffer);
@@ -874,11 +952,16 @@ bool BufferAndPipeStreamToPlayer(
         auto thread_actual_start = std::chrono::high_resolution_clock::now();
         auto startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(thread_actual_start - thread_start_time);
         
+        // Initialize frame tracker for lag diagnosis and performance monitoring
+        FrameTracker frame_tracker;
+        frame_tracker.stream_start_time = thread_actual_start;
+        
         int consecutive_errors = 0;
         const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
         
         AddDebugLog(L"[DOWNLOAD] Starting download thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(startup_delay.count()) + L"ms");
+        AddDebugLog(L"[FRAME_TAG] Frame tracking initialized for " + channel_name);
         
         while (true) {
             // Check for urgent download request first
@@ -938,7 +1021,7 @@ bool BufferAndPipeStreamToPlayer(
                 break;
             }
 
-            auto parse_result = ParseSegments(playlist);
+            auto parse_result = ParseSegments(playlist, &frame_tracker);
             auto segments = parse_result.first;
             bool should_clear_buffer = parse_result.second;
             
@@ -978,6 +1061,9 @@ bool BufferAndPipeStreamToPlayer(
                 if (seg == L"__AD_PLACEHOLDER__") {
                     AddDebugLog(L"[AD_SKIP] Generating minimal placeholder content for ad segment");
                     
+                    // Track timing for placeholder generation
+                    auto placeholder_start = std::chrono::steady_clock::now();
+                    
                     // Generate minimal valid content (just a few null bytes to maintain timing)
                     std::vector<char> placeholder_data(1024, 0); // 1KB of null data
                     
@@ -987,8 +1073,16 @@ bool BufferAndPipeStreamToPlayer(
                         buffer_queue.push(std::move(placeholder_data));
                     }
                     
+                    auto placeholder_end = std::chrono::steady_clock::now();
+                    auto placeholder_duration = std::chrono::duration_cast<std::chrono::milliseconds>(placeholder_end - placeholder_start);
+                    
+                    // Record placeholder as successful "download" for timing purposes
+                    frame_tracker.total_segments_downloaded++;
+                    frame_tracker.RecordSegmentDownload(placeholder_duration);
+                    
                     new_segments_downloaded++;
                     AddDebugLog(L"[AD_SKIP] Placeholder content added to buffer for " + channel_name);
+                    AddDebugLog(L"[FRAME_TAG] Ad placeholder generated in " + std::to_wstring(placeholder_duration.count()) + L"ms");
                     continue;
                 }
                 
@@ -1064,8 +1158,10 @@ bool BufferAndPipeStreamToPlayer(
                 std::wstring seg_url = JoinUrl(media_playlist_url, seg);
                 std::vector<char> seg_data;
                 
-                // Download with retries
+                // Download with retries and timing tracking
                 bool download_ok = false;
+                auto download_start = std::chrono::steady_clock::now();
+                
                 for (int retry = 0; retry < 3; ++retry) {
                     if (HttpGetBinary(seg_url, seg_data, 1, &cancel_token)) {
                         download_ok = true;
@@ -1074,23 +1170,63 @@ bool BufferAndPipeStreamToPlayer(
                     if (!download_running || cancel_token.load()) break;
                     std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 }
+                
+                auto download_end = std::chrono::steady_clock::now();
+                auto download_duration = std::chrono::duration_cast<std::chrono::milliseconds>(download_end - download_start);
 
                 if (download_ok && !seg_data.empty()) {
+                    // Record successful download timing
+                    frame_tracker.total_segments_downloaded++;
+                    frame_tracker.RecordSegmentDownload(download_duration);
+                    
                     // Add to buffer
                     {
                         std::lock_guard<std::mutex> lock(buffer_mutex);
                         buffer_queue.push(std::move(seg_data));
                     }
                     new_segments_downloaded++;
+                    
+                    // Enhanced logging with frame tracking and performance metrics
                     AddDebugLog(L"[DOWNLOAD] Downloaded segment " + std::to_wstring(new_segments_downloaded) + 
                                L", buffer=" + std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
+                    AddDebugLog(L"[FRAME_TAG] Frame download time: " + std::to_wstring(download_duration.count()) + L"ms" +
+                               L", Avg: " + std::to_wstring(frame_tracker.GetAverageDownloadTime()) + L"ms" +
+                               L", Max: " + std::to_wstring(frame_tracker.GetMaxDownloadTime().count()) + L"ms" +
+                               L", Success rate: " + std::to_wstring(frame_tracker.GetDownloadSuccessRate() * 100.0) + L"%");
                 } else {
                     AddDebugLog(L"[DOWNLOAD] FAILED to download segment after retries for " + channel_name);
+                    AddDebugLog(L"[FRAME_TAG] Frame download FAILED after " + std::to_wstring(download_duration.count()) + L"ms");
                 }
             }
             
             AddDebugLog(L"[DOWNLOAD] Segment batch complete - downloaded " + std::to_wstring(new_segments_downloaded) + 
                        L" new segments for " + channel_name);
+            
+            // Periodic frame tracking performance summary (every 30 segments processed)
+            if (frame_tracker.frame_number > 0 && frame_tracker.frame_number % 30 == 0) {
+                auto stream_duration = frame_tracker.GetStreamDuration();
+                AddDebugLog(L"[FRAME_TAG] *** PERFORMANCE SUMMARY ***");
+                AddDebugLog(L"[FRAME_TAG] Stream: " + channel_name + L", Duration: " + std::to_wstring(stream_duration.count()) + L"s");
+                AddDebugLog(L"[FRAME_TAG] Total frames: " + std::to_wstring(frame_tracker.frame_number) + 
+                           L", Processed: " + std::to_wstring(frame_tracker.total_segments_processed) +
+                           L", Downloaded: " + std::to_wstring(frame_tracker.total_segments_downloaded));
+                AddDebugLog(L"[FRAME_TAG] Ad segments skipped: " + std::to_wstring(frame_tracker.total_ad_segments_skipped) +
+                           L", Sequence gaps: " + std::to_wstring(frame_tracker.sequence_gaps));
+                AddDebugLog(L"[FRAME_TAG] Download times - Avg: " + std::to_wstring(frame_tracker.GetAverageDownloadTime()) + L"ms" +
+                           L", Max: " + std::to_wstring(frame_tracker.GetMaxDownloadTime().count()) + L"ms");
+                AddDebugLog(L"[FRAME_TAG] Success rate: " + std::to_wstring(frame_tracker.GetDownloadSuccessRate() * 100.0) + L"%");
+                
+                // Lag warning detection
+                if (frame_tracker.GetAverageDownloadTime() > 2000.0) {
+                    AddDebugLog(L"[FRAME_TAG] *** LAG WARNING *** Average download time > 2s, may cause buffering issues");
+                }
+                if (frame_tracker.GetDownloadSuccessRate() < 0.9) {
+                    AddDebugLog(L"[FRAME_TAG] *** RELIABILITY WARNING *** Download success rate < 90%, may cause playback issues");
+                }
+                if (frame_tracker.sequence_gaps > 5) {
+                    AddDebugLog(L"[FRAME_TAG] *** CONTINUITY WARNING *** Multiple sequence gaps detected, stream may be unstable");
+                }
+            }
             
             // Poll playlist more frequently for live streams or when urgent download is needed
             urgent_needed = urgent_download_needed.load();
@@ -1102,6 +1238,24 @@ bool BufferAndPipeStreamToPlayer(
                 AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
                 std::this_thread::sleep_for(std::chrono::milliseconds(1500));
             }
+        }
+        
+        // Final frame tracking performance summary
+        auto final_stream_duration = frame_tracker.GetStreamDuration();
+        AddDebugLog(L"[FRAME_TAG] *** FINAL PERFORMANCE SUMMARY ***");
+        AddDebugLog(L"[FRAME_TAG] Stream: " + channel_name + L", Total duration: " + std::to_wstring(final_stream_duration.count()) + L"s");
+        AddDebugLog(L"[FRAME_TAG] Total frames processed: " + std::to_wstring(frame_tracker.frame_number));
+        AddDebugLog(L"[FRAME_TAG] Segments processed: " + std::to_wstring(frame_tracker.total_segments_processed) + 
+                   L", Downloaded: " + std::to_wstring(frame_tracker.total_segments_downloaded));
+        AddDebugLog(L"[FRAME_TAG] Ad segments skipped: " + std::to_wstring(frame_tracker.total_ad_segments_skipped) +
+                   L", Sequence gaps detected: " + std::to_wstring(frame_tracker.sequence_gaps));
+        AddDebugLog(L"[FRAME_TAG] Download performance - Avg: " + std::to_wstring(frame_tracker.GetAverageDownloadTime()) + L"ms" +
+                   L", Max: " + std::to_wstring(frame_tracker.GetMaxDownloadTime().count()) + L"ms");
+        AddDebugLog(L"[FRAME_TAG] Final success rate: " + std::to_wstring(frame_tracker.GetDownloadSuccessRate() * 100.0) + L"%");
+        
+        if (frame_tracker.frame_number > 0) {
+            double frames_per_second = static_cast<double>(frame_tracker.frame_number) / final_stream_duration.count();
+            AddDebugLog(L"[FRAME_TAG] Average frame rate: " + std::to_wstring(frames_per_second) + L" frames/second");
         }
         
         // Log exactly why the download loop ended
