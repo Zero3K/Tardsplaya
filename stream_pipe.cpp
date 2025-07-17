@@ -1049,8 +1049,19 @@ bool BufferAndPipeStreamToPlayer(
                 if (seg == L"__AD_PLACEHOLDER__") {
                     AddDebugLog(L"[AD_SKIP] Generating minimal placeholder content for ad segment");
                     
-                    // Generate minimal valid content (just a few null bytes to maintain timing)
-                    std::vector<char> placeholder_data(1024, 0); // 1KB of null data
+                    // Generate larger placeholder content to better match segment timing
+                    // Use ~50KB to slow down consumption and maintain buffer stability
+                    std::vector<char> placeholder_data(50 * 1024, 0); // 50KB of null data
+                    
+                    // Immediately boost buffer target when processing ad placeholders
+                    int current_target = dynamic_target_buffer.load();
+                    int boosted_target = std::max(current_target, 20); // Ensure at least 20 segments during ads
+                    if (boosted_target > current_target) {
+                        dynamic_target_buffer.store(boosted_target);
+                        dynamic_max_buffer.store(boosted_target * 2);
+                        AddDebugLog(L"[AD_SKIP] Emergency buffer boost: target=" + std::to_wstring(boosted_target) + 
+                                   L" (was " + std::to_wstring(current_target) + L") for " + channel_name);
+                    }
                     
                     // Add to buffer
                     {
@@ -1264,12 +1275,18 @@ bool BufferAndPipeStreamToPlayer(
                                L" < " + std::to_wstring(min_buffer_size) + 
                                L"), feeding " + std::to_wstring(max_segments_to_feed) + L" segments for " + channel_name);
                     
-                    // Warning if buffer reaches 0
+                    // Warning if buffer reaches 0 - implement emergency pause
                     if (buffer_size == 0) {
                         AddDebugLog(L"[FEEDER] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
                         // Signal download thread to urgently fetch more segments
                         urgent_download_needed.store(true);
                         AddDebugLog(L"[FEEDER] Triggered urgent download to refill empty buffer for " + channel_name);
+                        
+                        // Emergency pause - wait for buffer to rebuild before feeding more
+                        // This prevents rapid cycling when buffer stays at 0
+                        AddDebugLog(L"[FEEDER] Emergency pause - waiting for buffer rebuild for " + channel_name);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // 1 second pause
+                        continue; // Skip feeding this cycle to allow buffer to rebuild
                     }
                 }
                 
@@ -1356,8 +1373,30 @@ bool BufferAndPipeStreamToPlayer(
                 AddDebugLog(L"[IPC] Fed " + std::to_wstring(segments_processed) + 
                            L" segments to " + channel_name + L", buffer=" + std::to_wstring(remaining_buffer));
                 
-                // Shorter wait when actively feeding to maintain flow
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                // Adaptive wait time based on segment type
+                // Slower feeding when processing likely placeholder content (small segments)
+                bool likely_placeholder = false;
+                if (!segments_to_feed.empty()) {
+                    size_t avg_segment_size = 0;
+                    for (const auto& seg : segments_to_feed) {
+                        avg_segment_size += seg.size();
+                    }
+                    avg_segment_size /= segments_to_feed.size();
+                    
+                    // If average segment size is small (< 100KB), likely placeholder content
+                    if (avg_segment_size < 100 * 1024) {
+                        likely_placeholder = true;
+                    }
+                }
+                
+                if (likely_placeholder) {
+                    // Slower feeding for placeholder content to prevent rapid buffer drain
+                    AddDebugLog(L"[IPC] Placeholder content detected, using slower feeding rate for " + channel_name);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300)); // Slower for ads
+                } else {
+                    // Normal feeding rate for regular content
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
             } else {
                 // No data available - wait for more data
                 empty_buffer_count++;
