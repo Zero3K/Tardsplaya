@@ -1007,14 +1007,20 @@ bool BufferAndPipeStreamToPlayer(
     auto thread_start_time = std::chrono::high_resolution_clock::now();
     AddDebugLog(L"[THREAD] Creating download and feeder threads for " + channel_name);
 
+    // Initialize frame tracker for lag diagnosis and performance monitoring (shared between threads)
+    FrameTracker frame_tracker;
+    std::mutex frame_tracker_mutex; // Synchronize access between download and feeder threads
+
     // Background playlist monitor and segment downloader thread
     std::thread download_thread([&]() {
         auto thread_actual_start = std::chrono::high_resolution_clock::now();
         auto startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(thread_actual_start - thread_start_time);
         
-        // Initialize frame tracker for lag diagnosis and performance monitoring
-        FrameTracker frame_tracker;
-        frame_tracker.stream_start_time = thread_actual_start;
+        // Initialize frame tracker start time
+        {
+            std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+            frame_tracker.stream_start_time = thread_actual_start;
+        }
         
         int consecutive_errors = 0;
         const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
@@ -1081,7 +1087,11 @@ bool BufferAndPipeStreamToPlayer(
                 break;
             }
 
-            auto parse_result = ParseSegments(playlist, &frame_tracker);
+            std::pair<std::vector<std::wstring>, bool> parse_result;
+            {
+                std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+                parse_result = ParseSegments(playlist, &frame_tracker);
+            }
             auto segments = parse_result.first;
             bool should_clear_buffer = parse_result.second;
             
@@ -1130,15 +1140,23 @@ bool BufferAndPipeStreamToPlayer(
                     // Add to buffer with frame number
                     {
                         std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer_queue.emplace(std::move(placeholder_data), frame_tracker.frame_number, true);
+                        uint64_t current_frame_number;
+                        {
+                            std::lock_guard<std::mutex> frame_lock(frame_tracker_mutex);
+                            current_frame_number = frame_tracker.frame_number;
+                        }
+                        buffer_queue.emplace(std::move(placeholder_data), current_frame_number, true);
                     }
                     
                     auto placeholder_end = std::chrono::steady_clock::now();
                     auto placeholder_duration = std::chrono::duration_cast<std::chrono::milliseconds>(placeholder_end - placeholder_start);
                     
                     // Record placeholder as successful "download" for timing purposes
-                    frame_tracker.total_segments_downloaded++;
-                    frame_tracker.RecordSegmentDownload(placeholder_duration);
+                    {
+                        std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+                        frame_tracker.total_segments_downloaded++;
+                        frame_tracker.RecordSegmentDownload(placeholder_duration);
+                    }
                     
                     new_segments_downloaded++;
                     AddDebugLog(L"[AD_SKIP] Placeholder content added to buffer for " + channel_name);
@@ -1235,24 +1253,40 @@ bool BufferAndPipeStreamToPlayer(
                 auto download_duration = std::chrono::duration_cast<std::chrono::milliseconds>(download_end - download_start);
 
                 if (download_ok && !seg_data.empty()) {
-                    // Record successful download timing
-                    frame_tracker.total_segments_downloaded++;
-                    frame_tracker.RecordSegmentDownload(download_duration);
+                    // Record successful download timing and get frame number
+                    uint64_t current_frame_number;
+                    {
+                        std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+                        frame_tracker.total_segments_downloaded++;
+                        frame_tracker.RecordSegmentDownload(download_duration);
+                        current_frame_number = frame_tracker.frame_number;
+                    }
                     
                     // Add to buffer with frame number
                     {
                         std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer_queue.emplace(std::move(seg_data), frame_tracker.frame_number, false);
+                        buffer_queue.emplace(std::move(seg_data), current_frame_number, false);
                     }
                     new_segments_downloaded++;
                     
                     // Enhanced logging with frame tracking and performance metrics
                     AddDebugLog(L"[DOWNLOAD] Downloaded segment " + std::to_wstring(new_segments_downloaded) + 
                                L", buffer=" + std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
+                    
+                    // Get metrics for logging
+                    double avg_time, success_rate;
+                    int64_t max_time;
+                    {
+                        std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+                        avg_time = frame_tracker.GetAverageDownloadTime();
+                        max_time = frame_tracker.GetMaxDownloadTime().count();
+                        success_rate = frame_tracker.GetDownloadSuccessRate();
+                    }
+                    
                     AddDebugLog(L"[FRAME_TAG] Frame download time: " + std::to_wstring(download_duration.count()) + L"ms" +
-                               L", Avg: " + std::to_wstring(frame_tracker.GetAverageDownloadTime()) + L"ms" +
-                               L", Max: " + std::to_wstring(frame_tracker.GetMaxDownloadTime().count()) + L"ms" +
-                               L", Success rate: " + std::to_wstring(frame_tracker.GetDownloadSuccessRate() * 100.0) + L"%");
+                               L", Avg: " + std::to_wstring(avg_time) + L"ms" +
+                               L", Max: " + std::to_wstring(max_time) + L"ms" +
+                               L", Success rate: " + std::to_wstring(success_rate * 100.0) + L"%");
                 } else {
                     AddDebugLog(L"[DOWNLOAD] FAILED to download segment after retries for " + channel_name);
                     AddDebugLog(L"[FRAME_TAG] Frame download FAILED after " + std::to_wstring(download_duration.count()) + L"ms");
@@ -1263,38 +1297,65 @@ bool BufferAndPipeStreamToPlayer(
                        L" new segments for " + channel_name);
             
             // Periodic frame tracking performance summary (every 30 segments processed)
-            if (frame_tracker.frame_number > 0 && frame_tracker.frame_number % 30 == 0) {
-                auto stream_duration = frame_tracker.GetStreamDuration();
+            uint64_t current_frame_number;
+            {
+                std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+                current_frame_number = frame_tracker.frame_number;
+            }
+            
+            if (current_frame_number > 0 && current_frame_number % 30 == 0) {
+                // Get all metrics with a single lock
+                std::chrono::seconds stream_duration;
+                uint64_t total_processed, total_downloaded, total_ad_skipped, seq_gaps;
+                uint64_t last_sent, duplicates_skipped, out_of_order;
+                double avg_time, success_rate;
+                int64_t max_time;
+                
+                {
+                    std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+                    stream_duration = frame_tracker.GetStreamDuration();
+                    total_processed = frame_tracker.total_segments_processed;
+                    total_downloaded = frame_tracker.total_segments_downloaded;
+                    total_ad_skipped = frame_tracker.total_ad_segments_skipped;
+                    seq_gaps = frame_tracker.sequence_gaps;
+                    last_sent = frame_tracker.last_frame_sent_to_player;
+                    duplicates_skipped = frame_tracker.duplicate_frames_skipped;
+                    out_of_order = frame_tracker.out_of_order_frames_detected;
+                    avg_time = frame_tracker.GetAverageDownloadTime();
+                    max_time = frame_tracker.GetMaxDownloadTime().count();
+                    success_rate = frame_tracker.GetDownloadSuccessRate();
+                }
+                
                 AddDebugLog(L"[FRAME_TAG] *** PERFORMANCE SUMMARY ***");
                 AddDebugLog(L"[FRAME_TAG] Stream: " + channel_name + L", Duration: " + std::to_wstring(stream_duration.count()) + L"s");
-                AddDebugLog(L"[FRAME_TAG] Total frames: " + std::to_wstring(frame_tracker.frame_number) + 
-                           L", Processed: " + std::to_wstring(frame_tracker.total_segments_processed) +
-                           L", Downloaded: " + std::to_wstring(frame_tracker.total_segments_downloaded));
-                AddDebugLog(L"[FRAME_TAG] Ad segments skipped: " + std::to_wstring(frame_tracker.total_ad_segments_skipped) +
-                           L", Sequence gaps: " + std::to_wstring(frame_tracker.sequence_gaps));
-                AddDebugLog(L"[FRAME_TAG] Frame ordering - Sent to player: " + std::to_wstring(frame_tracker.last_frame_sent_to_player) +
-                           L", Duplicates skipped: " + std::to_wstring(frame_tracker.duplicate_frames_skipped) +
-                           L", Out-of-order detected: " + std::to_wstring(frame_tracker.out_of_order_frames_detected));
-                AddDebugLog(L"[FRAME_TAG] Download times - Avg: " + std::to_wstring(frame_tracker.GetAverageDownloadTime()) + L"ms" +
-                           L", Max: " + std::to_wstring(frame_tracker.GetMaxDownloadTime().count()) + L"ms");
-                AddDebugLog(L"[FRAME_TAG] Success rate: " + std::to_wstring(frame_tracker.GetDownloadSuccessRate() * 100.0) + L"%");
+                AddDebugLog(L"[FRAME_TAG] Total frames: " + std::to_wstring(current_frame_number) + 
+                           L", Processed: " + std::to_wstring(total_processed) +
+                           L", Downloaded: " + std::to_wstring(total_downloaded));
+                AddDebugLog(L"[FRAME_TAG] Ad segments skipped: " + std::to_wstring(total_ad_skipped) +
+                           L", Sequence gaps: " + std::to_wstring(seq_gaps));
+                AddDebugLog(L"[FRAME_TAG] Frame ordering - Sent to player: " + std::to_wstring(last_sent) +
+                           L", Duplicates skipped: " + std::to_wstring(duplicates_skipped) +
+                           L", Out-of-order detected: " + std::to_wstring(out_of_order));
+                AddDebugLog(L"[FRAME_TAG] Download times - Avg: " + std::to_wstring(avg_time) + L"ms" +
+                           L", Max: " + std::to_wstring(max_time) + L"ms");
+                AddDebugLog(L"[FRAME_TAG] Success rate: " + std::to_wstring(success_rate * 100.0) + L"%");
                 
                 // Lag warning detection
-                if (frame_tracker.GetAverageDownloadTime() > 2000.0) {
+                if (avg_time > 2000.0) {
                     AddDebugLog(L"[FRAME_TAG] *** LAG WARNING *** Average download time > 2s, may cause buffering issues");
                 }
-                if (frame_tracker.GetDownloadSuccessRate() < 0.9) {
+                if (success_rate < 0.9) {
                     AddDebugLog(L"[FRAME_TAG] *** RELIABILITY WARNING *** Download success rate < 90%, may cause playback issues");
                 }
-                if (frame_tracker.sequence_gaps > 5) {
+                if (seq_gaps > 5) {
                     AddDebugLog(L"[FRAME_TAG] *** CONTINUITY WARNING *** Multiple sequence gaps detected, stream may be unstable");
                 }
-                if (frame_tracker.duplicate_frames_skipped > 0) {
-                    AddDebugLog(L"[FRAME_TAG] *** ORDERING WARNING *** " + std::to_wstring(frame_tracker.duplicate_frames_skipped) + 
+                if (duplicates_skipped > 0) {
+                    AddDebugLog(L"[FRAME_TAG] *** ORDERING WARNING *** " + std::to_wstring(duplicates_skipped) + 
                                L" duplicate frames detected and skipped");
                 }
-                if (frame_tracker.out_of_order_frames_detected > 0) {
-                    AddDebugLog(L"[FRAME_TAG] *** ORDERING WARNING *** " + std::to_wstring(frame_tracker.out_of_order_frames_detected) + 
+                if (out_of_order > 0) {
+                    AddDebugLog(L"[FRAME_TAG] *** ORDERING WARNING *** " + std::to_wstring(out_of_order) + 
                                L" out-of-order frames detected");
                 }
             }
@@ -1312,23 +1373,45 @@ bool BufferAndPipeStreamToPlayer(
         }
         
         // Final frame tracking performance summary
-        auto final_stream_duration = frame_tracker.GetStreamDuration();
+        std::chrono::seconds final_stream_duration;
+        uint64_t final_frame_number, final_total_processed, final_total_downloaded;
+        uint64_t final_last_sent, final_duplicates_skipped, final_out_of_order;
+        uint64_t final_total_ad_skipped, final_sequence_gaps;
+        double final_avg_time, final_success_rate;
+        int64_t final_max_time;
+        
+        {
+            std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+            final_stream_duration = frame_tracker.GetStreamDuration();
+            final_frame_number = frame_tracker.frame_number;
+            final_total_processed = frame_tracker.total_segments_processed;
+            final_total_downloaded = frame_tracker.total_segments_downloaded;
+            final_last_sent = frame_tracker.last_frame_sent_to_player;
+            final_duplicates_skipped = frame_tracker.duplicate_frames_skipped;
+            final_out_of_order = frame_tracker.out_of_order_frames_detected;
+            final_total_ad_skipped = frame_tracker.total_ad_segments_skipped;
+            final_sequence_gaps = frame_tracker.sequence_gaps;
+            final_avg_time = frame_tracker.GetAverageDownloadTime();
+            final_max_time = frame_tracker.GetMaxDownloadTime().count();
+            final_success_rate = frame_tracker.GetDownloadSuccessRate();
+        }
+        
         AddDebugLog(L"[FRAME_TAG] *** FINAL PERFORMANCE SUMMARY ***");
         AddDebugLog(L"[FRAME_TAG] Stream: " + channel_name + L", Total duration: " + std::to_wstring(final_stream_duration.count()) + L"s");
-        AddDebugLog(L"[FRAME_TAG] Total frames processed: " + std::to_wstring(frame_tracker.frame_number));
-        AddDebugLog(L"[FRAME_TAG] Segments processed: " + std::to_wstring(frame_tracker.total_segments_processed) + 
-                   L", Downloaded: " + std::to_wstring(frame_tracker.total_segments_downloaded));
-        AddDebugLog(L"[FRAME_TAG] Frames sent to player: " + std::to_wstring(frame_tracker.last_frame_sent_to_player) +
-                   L", Duplicates skipped: " + std::to_wstring(frame_tracker.duplicate_frames_skipped) +
-                   L", Out-of-order detected: " + std::to_wstring(frame_tracker.out_of_order_frames_detected));
-        AddDebugLog(L"[FRAME_TAG] Ad segments skipped: " + std::to_wstring(frame_tracker.total_ad_segments_skipped) +
-                   L", Sequence gaps detected: " + std::to_wstring(frame_tracker.sequence_gaps));
-        AddDebugLog(L"[FRAME_TAG] Download performance - Avg: " + std::to_wstring(frame_tracker.GetAverageDownloadTime()) + L"ms" +
-                   L", Max: " + std::to_wstring(frame_tracker.GetMaxDownloadTime().count()) + L"ms");
-        AddDebugLog(L"[FRAME_TAG] Final success rate: " + std::to_wstring(frame_tracker.GetDownloadSuccessRate() * 100.0) + L"%");
+        AddDebugLog(L"[FRAME_TAG] Total frames processed: " + std::to_wstring(final_frame_number));
+        AddDebugLog(L"[FRAME_TAG] Segments processed: " + std::to_wstring(final_total_processed) + 
+                   L", Downloaded: " + std::to_wstring(final_total_downloaded));
+        AddDebugLog(L"[FRAME_TAG] Frames sent to player: " + std::to_wstring(final_last_sent) +
+                   L", Duplicates skipped: " + std::to_wstring(final_duplicates_skipped) +
+                   L", Out-of-order detected: " + std::to_wstring(final_out_of_order));
+        AddDebugLog(L"[FRAME_TAG] Ad segments skipped: " + std::to_wstring(final_total_ad_skipped) +
+                   L", Sequence gaps detected: " + std::to_wstring(final_sequence_gaps));
+        AddDebugLog(L"[FRAME_TAG] Download performance - Avg: " + std::to_wstring(final_avg_time) + L"ms" +
+                   L", Max: " + std::to_wstring(final_max_time) + L"ms");
+        AddDebugLog(L"[FRAME_TAG] Final success rate: " + std::to_wstring(final_success_rate * 100.0) + L"%");
         
-        if (frame_tracker.frame_number > 0) {
-            double frames_per_second = static_cast<double>(frame_tracker.frame_number) / final_stream_duration.count();
+        if (final_frame_number > 0) {
+            double frames_per_second = static_cast<double>(final_frame_number) / final_stream_duration.count();
             AddDebugLog(L"[FRAME_TAG] Average frame rate: " + std::to_wstring(frames_per_second) + L" frames/second");
         }
         
@@ -1436,9 +1519,17 @@ bool BufferAndPipeStreamToPlayer(
                     
                     // Check frame ordering before adding to feed queue
                     std::wstring skip_reason;
-                    if (frame_tracker.ShouldSkipFrame(segment.frame_number, skip_reason)) {
+                    bool should_skip;
+                    uint64_t last_sent_frame;
+                    {
+                        std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+                        should_skip = frame_tracker.ShouldSkipFrame(segment.frame_number, skip_reason);
+                        last_sent_frame = frame_tracker.last_frame_sent_to_player;
+                    }
+                    
+                    if (should_skip) {
                         AddDebugLog(L"[FRAME_TAG] Skipping frame #" + std::to_wstring(segment.frame_number) + 
-                                   L" [" + skip_reason + L"] - Last sent: #" + std::to_wstring(frame_tracker.last_frame_sent_to_player));
+                                   L" [" + skip_reason + L"] - Last sent: #" + std::to_wstring(last_sent_frame));
                         continue;
                     }
                     
@@ -1478,7 +1569,10 @@ bool BufferAndPipeStreamToPlayer(
                             segments_processed++;
                             
                             // Record frame as successfully sent to player
-                            frame_tracker.RecordFrameSentToPlayer(frame_number);
+                            {
+                                std::lock_guard<std::mutex> lock(frame_tracker_mutex);
+                                frame_tracker.RecordFrameSentToPlayer(frame_number);
+                            }
                             
                             AddDebugLog(L"[FRAME_TAG] Frame #" + std::to_wstring(frame_number) + 
                                        L" sent to player" + (is_ad_placeholder ? L" [AD_PLACEHOLDER]" : L" [CONTENT]") +
