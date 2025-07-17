@@ -9,8 +9,8 @@
 
 ### 1. Proof-of-Concept MailSlot Implementation
 - `mailslot_comparison.h/cpp` - Complete MailSlot implementation with chunking logic
-- Demonstrates message size limitations (~64KB per message)
-- Shows performance overhead of multiple message sends
+- Demonstrates message handling (uses 60KB chunks for testing, though larger possible)
+- Shows performance implications and implementation complexity
 - Includes error handling and timeout management
 
 ### 2. Comparative Testing Framework
@@ -41,14 +41,16 @@ WriteFile(pipe_handle, segment_data.data(), segment_size, &bytes_written, nullpt
 
 ### MailSlot Implementation Challenges
 ```cpp
-// Requires chunking into multiple small messages
-size_t chunk_size = std::min((size_t)MAILSLOT_MAX_MESSAGE_SIZE, bytes_remaining);
-while (bytes_remaining > 0) {
-    // Create new client handle for each 64KB chunk
-    // Write small chunk
-    // Close handle
-    // Repeat 15-150+ times per video segment
+// Even with larger messages, fundamental issue remains:
+if (large_mailslot_message_support) {
+    // Single message possible, but...
+    WriteFile(mailslot, video_segment, segment_size, ...);
+    // Still need intermediate process to convert to stdin stream
+    // Media player cannot read directly from mailslot
 }
+
+// Current pipe solution:
+WriteFile(pipe_to_stdin, video_segment, segment_size, ...); // Direct streaming
 ```
 
 ## Benchmark Results Summary

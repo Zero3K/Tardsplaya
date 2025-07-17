@@ -3,8 +3,10 @@
 #include <chrono>
 #include <sstream>
 
-// MailSlot message size limit on Windows
-const DWORD MAILSLOT_MAX_MESSAGE_SIZE = 60000; // ~60KB to be safe (actual limit ~64KB)
+// MailSlot message size - using conservative limit for demonstration
+// Note: Individual mailslots can have larger limits set when created,
+// but this doesn't solve the fundamental stdin incompatibility issue
+const DWORD MAILSLOT_MAX_MESSAGE_SIZE = 60000; // ~60KB for demonstration purposes
 
 MailSlotComparisonResult TestMailSlotDataTransfer(
     const std::vector<char>& video_data,
@@ -167,10 +169,16 @@ std::wstring GenerateComparisonReport(
     report << L"\n=== TECHNICAL ANALYSIS ===\n\n";
     
     report << L"WHY MAILSLOTS ARE NOT SUITABLE:\n";
-    report << L"  1. Message Size Limitation: ~64KB per message\n";
-    report << L"     - Video segments are typically 1-10MB each\n";
-    report << L"     - Requires " << mailslot_result.messages_sent << L" messages for one segment\n";
-    report << L"     - Massive overhead and complexity\n\n";
+    report << L"  1. PRIMARY ISSUE - stdin Incompatibility:\n";
+    report << L"     - MailSlots cannot be used as process stdin\n";
+    report << L"     - Media players expect continuous stdin streams\n";
+    report << L"     - Would require intermediate conversion process\n\n";
+    
+    report << L"  2. Message Size Considerations:\n";
+    report << L"     - Broadcast messages: limited to 400 bytes\n";
+    report << L"     - Individual mailslots: can be larger (this test uses 60KB)\n";
+    report << L"     - Video segments: typically 1-10MB each\n";
+    report << L"     - Required " << mailslot_result.messages_sent << L" messages for this segment\n\n";
     
     report << L"  2. Cannot be used as stdin for processes\n";
     report << L"     - Media players expect continuous stdin streams\n";

@@ -7,11 +7,14 @@
  * Proof-of-concept MailSlot implementation for comparison with pipe-based IPC
  * 
  * This demonstrates why MailSlots are NOT suitable for the current streaming use case:
- * 1. MailSlots have message size limitations (~64KB per message)
- * 2. MailSlots cannot be used as stdin for processes
- * 3. MailSlots are designed for discrete messages, not continuous streaming
- * 4. Video segments can be several MB each, requiring chunking
- * 5. Media players expect continuous stdin streams, not discrete messages
+ * 1. MailSlots cannot be used as stdin for processes (primary blocking issue)
+ * 2. MailSlots are designed for discrete messages, not continuous streaming
+ * 3. Media players expect continuous stdin streams, not discrete messages
+ * 4. Would require intermediate process to convert messages to streams
+ * 5. Message size limits: 400B for broadcast, larger for individual mailslots
+ * 
+ * Note: This implementation uses conservative 60KB messages to demonstrate chunking,
+ * but even with larger messages, the stdin incompatibility remains the main issue.
  */
 
 struct MailSlotComparisonResult {
