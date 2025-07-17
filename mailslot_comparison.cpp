@@ -1,7 +1,8 @@
+#include "stream_thread.h"  // Include first for proper Windows defines
 #include "mailslot_comparison.h"
-#include "stream_thread.h"
 #include <chrono>
 #include <sstream>
+#include <algorithm>
 
 // MailSlot message size - for individual mailslots, we can set larger limits
 // Note: This doesn't solve the fundamental stdin incompatibility issue

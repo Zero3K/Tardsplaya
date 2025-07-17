@@ -1,7 +1,11 @@
 #pragma once
-#include <windows.h>
 #include <string>
+#include <vector>
 #include <atomic>
+
+// Forward declarations to avoid including windows.h in header
+typedef void* HANDLE;
+typedef unsigned long DWORD;
 
 /**
  * Proof-of-concept MailSlot implementation for comparison with pipe-based IPC
