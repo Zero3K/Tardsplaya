@@ -1,5 +1,6 @@
 #include "ipc_implementations.h"
 #include "stream_pipe.h"
+#include "tsduck_hls_wrapper.h"
 #include <windows.h>
 #include <winhttp.h>
 #include <iostream>
@@ -40,6 +41,78 @@ bool HttpGetTextWithCancel(const std::wstring& url, std::string& out, std::atomi
         return false;
     }
     return HttpGetText(url, out);
+}
+
+// TSDuck-enhanced segment analyzer for IPC implementations
+static std::pair<int, std::chrono::milliseconds> AnalyzePlaylistWithTSDuckIPC(const std::string& playlist, const std::wstring& channel_name) {
+    tsduck_hls::PlaylistParser tsduck_parser;
+    if (!tsduck_parser.ParsePlaylist(playlist)) {
+        // Return conservative values if parsing fails for better stability
+        AddDebugLog(L"[TSDUCK-IPC] Failed to parse playlist for " + channel_name + L", using conservative values");
+        return std::make_pair(12, std::chrono::milliseconds(6000)); // Increased from 3 to 12 segments
+    }
+    
+    // Get TSDuck's recommendations for optimal buffering
+    int optimal_buffer_segments = tsduck_parser.GetOptimalBufferSegments();
+    std::chrono::milliseconds playlist_duration = tsduck_parser.GetPlaylistDuration();
+    bool has_ads = tsduck_parser.HasAdMarkers();
+    
+    // When ads are detected, increase buffer size to account for placeholder segments
+    // Placeholder segments provide minimal content but consume buffer slots
+    if (has_ads) {
+        // Increase buffer by 50% when ads are present to compensate for timing disruption
+        optimal_buffer_segments = static_cast<int>(optimal_buffer_segments * 1.5);
+        
+        // Ensure minimum buffer size for ad-heavy content
+        optimal_buffer_segments = std::max(optimal_buffer_segments, 10);
+        
+        AddDebugLog(L"[TSDUCK-IPC] Ad content detected for " + channel_name + 
+                   L" - increased buffer recommendation to " + std::to_wstring(optimal_buffer_segments) + 
+                   L" segments for better ad handling");
+    }
+    
+    AddDebugLog(L"[TSDUCK-IPC] Analysis for " + channel_name + L": optimal_buffer=" + 
+               std::to_wstring(optimal_buffer_segments) + 
+               L", playlist_duration=" + std::to_wstring(playlist_duration.count()) + L"ms" +
+               L", has_ads=" + std::to_wstring(has_ads) +
+               L", live=" + std::to_wstring(tsduck_parser.IsLiveStream()));
+    
+    return std::make_pair(optimal_buffer_segments, playlist_duration);
+}
+
+// Enhanced segment parsing using TSDuck for IPC implementations
+static std::vector<std::wstring> ParseSegmentsWithTSDuck(const std::string& playlist, const std::wstring& channel_name) {
+    tsduck_hls::PlaylistParser tsduck_parser;
+    std::vector<std::wstring> segments;
+    
+    if (!tsduck_parser.ParsePlaylist(playlist)) {
+        AddDebugLog(L"[TSDUCK-IPC] TSDuck parsing failed for " + channel_name + L", falling back to basic parsing");
+        
+        // Fallback to basic parsing
+        std::istringstream ss(playlist);
+        std::string line;
+        while (std::getline(ss, line)) {
+            if (!line.empty() && line[0] != '#' && line.find(".ts") != std::string::npos) {
+                segments.push_back(std::wstring(line.begin(), line.end()));
+            }
+        }
+        return segments;
+    }
+    
+    // Use TSDuck's enhanced segment parsing
+    auto tsduck_segments = tsduck_parser.GetSegments();
+    for (const auto& seg : tsduck_segments) {
+        if (!seg.is_ad_segment) { // Skip ad segments using TSDuck's detection
+            segments.push_back(seg.url);
+        } else {
+            AddDebugLog(L"[TSDUCK-IPC] Skipping ad segment for " + channel_name + L": " + seg.url);
+        }
+    }
+    
+    AddDebugLog(L"[TSDUCK-IPC] Parsed " + std::to_wstring(segments.size()) + L" segments for " + 
+               channel_name + L" (total: " + std::to_wstring(tsduck_segments.size()) + L")");
+    
+    return segments;
 }
 
 // Define WriteFileWithTimeout if not available
@@ -398,6 +471,31 @@ bool BufferAndMailSlotStreamToPlayer(
             }
             consecutive_errors = 0;
             
+            // TSDuck-enhanced analysis for dynamic buffer optimization
+            static int tsduck_recommended_buffer = target_buffer_segments;
+            static bool first_analysis_done = false;
+            
+            // Run TSDuck analysis on playlist for optimal buffering
+            auto tsduck_analysis = AnalyzePlaylistWithTSDuckIPC(playlist, channel_name);
+            int new_tsduck_recommendation = tsduck_analysis.first;
+            
+            // Only log if recommendation changes or on first run to reduce log noise
+            if (!first_analysis_done || new_tsduck_recommendation != tsduck_recommended_buffer) {
+                std::wstring analysis_type = first_analysis_done ? L"Updated" : L"Initial";
+                first_analysis_done = true;
+                
+                AddDebugLog(L"[TSDUCK-MAILSLOT] " + analysis_type + 
+                           L" buffer recommendation: " + std::to_wstring(new_tsduck_recommendation) + 
+                           L" segments (was: " + std::to_wstring(tsduck_recommended_buffer) + 
+                           L", original: " + std::to_wstring(target_buffer_segments) + L") for " + channel_name);
+            }
+            
+            tsduck_recommended_buffer = new_tsduck_recommendation;
+            
+            // Use TSDuck's recommendation for effective buffer size
+            int effective_buffer_size = std::max(target_buffer_segments, tsduck_recommended_buffer);
+            int effective_max_buffer = std::min(effective_buffer_size * 2, 30); // Cap max at 30
+            
             // Check for stream end
             if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
                 AddDebugLog(L"[DOWNLOAD-MAILSLOT] Found #EXT-X-ENDLIST - stream ended for " + channel_name);
@@ -405,15 +503,8 @@ bool BufferAndMailSlotStreamToPlayer(
                 break;
             }
             
-            // Parse segments from playlist (simplified parsing)
-            std::vector<std::wstring> segments;
-            std::istringstream pss(playlist);
-            std::string pline;
-            while (std::getline(pss, pline)) {
-                if (!pline.empty() && pline[0] != '#' && pline.find(".ts") != std::string::npos) {
-                    segments.push_back(std::wstring(pline.begin(), pline.end()));
-                }
-            }
+            // Parse segments using TSDuck enhanced parsing with ad detection
+            std::vector<std::wstring> segments = ParseSegmentsWithTSDuck(playlist, channel_name);
             
             // Download new segments
             int new_segments_downloaded = 0;
@@ -430,7 +521,7 @@ bool BufferAndMailSlotStreamToPlayer(
                     current_buffer_size = buffer_queue.size();
                 }
                 
-                if (current_buffer_size >= max_buffer_segments && !urgent_download_needed.load()) {
+                if (current_buffer_size >= effective_max_buffer && !urgent_download_needed.load()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
                 }
@@ -690,6 +781,31 @@ bool BufferAndNamedPipeStreamToPlayer(
             }
             consecutive_errors = 0;
             
+            // TSDuck-enhanced analysis for dynamic buffer optimization
+            static int tsduck_recommended_buffer = target_buffer_segments;
+            static bool first_analysis_done = false;
+            
+            // Run TSDuck analysis on playlist for optimal buffering
+            auto tsduck_analysis = AnalyzePlaylistWithTSDuckIPC(playlist, channel_name);
+            int new_tsduck_recommendation = tsduck_analysis.first;
+            
+            // Only log if recommendation changes or on first run to reduce log noise
+            if (!first_analysis_done || new_tsduck_recommendation != tsduck_recommended_buffer) {
+                std::wstring analysis_type = first_analysis_done ? L"Updated" : L"Initial";
+                first_analysis_done = true;
+                
+                AddDebugLog(L"[TSDUCK-NAMEDPIPE] " + analysis_type + 
+                           L" buffer recommendation: " + std::to_wstring(new_tsduck_recommendation) + 
+                           L" segments (was: " + std::to_wstring(tsduck_recommended_buffer) + 
+                           L", original: " + std::to_wstring(target_buffer_segments) + L") for " + channel_name);
+            }
+            
+            tsduck_recommended_buffer = new_tsduck_recommendation;
+            
+            // Use TSDuck's recommendation for effective buffer size
+            int effective_buffer_size = std::max(target_buffer_segments, tsduck_recommended_buffer);
+            int effective_max_buffer = std::min(effective_buffer_size * 2, 30); // Cap max at 30
+            
             // Check for stream end
             if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
                 AddDebugLog(L"[DOWNLOAD-NAMEDPIPE] Found #EXT-X-ENDLIST - stream ended for " + channel_name);
@@ -697,15 +813,8 @@ bool BufferAndNamedPipeStreamToPlayer(
                 break;
             }
             
-            // Parse segments from playlist (simplified parsing)
-            std::vector<std::wstring> segments;
-            std::istringstream pss(playlist);
-            std::string pline;
-            while (std::getline(pss, pline)) {
-                if (!pline.empty() && pline[0] != '#' && pline.find(".ts") != std::string::npos) {
-                    segments.push_back(std::wstring(pline.begin(), pline.end()));
-                }
-            }
+            // Parse segments using TSDuck enhanced parsing with ad detection
+            std::vector<std::wstring> segments = ParseSegmentsWithTSDuck(playlist, channel_name);
             
             // Download new segments
             int new_segments_downloaded = 0;
@@ -722,7 +831,7 @@ bool BufferAndNamedPipeStreamToPlayer(
                     current_buffer_size = buffer_queue.size();
                 }
                 
-                if (current_buffer_size >= max_buffer_segments && !urgent_download_needed.load()) {
+                if (current_buffer_size >= effective_max_buffer && !urgent_download_needed.load()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
                 }
