@@ -1,6 +1,7 @@
 #include "ipc_implementations.h"
 #include "stream_pipe.h"
 #include <windows.h>
+#include <winhttp.h>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -9,6 +10,8 @@
 #include <set>
 #include <sstream>
 #include <memory>
+
+#pragma comment(lib, "winhttp.lib")
 
 // Global configuration for IPC method selection
 IPCMethod g_current_ipc_method = IPCMethod::ANONYMOUS_PIPES;
@@ -34,6 +37,63 @@ bool HttpGetTextWithCancel(const std::wstring& url, std::string& out, std::atomi
 BOOL WriteFileWithTimeout(HANDLE handle, const void* buffer, DWORD bytes_to_write, DWORD* bytes_written, DWORD timeout_ms) {
     // For simplicity, use regular WriteFile for now
     return WriteFile(handle, buffer, bytes_to_write, bytes_written, nullptr);
+}
+
+// Utility: HTTP GET (returns as binary), with cancellation support
+static bool HttpGetBinaryWithCancel(const std::wstring& url, std::vector<char>& out, std::atomic<bool>* cancel_token) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (cancel_token && cancel_token->load()) return false;
+        URL_COMPONENTS uc = { sizeof(uc) };
+        wchar_t host[256] = L"", path[2048] = L"";
+        uc.lpszHostName = host; uc.dwHostNameLength = 255;
+        uc.lpszUrlPath = path; uc.dwUrlPathLength = 2047;
+        WinHttpCrackUrl(url.c_str(), 0, 0, &uc);
+
+        HINTERNET hSession = WinHttpOpen(L"Tardsplaya/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, 0, 0, 0);
+        if (!hSession) continue;
+        HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
+        if (!hConnect) { WinHttpCloseHandle(hSession); continue; }
+        HINTERNET hRequest = WinHttpOpenRequest(
+            hConnect, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+            (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0);
+        BOOL res = WinHttpSendRequest(hRequest, 0, 0, 0, 0, 0, 0) && WinHttpReceiveResponse(hRequest, 0);
+        if (!res) { 
+            WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); 
+            std::this_thread::sleep_for(std::chrono::milliseconds(600)); // retry delay
+            continue; 
+        }
+
+        DWORD dwSize = 0;
+        out.clear();
+        bool error = false;
+        do {
+            if (cancel_token && cancel_token->load()) { error = true; break; }
+            DWORD dwDownloaded = 0;
+            WinHttpQueryDataAvailable(hRequest, &dwSize);
+            if (!dwSize) break;
+            size_t prev_size = out.size();
+            out.resize(prev_size + dwSize);
+            if (!WinHttpReadData(hRequest, out.data() + prev_size, dwSize, &dwDownloaded) || dwDownloaded == 0)
+            {
+                error = true;
+                break;
+            }
+            if (dwDownloaded < dwSize) out.resize(prev_size + dwDownloaded);
+        } while (dwSize > 0);
+
+        WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+        if (!error && !out.empty()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(600)); // retry delay
+    }
+    return false;
+}
+
+// Helper: join relative URL to base
+static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
+    if (rel.find(L"http") == 0) return rel;
+    size_t pos = base.rfind(L'/');
+    if (pos == std::wstring::npos) return rel;
+    return base.substr(0, pos + 1) + rel;
 }
 
 static std::atomic<int> g_mailslot_counter(0);
@@ -88,21 +148,52 @@ HANDLE CreateStreamingNamedPipe(const std::wstring& pipe_name, HANDLE& client_ha
         return INVALID_HANDLE_VALUE;
     }
     
-    // Create client handle for the child process
-    client_handle = CreateFileW(
-        pipe_name.c_str(),
-        GENERIC_READ,
-        0,
-        nullptr,
-        OPEN_EXISTING,
-        0,
-        nullptr
-    );
-    
-    if (client_handle == INVALID_HANDLE_VALUE) {
+    // Create anonymous pipe for child process since named pipes can't be used directly as stdin
+    SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE hRead, hWrite;
+    if (!CreatePipe(&hRead, &hWrite, &sa, 1024 * 1024)) {
         CloseHandle(server_handle);
         return INVALID_HANDLE_VALUE;
     }
+    
+    client_handle = hRead; // This will be used as stdin for child process
+    
+    // Start a bridge thread to copy from named pipe to anonymous pipe
+    std::thread* bridge_thread = new std::thread([server_handle, hWrite, pipe_name]() {
+        AddDebugLog(L"[NAMEDPIPE-BRIDGE] Bridge thread started for " + pipe_name);
+        
+        // Wait for connection
+        if (ConnectNamedPipe(server_handle, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED) {
+            AddDebugLog(L"[NAMEDPIPE-BRIDGE] Named pipe connected: " + pipe_name);
+            
+            // Copy data from named pipe to anonymous pipe
+            const size_t BUFFER_SIZE = 64 * 1024; // 64KB buffer
+            std::unique_ptr<char[]> buffer = std::make_unique<char[]>(BUFFER_SIZE);
+            DWORD bytes_read, bytes_written;
+            
+            while (true) {
+                if (ReadFile(server_handle, buffer.get(), (DWORD)BUFFER_SIZE, &bytes_read, nullptr)) {
+                    if (bytes_read > 0) {
+                        if (!WriteFile(hWrite, buffer.get(), bytes_read, &bytes_written, nullptr)) {
+                            AddDebugLog(L"[NAMEDPIPE-BRIDGE] Failed to write to anonymous pipe");
+                            break;
+                        }
+                    }
+                } else {
+                    DWORD error = GetLastError();
+                    if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
+                        AddDebugLog(L"[NAMEDPIPE-BRIDGE] Named pipe closed");
+                        break;
+                    }
+                }
+            }
+        }
+        
+        CloseHandle(hWrite);
+        AddDebugLog(L"[NAMEDPIPE-BRIDGE] Bridge thread ended for " + pipe_name);
+    });
+    bridge_thread->detach();
+    delete bridge_thread; // Safe to delete after detach
     
     return server_handle;
 }
@@ -116,7 +207,7 @@ bool BufferAndMailSlotStreamToPlayer(
     std::atomic<int>* chunk_count,
     const std::wstring& selected_quality
 ) {
-    AddDebugLog(L"[IPC-METHOD] MailSlot implementation starting for " + channel_name);
+    AddDebugLog(L"[IPC-METHOD] MailSlot implementation starting for " + channel_name + L", URL=" + playlist_url);
     
     // Generate unique MailSlot name
     int mailslot_id = ++g_mailslot_counter;
@@ -236,7 +327,7 @@ bool BufferAndMailSlotStreamToPlayer(
         return false;
     }
     
-    // Download and stream content - simplified demonstration
+    // Download and parse master playlist to get media playlist URL
     std::string master;
     if (cancel_token.load()) {
         CloseHandle(mailslot_client);
@@ -244,40 +335,224 @@ bool BufferAndMailSlotStreamToPlayer(
         return false;
     }
     
-    if (!HttpGetText(playlist_url, master)) {
+    if (!HttpGetTextWithCancel(playlist_url, master, &cancel_token)) {
         AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Failed to download master playlist");
         CloseHandle(mailslot_client);
         CloseHandle(mailslot_server);
         return false;
     }
     
-    AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Downloaded master playlist, starting streaming demonstration");
-    
-    // For demonstration, simulate streaming multiple segments
-    for (int i = 0; i < 3 && !cancel_token.load(); i++) {
-        // Create test video segment (simulating real video data)
-        std::vector<char> segment_data(1024 * 1024, static_cast<char>('A' + i)); // 1MB per segment
-        AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Sending segment " + std::to_wstring(i + 1) + L" via MailSlot");
-        
-        if (!SendVideoSegmentViaMailSlot(mailslot_client, segment_data)) {
-            AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Failed to send segment " + std::to_wstring(i + 1));
+    // If this is a master playlist, pick the first stream URL
+    std::wstring media_playlist_url = playlist_url;
+    bool is_master = false;
+    std::istringstream ss(master);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.find("#EXT-X-STREAM-INF:") == 0) is_master = true;
+        if (is_master && !line.empty() && line[0] != '#') {
+            media_playlist_url = JoinUrl(playlist_url, std::wstring(line.begin(), line.end()));
             break;
-        } else {
-            AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Successfully sent segment " + std::to_wstring(i + 1) + L" via MailSlot");
+        }
+    }
+    AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Using media playlist URL=" + media_playlist_url);
+    
+    // Set up real streaming infrastructure like the original implementation
+    std::queue<std::vector<char>> buffer_queue;
+    std::mutex buffer_mutex;
+    std::set<std::wstring> seen_urls;
+    std::atomic<bool> download_running(true);
+    std::atomic<bool> stream_ended_normally(false);
+    std::atomic<bool> urgent_download_needed(false);
+    
+    const int target_buffer_segments = std::max(buffer_segments, 10);
+    const int max_buffer_segments = target_buffer_segments * 2;
+    
+    AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Starting real video streaming with MailSlots for " + channel_name);
+    
+    // Background segment downloader thread - adapted from original implementation
+    std::thread download_thread([&]() {
+        int consecutive_errors = 0;
+        const int max_consecutive_errors = 15;
+        
+        AddDebugLog(L"[DOWNLOAD-MAILSLOT] Starting download thread for " + channel_name);
+        
+        while (download_running.load() && !cancel_token.load() && consecutive_errors < max_consecutive_errors) {
+            // Download current playlist
+            std::string playlist;
+            if (!HttpGetTextWithCancel(media_playlist_url, playlist, &cancel_token)) {
+                consecutive_errors++;
+                AddDebugLog(L"[DOWNLOAD-MAILSLOT] Playlist fetch FAILED for " + channel_name + 
+                           L", error " + std::to_wstring(consecutive_errors) + L"/" + 
+                           std::to_wstring(max_consecutive_errors));
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                continue;
+            }
+            consecutive_errors = 0;
+            
+            // Check for stream end
+            if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
+                AddDebugLog(L"[DOWNLOAD-MAILSLOT] Found #EXT-X-ENDLIST - stream ended for " + channel_name);
+                stream_ended_normally = true;
+                break;
+            }
+            
+            // Parse segments from playlist (simplified parsing)
+            std::vector<std::wstring> segments;
+            std::istringstream pss(playlist);
+            std::string pline;
+            while (std::getline(pss, pline)) {
+                if (!pline.empty() && pline[0] != '#' && pline.find(".ts") != std::string::npos) {
+                    segments.push_back(std::wstring(pline.begin(), pline.end()));
+                }
+            }
+            
+            // Download new segments
+            int new_segments_downloaded = 0;
+            for (auto& seg : segments) {
+                if (!download_running.load() || cancel_token.load()) break;
+                
+                // Skip segments we've already seen
+                if (seen_urls.count(seg)) continue;
+                
+                // Check buffer size before downloading more
+                size_t current_buffer_size;
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex);
+                    current_buffer_size = buffer_queue.size();
+                }
+                
+                if (current_buffer_size >= max_buffer_segments && !urgent_download_needed.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    continue;
+                }
+                
+                seen_urls.insert(seg);
+                std::wstring seg_url = JoinUrl(media_playlist_url, seg);
+                std::vector<char> seg_data;
+                
+                // Download segment with retries
+                bool download_ok = false;
+                for (int retry = 0; retry < 3; ++retry) {
+                    if (HttpGetBinaryWithCancel(seg_url, seg_data, &cancel_token)) {
+                        download_ok = true;
+                        break;
+                    }
+                    if (!download_running.load() || cancel_token.load()) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                }
+                
+                if (download_ok && !seg_data.empty()) {
+                    // Add to buffer
+                    {
+                        std::lock_guard<std::mutex> lock(buffer_mutex);
+                        buffer_queue.push(std::move(seg_data));
+                    }
+                    new_segments_downloaded++;
+                    AddDebugLog(L"[DOWNLOAD-MAILSLOT] Downloaded segment " + std::to_wstring(new_segments_downloaded) + 
+                               L", buffer=" + std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
+                } else {
+                    AddDebugLog(L"[DOWNLOAD-MAILSLOT] FAILED to download segment for " + channel_name);
+                }
+            }
+            
+            // Sleep before next playlist fetch
+            if (urgent_download_needed.load()) {
+                urgent_download_needed.store(false);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            }
         }
         
-        // Small delay between segments to simulate real streaming
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+        AddDebugLog(L"[DOWNLOAD-MAILSLOT] Download thread ending for " + channel_name);
+    });
     
-    AddDebugLog(L"BufferAndMailSlotStreamToPlayer: MailSlot streaming demonstration completed");
+    // Main feeder thread - sends real video segments via MailSlot
+    std::thread feeder_thread([&]() {
+        bool started = false;
+        const size_t min_buffer_size = 3;
+        
+        AddDebugLog(L"[FEEDER-MAILSLOT] Starting feeder thread for " + channel_name);
+        
+        while (download_running.load() || !buffer_queue.empty()) {
+            if (cancel_token.load()) break;
+            
+            size_t buffer_size;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex);
+                buffer_size = buffer_queue.size();
+            }
+            
+            // Wait for initial buffer before starting
+            if (!started) {
+                if (buffer_size >= target_buffer_segments) {
+                    started = true;
+                    AddDebugLog(L"[FEEDER-MAILSLOT] Initial buffer ready (" + 
+                               std::to_wstring(buffer_size) + L" segments), starting MailSlot feed for " + channel_name);
+                } else {
+                    AddDebugLog(L"[FEEDER-MAILSLOT] Waiting for initial buffer (" + std::to_wstring(buffer_size) + L"/" +
+                               std::to_wstring(target_buffer_segments) + L") for " + channel_name);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    continue;
+                }
+            }
+            
+            // Get segments to feed
+            std::vector<std::vector<char>> segments_to_feed;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex);
+                
+                int max_segments_to_feed = 1;
+                if (buffer_size < min_buffer_size) {
+                    max_segments_to_feed = std::min((int)buffer_queue.size(), 3);
+                    
+                    if (buffer_size == 0) {
+                        AddDebugLog(L"[FEEDER-MAILSLOT] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
+                        urgent_download_needed.store(true);
+                    }
+                }
+                
+                int segments_fed = 0;
+                while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
+                    segments_to_feed.push_back(std::move(buffer_queue.front()));
+                    buffer_queue.pop();
+                    segments_fed++;
+                }
+            }
+            
+            if (!segments_to_feed.empty()) {
+                // Send segments via MailSlot
+                for (const auto& segment_data : segments_to_feed) {
+                    if (segment_data.empty()) continue;
+                    
+                    if (!SendVideoSegmentViaMailSlot(mailslot_client, segment_data)) {
+                        AddDebugLog(L"[FEEDER-MAILSLOT] Failed to send segment via MailSlot for " + channel_name);
+                        break;
+                    } else {
+                        AddDebugLog(L"[FEEDER-MAILSLOT] Successfully sent " + std::to_wstring(segment_data.size()) + 
+                                   L" bytes via MailSlot for " + channel_name);
+                    }
+                }
+                
+                // Delay between segment groups
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        
+        AddDebugLog(L"[FEEDER-MAILSLOT] Feeder thread ending for " + channel_name);
+    });
     
-    // Keep process alive briefly to observe results
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    // Wait for threads to complete or cancellation
+    download_thread.join();
+    feeder_thread.join();
     
+    // Cleanup
     CloseHandle(mailslot_client);
     CloseHandle(mailslot_server);
     
+    AddDebugLog(L"[IPC-METHOD] MailSlot streaming completed for " + channel_name);
     return true;
 }
 
@@ -290,7 +565,7 @@ bool BufferAndNamedPipeStreamToPlayer(
     std::atomic<int>* chunk_count,
     const std::wstring& selected_quality
 ) {
-    AddDebugLog(L"[IPC-METHOD] Named Pipe implementation starting for " + channel_name);
+    AddDebugLog(L"[IPC-METHOD] Named Pipe implementation starting for " + channel_name + L", URL=" + playlist_url);
     
     // Generate unique pipe name
     int pipe_id = ++g_namedpipe_counter;
@@ -344,60 +619,234 @@ bool BufferAndNamedPipeStreamToPlayer(
     
     AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Process created, PID=" + std::to_wstring(pi.dwProcessId));
     
-    // Wait for client connection
-    if (!ConnectNamedPipe(server_handle, nullptr)) {
-        DWORD error = GetLastError();
-        if (error != ERROR_PIPE_CONNECTED) {
-            AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Failed to connect to named pipe, error=" + std::to_wstring(error));
-            CloseHandle(server_handle);
-            return false;
-        }
-    }
+    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Named pipe bridge set up");
     
-    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Named pipe connected");
-    
-    // Download and stream content - simplified demonstration
+    // Download and parse master playlist to get media playlist URL
     std::string master;
     if (cancel_token.load()) {
         CloseHandle(server_handle);
         return false;
     }
     
-    if (!HttpGetText(playlist_url, master)) {
+    if (!HttpGetTextWithCancel(playlist_url, master, &cancel_token)) {
         AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Failed to download master playlist");
         CloseHandle(server_handle);
         return false;
     }
     
-    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Downloaded master playlist, starting streaming demonstration");
-    
-    // For demonstration, simulate streaming multiple segments
-    for (int i = 0; i < 3 && !cancel_token.load(); i++) {
-        // Create test video segment (simulating real video data)
-        std::vector<char> segment_data(1024 * 1024, static_cast<char>('A' + i)); // 1MB per segment
-        DWORD bytes_written;
-        
-        AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Sending segment " + std::to_wstring(i + 1) + L" via Named Pipe");
-        
-        if (!WriteFile(server_handle, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, nullptr)) {
-            DWORD error = GetLastError();
-            AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Failed to write segment " + std::to_wstring(i + 1) + L", error=" + std::to_wstring(error));
+    // If this is a master playlist, pick the first stream URL
+    std::wstring media_playlist_url = playlist_url;
+    bool is_master = false;
+    std::istringstream ss(master);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.find("#EXT-X-STREAM-INF:") == 0) is_master = true;
+        if (is_master && !line.empty() && line[0] != '#') {
+            media_playlist_url = JoinUrl(playlist_url, std::wstring(line.begin(), line.end()));
             break;
-        } else {
-            AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Successfully sent segment " + std::to_wstring(i + 1) + L" (" + std::to_wstring(bytes_written) + L" bytes) via Named Pipe");
+        }
+    }
+    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Using media playlist URL=" + media_playlist_url);
+    
+    // Set up real streaming infrastructure like the original implementation
+    std::queue<std::vector<char>> buffer_queue;
+    std::mutex buffer_mutex;
+    std::set<std::wstring> seen_urls;
+    std::atomic<bool> download_running(true);
+    std::atomic<bool> stream_ended_normally(false);
+    std::atomic<bool> urgent_download_needed(false);
+    
+    const int target_buffer_segments = std::max(buffer_segments, 10);
+    const int max_buffer_segments = target_buffer_segments * 2;
+    
+    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Starting real video streaming with Named Pipes for " + channel_name);
+    
+    // Background segment downloader thread - adapted from original implementation
+    std::thread download_thread([&]() {
+        int consecutive_errors = 0;
+        const int max_consecutive_errors = 15;
+        
+        AddDebugLog(L"[DOWNLOAD-NAMEDPIPE] Starting download thread for " + channel_name);
+        
+        while (download_running.load() && !cancel_token.load() && consecutive_errors < max_consecutive_errors) {
+            // Download current playlist
+            std::string playlist;
+            if (!HttpGetTextWithCancel(media_playlist_url, playlist, &cancel_token)) {
+                consecutive_errors++;
+                AddDebugLog(L"[DOWNLOAD-NAMEDPIPE] Playlist fetch FAILED for " + channel_name + 
+                           L", error " + std::to_wstring(consecutive_errors) + L"/" + 
+                           std::to_wstring(max_consecutive_errors));
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                continue;
+            }
+            consecutive_errors = 0;
+            
+            // Check for stream end
+            if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
+                AddDebugLog(L"[DOWNLOAD-NAMEDPIPE] Found #EXT-X-ENDLIST - stream ended for " + channel_name);
+                stream_ended_normally = true;
+                break;
+            }
+            
+            // Parse segments from playlist (simplified parsing)
+            std::vector<std::wstring> segments;
+            std::istringstream pss(playlist);
+            std::string pline;
+            while (std::getline(pss, pline)) {
+                if (!pline.empty() && pline[0] != '#' && pline.find(".ts") != std::string::npos) {
+                    segments.push_back(std::wstring(pline.begin(), pline.end()));
+                }
+            }
+            
+            // Download new segments
+            int new_segments_downloaded = 0;
+            for (auto& seg : segments) {
+                if (!download_running.load() || cancel_token.load()) break;
+                
+                // Skip segments we've already seen
+                if (seen_urls.count(seg)) continue;
+                
+                // Check buffer size before downloading more
+                size_t current_buffer_size;
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex);
+                    current_buffer_size = buffer_queue.size();
+                }
+                
+                if (current_buffer_size >= max_buffer_segments && !urgent_download_needed.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    continue;
+                }
+                
+                seen_urls.insert(seg);
+                std::wstring seg_url = JoinUrl(media_playlist_url, seg);
+                std::vector<char> seg_data;
+                
+                // Download segment with retries
+                bool download_ok = false;
+                for (int retry = 0; retry < 3; ++retry) {
+                    if (HttpGetBinaryWithCancel(seg_url, seg_data, &cancel_token)) {
+                        download_ok = true;
+                        break;
+                    }
+                    if (!download_running.load() || cancel_token.load()) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                }
+                
+                if (download_ok && !seg_data.empty()) {
+                    // Add to buffer
+                    {
+                        std::lock_guard<std::mutex> lock(buffer_mutex);
+                        buffer_queue.push(std::move(seg_data));
+                    }
+                    new_segments_downloaded++;
+                    AddDebugLog(L"[DOWNLOAD-NAMEDPIPE] Downloaded segment " + std::to_wstring(new_segments_downloaded) + 
+                               L", buffer=" + std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
+                } else {
+                    AddDebugLog(L"[DOWNLOAD-NAMEDPIPE] FAILED to download segment for " + channel_name);
+                }
+            }
+            
+            // Sleep before next playlist fetch
+            if (urgent_download_needed.load()) {
+                urgent_download_needed.store(false);
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            }
         }
         
-        // Small delay between segments to simulate real streaming
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+        AddDebugLog(L"[DOWNLOAD-NAMEDPIPE] Download thread ending for " + channel_name);
+    });
     
-    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Named Pipe streaming demonstration completed");
+    // Main feeder thread - sends real video segments via Named Pipe
+    std::thread feeder_thread([&]() {
+        bool started = false;
+        const size_t min_buffer_size = 3;
+        
+        AddDebugLog(L"[FEEDER-NAMEDPIPE] Starting feeder thread for " + channel_name);
+        
+        while (download_running.load() || !buffer_queue.empty()) {
+            if (cancel_token.load()) break;
+            
+            size_t buffer_size;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex);
+                buffer_size = buffer_queue.size();
+            }
+            
+            // Wait for initial buffer before starting
+            if (!started) {
+                if (buffer_size >= target_buffer_segments) {
+                    started = true;
+                    AddDebugLog(L"[FEEDER-NAMEDPIPE] Initial buffer ready (" + 
+                               std::to_wstring(buffer_size) + L" segments), starting Named Pipe feed for " + channel_name);
+                } else {
+                    AddDebugLog(L"[FEEDER-NAMEDPIPE] Waiting for initial buffer (" + std::to_wstring(buffer_size) + L"/" +
+                               std::to_wstring(target_buffer_segments) + L") for " + channel_name);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    continue;
+                }
+            }
+            
+            // Get segments to feed
+            std::vector<std::vector<char>> segments_to_feed;
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex);
+                
+                int max_segments_to_feed = 1;
+                if (buffer_size < min_buffer_size) {
+                    max_segments_to_feed = std::min((int)buffer_queue.size(), 3);
+                    
+                    if (buffer_size == 0) {
+                        AddDebugLog(L"[FEEDER-NAMEDPIPE] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
+                        urgent_download_needed.store(true);
+                    }
+                }
+                
+                int segments_fed = 0;
+                while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
+                    segments_to_feed.push_back(std::move(buffer_queue.front()));
+                    buffer_queue.pop();
+                    segments_fed++;
+                }
+            }
+            
+            if (!segments_to_feed.empty()) {
+                // Send segments via Named Pipe
+                for (const auto& segment_data : segments_to_feed) {
+                    if (segment_data.empty()) continue;
+                    
+                    DWORD bytes_written;
+                    if (!WriteFile(server_handle, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, nullptr)) {
+                        DWORD error = GetLastError();
+                        AddDebugLog(L"[FEEDER-NAMEDPIPE] Failed to write segment via Named Pipe for " + channel_name + 
+                                   L", error=" + std::to_wstring(error));
+                        break;
+                    } else {
+                        AddDebugLog(L"[FEEDER-NAMEDPIPE] Successfully sent " + std::to_wstring(bytes_written) + 
+                                   L" bytes via Named Pipe for " + channel_name);
+                    }
+                }
+                
+                // Delay between segment groups
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        
+        AddDebugLog(L"[FEEDER-NAMEDPIPE] Feeder thread ending for " + channel_name);
+    });
     
-    // Keep process alive briefly to observe results
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+    // Wait for threads to complete or cancellation
+    download_thread.join();
+    feeder_thread.join();
     
+    // Cleanup
     CloseHandle(server_handle);
     
+    AddDebugLog(L"[IPC-METHOD] Named Pipe streaming completed for " + channel_name);
     return true;
 }
 
