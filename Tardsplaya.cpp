@@ -956,6 +956,21 @@ LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         // (Handled by parent)
         return 0;
     }
+    if (msg == WM_KEYDOWN) {
+        // Handle Enter key in Channel text box
+        if (wParam == VK_RETURN) {
+            HWND hFocused = GetFocus();
+            if (hFocused && GetDlgCtrlID(hFocused) == IDC_CHANNEL) {
+                // Get tab index and trigger Load functionality
+                int tabIndex = (int)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+                if (tabIndex >= 0 && tabIndex < (int)g_streams.size()) {
+                    StreamTab& tab = g_streams[tabIndex];
+                    LoadChannel(tab);
+                }
+                return 0; // Prevent default processing
+            }
+        }
+    }
     if (msg == WM_COMMAND) {
         // Get tab index instead of pointer to avoid vector reallocation issues
         int tabIndex = (int)GetWindowLongPtr(hwnd, GWLP_USERDATA);
