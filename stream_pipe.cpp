@@ -418,10 +418,24 @@ static std::pair<int, std::chrono::milliseconds> AnalyzePlaylistWithTSDuck(const
     // Get TSDuck's recommendations for optimal buffering
     int optimal_buffer_segments = tsduck_parser.GetOptimalBufferSegments();
     std::chrono::milliseconds playlist_duration = tsduck_parser.GetPlaylistDuration();
+    bool has_ads = tsduck_parser.HasAdMarkers();
+    
+    // When ads are detected, increase buffer size to account for placeholder segments
+    // Placeholder segments provide minimal content but consume buffer slots
+    if (has_ads) {
+        // Increase buffer by 50% when ads are present to compensate for timing disruption
+        optimal_buffer_segments = static_cast<int>(optimal_buffer_segments * 1.5);
+        
+        // Ensure minimum buffer size for ad-heavy content
+        optimal_buffer_segments = std::max(optimal_buffer_segments, 10);
+        
+        AddDebugLog(L"[TSDUCK] Ad content detected - increased buffer recommendation to " + 
+                   std::to_wstring(optimal_buffer_segments) + L" segments for better ad handling");
+    }
     
     AddDebugLog(L"[TSDUCK] Analysis: optimal_buffer=" + std::to_wstring(optimal_buffer_segments) + 
                L", playlist_duration=" + std::to_wstring(playlist_duration.count()) + L"ms" +
-               L", has_ads=" + std::to_wstring(tsduck_parser.HasAdMarkers()) +
+               L", has_ads=" + std::to_wstring(has_ads) +
                L", live=" + std::to_wstring(tsduck_parser.IsLiveStream()));
     
     return std::make_pair(optimal_buffer_segments, playlist_duration);
@@ -964,25 +978,26 @@ bool BufferAndPipeStreamToPlayer(
             auto segments = parse_result.first;
             bool should_clear_buffer = parse_result.second;
             
-            // TSDuck-enhanced analysis for dynamic buffer optimization
-            static auto last_tsduck_analysis = std::chrono::steady_clock::time_point{};
+            // TSDuck-enhanced analysis for dynamic buffer optimization - run on every playlist fetch
             static int tsduck_recommended_buffer = buffer_segments;
             static bool first_analysis_done = false;
-            auto now = std::chrono::steady_clock::now();
             
-            // Run TSDuck analysis on first playlist and then periodically (every 30 seconds) to optimize buffering
-            if (!first_analysis_done || std::chrono::duration_cast<std::chrono::seconds>(now - last_tsduck_analysis).count() >= 30) {
-                auto tsduck_analysis = AnalyzePlaylistWithTSDuck(playlist);
-                tsduck_recommended_buffer = tsduck_analysis.first;
-                last_tsduck_analysis = now;
-                
+            // Run TSDuck analysis on every playlist fetch for optimal responsiveness, especially during ad events
+            auto tsduck_analysis = AnalyzePlaylistWithTSDuck(playlist);
+            int new_tsduck_recommendation = tsduck_analysis.first;
+            
+            // Only log if recommendation changes or on first run to reduce log noise
+            if (!first_analysis_done || new_tsduck_recommendation != tsduck_recommended_buffer) {
                 std::wstring analysis_type = first_analysis_done ? L"Updated" : L"Initial";
                 first_analysis_done = true;
                 
                 AddDebugLog(L"[TSDUCK] " + analysis_type + 
-                           L" buffer recommendation: " + std::to_wstring(tsduck_recommended_buffer) + 
-                           L" segments (original: " + std::to_wstring(buffer_segments) + L") for " + channel_name);
+                           L" buffer recommendation: " + std::to_wstring(new_tsduck_recommendation) + 
+                           L" segments (was: " + std::to_wstring(tsduck_recommended_buffer) + 
+                           L", original: " + std::to_wstring(buffer_segments) + L") for " + channel_name);
             }
+            
+            tsduck_recommended_buffer = new_tsduck_recommendation;
             
             // Use TSDuck's recommendation if it suggests a larger buffer for better performance
             int effective_buffer_size = std::max(buffer_segments, tsduck_recommended_buffer);
