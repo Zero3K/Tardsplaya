@@ -4,6 +4,7 @@
 #include "playlist_parser.h"
 #include "mailslot_comparison.h"
 #include "alternative_ipc_demo.h"
+#include "ipc_implementations.h"
 #include <windows.h>
 #include <tlhelp32.h>
 #include <string>
@@ -521,7 +522,7 @@ bool DemonstrateMailSlotVsPipeComparison(const std::wstring& channel_name) {
     return true;
 }
 
-bool BufferAndPipeStreamToPlayer(
+bool BufferAndPipeStreamToPlayerOriginal(
     const std::wstring& player_path,
     const std::wstring& playlist_url,
     std::atomic<bool>& cancel_token,
@@ -1201,6 +1202,36 @@ bool BufferAndPipeStreamToPlayer(
     // If user explicitly cancelled or stream ended normally, or if the process
     // was terminated (which could be user closing the player), consider it successful
     return normal_end || user_cancel || !ProcessStillRunning(pi.hProcess, channel_name + L" final_return_check", pi.dwProcessId);
+}
+
+// New wrapper function that allows choosing IPC method
+bool BufferAndPipeStreamToPlayer(
+    const std::wstring& player_path,
+    const std::wstring& playlist_url,
+    std::atomic<bool>& cancel_token,
+    int buffer_segments,
+    const std::wstring& channel_name,
+    std::atomic<int>* chunk_count,
+    const std::wstring& selected_quality
+) {
+    // Use the globally configured IPC method
+    switch (g_current_ipc_method) {
+        case IPCMethod::MAILSLOTS:
+            AddDebugLog(L"BufferAndPipeStreamToPlayer: Using MailSlot-based IPC for " + channel_name);
+            return BufferAndMailSlotStreamToPlayer(player_path, playlist_url, cancel_token,
+                                                 buffer_segments, channel_name, chunk_count, selected_quality);
+        
+        case IPCMethod::NAMED_PIPES:
+            AddDebugLog(L"BufferAndPipeStreamToPlayer: Using Named Pipe-based IPC for " + channel_name);
+            return BufferAndNamedPipeStreamToPlayer(player_path, playlist_url, cancel_token,
+                                                  buffer_segments, channel_name, chunk_count, selected_quality);
+        
+        case IPCMethod::ANONYMOUS_PIPES:
+        default:
+            AddDebugLog(L"BufferAndPipeStreamToPlayer: Using Anonymous Pipe-based IPC (original) for " + channel_name);
+            return BufferAndPipeStreamToPlayerOriginal(player_path, playlist_url, cancel_token,
+                                                     buffer_segments, channel_name, chunk_count, selected_quality);
+    }
 }
 
 bool DemonstrateAlternativeIPCMethods(const std::wstring& channel_name) {

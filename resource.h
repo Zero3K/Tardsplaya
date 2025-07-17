@@ -46,3 +46,8 @@
 #define ID_TRAYICON             2000
 #define TIMER_PLAYER_CHECK      3000
 #define TIMER_CHUNK_UPDATE      3001
+
+// IPC method selection controls  
+#define IDC_IPC_ANONYMOUS       1112
+#define IDC_IPC_MAILSLOTS       1113
+#define IDC_IPC_NAMED_PIPES     1114

@@ -25,6 +25,7 @@
 #include "twitch_api.h"
 #include "favorites.h"
 #include "playlist_parser.h"
+#include "ipc_implementations.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
@@ -1045,6 +1046,20 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
 
+    // Add IPC method selection controls
+    HWND hIPCLabel = CreateWindowEx(0, L"STATIC", L"IPC Method:", WS_CHILD | WS_VISIBLE, 350, 40, 80, 18, hwnd, nullptr, g_hInst, nullptr);
+    SendMessage(hIPCLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
+    HWND hIPCAnonymous = CreateWindowEx(0, L"BUTTON", L"Anonymous Pipes", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP, 350, 60, 120, 20, hwnd, (HMENU)IDC_IPC_ANONYMOUS, g_hInst, nullptr);
+    SendMessage(hIPCAnonymous, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    SendMessage(hIPCAnonymous, BM_SETCHECK, BST_CHECKED, 0); // Default selection
+    
+    HWND hIPCMailSlots = CreateWindowEx(0, L"BUTTON", L"MailSlots", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 350, 80, 120, 20, hwnd, (HMENU)IDC_IPC_MAILSLOTS, g_hInst, nullptr);
+    SendMessage(hIPCMailSlots, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
+    HWND hIPCNamedPipes = CreateWindowEx(0, L"BUTTON", L"Named Pipes", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 350, 100, 120, 20, hwnd, (HMENU)IDC_IPC_NAMED_PIPES, g_hInst, nullptr);
+    SendMessage(hIPCNamedPipes, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+
     tab.hChild = hwnd;
     tab.hQualities = hQualList;
     tab.hWatchBtn = hWatch;
@@ -1414,6 +1429,18 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             break;
         case IDC_CHECK_VERSION:
             CheckVersion();
+            break;
+        case IDC_IPC_ANONYMOUS:
+            g_current_ipc_method = IPCMethod::ANONYMOUS_PIPES;
+            AddDebugLog(L"[IPC] Switched to Anonymous Pipes mode");
+            break;
+        case IDC_IPC_MAILSLOTS:
+            g_current_ipc_method = IPCMethod::MAILSLOTS;
+            AddDebugLog(L"[IPC] Switched to MailSlots mode");
+            break;
+        case IDC_IPC_NAMED_PIPES:
+            g_current_ipc_method = IPCMethod::NAMED_PIPES;
+            AddDebugLog(L"[IPC] Switched to Named Pipes mode");
             break;
         case IDC_FAVORITES_LIST:
             if (HIWORD(wParam) == LBN_DBLCLK) {
