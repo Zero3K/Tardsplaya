@@ -8,6 +8,7 @@ A Twitch stream player for Windows with enhanced TLS support.
 - Quality selection
 - Windows 7+ compatibility
 - **Enhanced TLS Client Support** - Custom TLS implementation for better compatibility with older Windows versions
+- **Frame Number Tagging** - Advanced performance monitoring and lag diagnosis system
 
 ## TLS Client Integration
 
@@ -30,6 +31,28 @@ The TLS client integration includes:
 The integration works as a fallback system:
 1. Primary: WinHTTP (standard Windows HTTP library)
 2. Fallback: Custom TLS client (when WinHTTP fails or on older systems)
+
+## Frame Number Tagging
+
+Advanced performance monitoring and lag diagnosis system that provides:
+
+- **Real-time Performance Tracking**: Monitor download times for each video segment
+- **Lag Detection**: Automatic warnings when performance degrades beyond acceptable thresholds
+- **Success Rate Monitoring**: Track reliability of segment downloads
+- **Ad Segment Tracking**: Monitor ad replacement timing and impact
+- **Performance Summaries**: Periodic reports showing stream health and performance trends
+
+### Lag Diagnosis Capabilities
+
+Frame Number Tagging helps identify the root causes of streaming lag by:
+
+- Tracking individual segment download times (normal: <500ms, warning: >2000ms)
+- Detecting sequence gaps that indicate dropped frames
+- Monitoring download success rates (warning if <90%)
+- Providing detailed timing analysis for troubleshooting
+- Correlating performance issues with specific stream segments
+
+See [FRAME_TAGGING.md](FRAME_TAGGING.md) for detailed documentation and usage examples.
 
 ## Building
 
