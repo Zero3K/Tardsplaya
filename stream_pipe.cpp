@@ -411,8 +411,8 @@ struct AdBlockState {
 static std::pair<int, std::chrono::milliseconds> AnalyzePlaylistWithTSDuck(const std::string& playlist) {
     tsduck_hls::PlaylistParser tsduck_parser;
     if (!tsduck_parser.ParsePlaylist(playlist)) {
-        // Return default values if parsing fails
-        return std::make_pair(3, std::chrono::milliseconds(6000));
+        // Return conservative values if parsing fails for better stability
+        return std::make_pair(12, std::chrono::milliseconds(6000)); // Increased from 3 to 12 segments
     }
     
     // Get TSDuck's recommendations for optimal buffering
@@ -875,7 +875,7 @@ bool BufferAndPipeStreamToPlayer(
     HANDLE stdin_pipe = hStdinWrite;
     
     // TSDuck-enhanced buffering parameters - these will be updated dynamically
-    std::atomic<int> dynamic_target_buffer{std::max(buffer_segments, 10)}; // Minimum 10 segments
+    std::atomic<int> dynamic_target_buffer{std::max(buffer_segments, 15)}; // Increased minimum from 10 to 15 segments for better stability
     std::atomic<int> dynamic_max_buffer{dynamic_target_buffer.load() * 2}; // Don't over-buffer
     const int buffer_full_timeout_seconds = 15; // Empty buffer if full for this long
     
@@ -990,8 +990,8 @@ bool BufferAndPipeStreamToPlayer(
                 AddDebugLog(L"[TSDUCK] Using enhanced buffer size: " + std::to_wstring(effective_buffer_size) + 
                            L" instead of " + std::to_wstring(buffer_segments) + L" for " + channel_name);
                 
-                // Update dynamic buffer parameters
-                dynamic_target_buffer.store(std::max(effective_buffer_size, 10));
+                // Update dynamic buffer parameters with higher minimums for stability
+                dynamic_target_buffer.store(std::max(effective_buffer_size, 15)); // Increased minimum from 10 to 15
                 dynamic_max_buffer.store(dynamic_target_buffer.load() * 2);
                 
                 AddDebugLog(L"[TSDUCK] Updated dynamic buffers: target=" + std::to_wstring(dynamic_target_buffer.load()) + 
@@ -1184,7 +1184,6 @@ bool BufferAndPipeStreamToPlayer(
         auto feeder_startup_delay = std::chrono::duration_cast<std::chrono::milliseconds>(feeder_start_time - thread_start_time);
         
         bool started = false;
-        const size_t min_buffer_size = 3; // Minimum 3 segments for smooth streaming
         int empty_buffer_count = 0;
         const int max_empty_waits = 100; // 5 seconds max wait for data (50ms * 100)
         
@@ -1236,6 +1235,9 @@ bool BufferAndPipeStreamToPlayer(
             std::vector<std::vector<char>> segments_to_feed;
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
+                
+                // Get dynamic minimum buffer size - use at least 1/3 of target buffer as minimum threshold
+                size_t min_buffer_size = std::max(3, dynamic_target_buffer.load() / 3); // At least 3, or 1/3 of target
                 
                 // Feed multiple segments when buffer is low to prevent freezing
                 int max_segments_to_feed = 1;

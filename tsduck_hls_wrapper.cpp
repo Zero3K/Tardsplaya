@@ -256,7 +256,7 @@ std::chrono::milliseconds PlaylistParser::GetPlaylistDuration() const {
 
 // BufferingOptimizer implementation
 int BufferingOptimizer::CalculateOptimalBufferSize(const std::vector<MediaSegment>& segments) {
-    if (segments.empty()) return 3; // Default fallback
+    if (segments.empty()) return 8; // Increased default fallback for better stability
     
     // TSDuck-inspired buffer calculation based on segment characteristics
     double avg_duration = 0.0;
@@ -271,8 +271,8 @@ int BufferingOptimizer::CalculateOptimalBufferSize(const std::vector<MediaSegmen
         avg_duration /= segments.size();
     }
     
-    // Calculate optimal buffer: aim for 6-10 seconds of content
-    int optimal_segments = static_cast<int>(std::ceil(8.0 / avg_duration)); // 8 seconds target
+    // Calculate optimal buffer: aim for 10-15 seconds of content for better stability
+    int optimal_segments = static_cast<int>(std::ceil(12.0 / avg_duration)); // 12 seconds target (increased from 8)
     
     // Adjust for ad density - more ads = larger buffer for smoother skipping
     double ad_ratio = static_cast<double>(ad_segments) / segments.size();
@@ -280,8 +280,8 @@ int BufferingOptimizer::CalculateOptimalBufferSize(const std::vector<MediaSegmen
         optimal_segments = static_cast<int>(optimal_segments * 1.5);
     }
     
-    // Clamp to reasonable range
-    return std::max(2, std::min(optimal_segments, 8));
+    // Clamp to reasonable range with higher minimums for stability
+    return std::max(6, std::min(optimal_segments, 15)); // Increased minimum from 2 to 6, max from 8 to 15
 }
 
 std::chrono::milliseconds BufferingOptimizer::CalculatePreloadTime(const std::vector<MediaSegment>& segments) {
