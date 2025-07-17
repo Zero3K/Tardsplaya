@@ -9,6 +9,41 @@ A Twitch stream player for Windows with enhanced TLS support.
 - Windows 7+ compatibility
 - **Enhanced TLS Client Support** - Custom TLS implementation for better compatibility with older Windows versions
 
+## TSDuck Integration for Enhanced Performance
+
+This version includes **TSDuck-inspired HLS processing** for improved streaming performance and reduced lag.
+
+### Performance Enhancements
+
+- **Advanced HLS Parsing**: TSDuck-inspired playlist analysis with precise timing calculations
+- **Smart Buffering**: Dynamic buffer sizing based on stream characteristics
+- **Enhanced Ad Detection**: Sophisticated SCTE-35 and pattern-based ad detection
+- **Optimized Timing**: Better segment timing for smoother playback
+
+### Technical Details
+
+The TSDuck integration includes:
+
+- `tsduck_hls_wrapper.h/cpp` - Lightweight TSDuck-inspired HLS parser
+- Enhanced playlist analysis with precise duration calculations  
+- Dynamic buffer optimization based on stream characteristics
+- Advanced ad detection using multiple detection patterns
+- SCTE-35 processing for professional-grade ad handling
+
+### Performance Benefits
+
+| Feature | Before | After |
+|---------|--------|--------|
+| Buffer Management | Static 3 segments | Dynamic 2-8 segments based on content |
+| Ad Detection | Basic pattern matching | TSDuck-style multi-pattern analysis |
+| Timing Precision | Basic duration parsing | Millisecond-precise calculations |
+| Lag Reduction | Manual tuning | Automatic optimization |
+
+The integration works transparently:
+1. **Primary**: TSDuck-enhanced parsing for optimal performance
+2. **Fallback**: Original parsing if TSDuck analysis fails
+3. **Dynamic**: Buffer sizes adjust automatically based on content
+
 ## TLS Client Integration
 
 This version includes an integrated TLS client from the [tlsclient](https://github.com/zero3k/tlsclient) repository, providing:

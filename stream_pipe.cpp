@@ -2,6 +2,7 @@
 #include "stream_thread.h"
 #include "twitch_api.h"
 #include "playlist_parser.h"
+#include "tsduck_hls_wrapper.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -405,6 +406,26 @@ struct AdBlockState {
     static const int MAX_CONSECUTIVE_SKIPPED_SEGMENTS = 15; // ~30 seconds for 2-second segments
     static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
 };
+
+// TSDuck-enhanced segment analyzer for improved buffering and timing
+static std::pair<int, std::chrono::milliseconds> AnalyzePlaylistWithTSDuck(const std::string& playlist) {
+    tsduck_hls::PlaylistParser tsduck_parser;
+    if (!tsduck_parser.ParsePlaylist(playlist)) {
+        // Return default values if parsing fails
+        return std::make_pair(3, std::chrono::milliseconds(6000));
+    }
+    
+    // Get TSDuck's recommendations for optimal buffering
+    int optimal_buffer_segments = tsduck_parser.GetOptimalBufferSegments();
+    std::chrono::milliseconds playlist_duration = tsduck_parser.GetPlaylistDuration();
+    
+    AddDebugLog(L"[TSDUCK] Analysis: optimal_buffer=" + std::to_wstring(optimal_buffer_segments) + 
+               L", playlist_duration=" + std::to_wstring(playlist_duration.count()) + L"ms" +
+               L", has_ads=" + std::to_wstring(tsduck_parser.HasAdMarkers()) +
+               L", live=" + std::to_wstring(tsduck_parser.IsLiveStream()));
+    
+    return std::make_pair(optimal_buffer_segments, playlist_duration);
+}
 
 // Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
 // Returns pair of (segments, should_clear_buffer)
@@ -853,16 +874,17 @@ bool BufferAndPipeStreamToPlayer(
     // Store pipe handle for cleanup
     HANDLE stdin_pipe = hStdinWrite;
     
-    const int target_buffer_segments = std::max(buffer_segments, 10); // Minimum 10 segments
-    const int max_buffer_segments = target_buffer_segments * 2; // Don't over-buffer
+    // TSDuck-enhanced buffering parameters - these will be updated dynamically
+    std::atomic<int> dynamic_target_buffer{std::max(buffer_segments, 10)}; // Minimum 10 segments
+    std::atomic<int> dynamic_max_buffer{dynamic_target_buffer.load() * 2}; // Don't over-buffer
     const int buffer_full_timeout_seconds = 15; // Empty buffer if full for this long
     
     // Buffer fullness timeout tracking
     std::chrono::steady_clock::time_point buffer_full_start_time;
     bool buffer_full_timer_active = false;
     
-    AddDebugLog(L"BufferAndPipeStreamToPlayer: Target buffer: " + std::to_wstring(target_buffer_segments) + 
-               L" segments, max: " + std::to_wstring(max_buffer_segments) + 
+    AddDebugLog(L"BufferAndPipeStreamToPlayer: Initial target buffer: " + std::to_wstring(dynamic_target_buffer.load()) + 
+               L" segments, max: " + std::to_wstring(dynamic_max_buffer.load()) + 
                L", timeout: " + std::to_wstring(buffer_full_timeout_seconds) + L"s for " + channel_name);
 
     // Log thread creation timing
@@ -942,6 +964,35 @@ bool BufferAndPipeStreamToPlayer(
             auto segments = parse_result.first;
             bool should_clear_buffer = parse_result.second;
             
+            // TSDuck-enhanced analysis for dynamic buffer optimization
+            static auto last_tsduck_analysis = std::chrono::steady_clock::now();
+            static int tsduck_recommended_buffer = buffer_segments;
+            auto now = std::chrono::steady_clock::now();
+            
+            // Run TSDuck analysis periodically (every 30 seconds) to optimize buffering
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_tsduck_analysis).count() >= 30) {
+                auto tsduck_analysis = AnalyzePlaylistWithTSDuck(playlist);
+                tsduck_recommended_buffer = tsduck_analysis.first;
+                last_tsduck_analysis = now;
+                
+                AddDebugLog(L"[TSDUCK] Updated buffer recommendation: " + std::to_wstring(tsduck_recommended_buffer) + 
+                           L" segments (original: " + std::to_wstring(buffer_segments) + L") for " + channel_name);
+            }
+            
+            // Use TSDuck's recommendation if it suggests a larger buffer for better performance
+            int effective_buffer_size = std::max(buffer_segments, tsduck_recommended_buffer);
+            if (effective_buffer_size != buffer_segments) {
+                AddDebugLog(L"[TSDUCK] Using enhanced buffer size: " + std::to_wstring(effective_buffer_size) + 
+                           L" instead of " + std::to_wstring(buffer_segments) + L" for " + channel_name);
+                
+                // Update dynamic buffer parameters
+                dynamic_target_buffer.store(std::max(effective_buffer_size, 10));
+                dynamic_max_buffer.store(dynamic_target_buffer.load() * 2);
+                
+                AddDebugLog(L"[TSDUCK] Updated dynamic buffers: target=" + std::to_wstring(dynamic_target_buffer.load()) + 
+                           L", max=" + std::to_wstring(dynamic_max_buffer.load()) + L" for " + channel_name);
+            }
+            
             // Clear buffer if we just started an ad block to prevent showing old content
             if (should_clear_buffer) {
                 size_t cleared_segments;
@@ -1009,7 +1060,7 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 
                 bool urgent_bypass = urgent_download_needed.load();
-                if (current_buffer_size >= max_buffer_segments && !urgent_bypass) {
+                if (current_buffer_size >= dynamic_max_buffer.load() && !urgent_bypass) {
                     auto current_time = std::chrono::steady_clock::now();
                     
                     // Start timing if this is the first time buffer is full
@@ -1056,7 +1107,7 @@ bool BufferAndPipeStreamToPlayer(
                     // Log if urgent download is bypassing normal buffer checks
                     if (urgent_bypass) {
                         AddDebugLog(L"[DOWNLOAD] Urgent download bypassing buffer fullness check (buffer=" + 
-                                   std::to_wstring(current_buffer_size) + L"/" + std::to_wstring(max_buffer_segments) + L") for " + channel_name);
+                                   std::to_wstring(current_buffer_size) + L"/" + std::to_wstring(dynamic_max_buffer.load()) + L") for " + channel_name);
                     }
                 }
                 
@@ -1164,13 +1215,13 @@ bool BufferAndPipeStreamToPlayer(
             
             // Wait for initial buffer before starting - increased for stability
             if (!started) {
-                if (buffer_size >= target_buffer_segments) {
+                if (buffer_size >= dynamic_target_buffer.load()) {
                     started = true;
                     AddDebugLog(L"[FEEDER] Initial buffer ready (" + 
                                std::to_wstring(buffer_size) + L" segments), starting IPC feed for " + channel_name);
                 } else {
                     AddDebugLog(L"[FEEDER] Waiting for initial buffer (" + std::to_wstring(buffer_size) + L"/" +
-                               std::to_wstring(target_buffer_segments) + L") for " + channel_name);
+                               std::to_wstring(dynamic_target_buffer.load()) + L") for " + channel_name);
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
                 }
