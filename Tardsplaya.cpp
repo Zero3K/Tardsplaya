@@ -823,6 +823,10 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
         
         EnableWindow(tab.hWatchBtn, TRUE);
         EnableWindow(tab.hStopBtn, FALSE);
+        // Re-enable channel textbox, quality listbox, and Load button when streaming stops
+        EnableWindow(GetDlgItem(tab.hChild, IDC_CHANNEL), TRUE);
+        EnableWindow(tab.hQualities, TRUE);
+        EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), TRUE);
         SetWindowTextW(tab.hWatchBtn, L"2. Watch");
         
         // Check if any other streams are still active
@@ -937,6 +941,10 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     tab.playerStarted = false;
     EnableWindow(tab.hWatchBtn, FALSE);
     EnableWindow(tab.hStopBtn, TRUE);
+    // Disable channel textbox, quality listbox, and Load button when streaming starts
+    EnableWindow(GetDlgItem(tab.hChild, IDC_CHANNEL), FALSE);
+    EnableWindow(tab.hQualities, FALSE);
+    EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), FALSE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
     UpdateStatusBar(L"Chunk Queue: Buffering...");
     
