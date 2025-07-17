@@ -20,3 +20,16 @@ bool BufferAndPipeStreamToPlayer(
  * This function tests both approaches with sample video data to show the limitations
  */
 bool DemonstrateMailSlotVsPipeComparison(const std::wstring& channel_name);
+
+/**
+ * Demonstrates what happens when using MailSlots and Named Pipes 
+ * in place of the three current IPC methods
+ * 
+ * Tests:
+ * 1. MailSlot streaming instead of Anonymous Pipes (main method)
+ * 2. Named Pipe streaming instead of Memory-Mapped Files (secondary method)  
+ * 3. Named Pipe HTTP-like service instead of TCP/HTTP Server (fallback method)
+ * 
+ * This shows practical challenges and performance implications
+ */
+bool DemonstrateAlternativeIPCMethods(const std::wstring& channel_name);

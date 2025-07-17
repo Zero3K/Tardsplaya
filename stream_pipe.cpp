@@ -3,6 +3,7 @@
 #include "twitch_api.h"
 #include "playlist_parser.h"
 #include "mailslot_comparison.h"
+#include "alternative_ipc_demo.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -1423,4 +1424,50 @@ bool BufferAndPipeStreamToPlayer(
     // If user explicitly cancelled or stream ended normally, or if the process
     // was terminated (which could be user closing the player), consider it successful
     return normal_end || user_cancel || !ProcessStillRunning(pi.hProcess, channel_name + L" final_return_check", pi.dwProcessId);
+}
+
+bool DemonstrateAlternativeIPCMethods(const std::wstring& channel_name) {
+    AddDebugLog(L"[ALTERNATIVE-IPC] Starting demonstration of MailSlots and Named Pipes alternatives for: " + channel_name);
+    
+    // Create sample video data for testing (simulate 1MB video segment)
+    std::vector<char> test_video_data(1024 * 1024, 'X'); // 1MB of test data
+    
+    // Fill with some pattern to simulate real video data
+    for (size_t i = 0; i < test_video_data.size(); i++) {
+        test_video_data[i] = static_cast<char>(i % 256);
+    }
+    
+    std::atomic<bool> cancel_token(false);
+    
+    try {
+        // Run comprehensive demo of all alternative methods
+        auto results = AlternativeIPCDemo::RunComprehensiveDemo(test_video_data, channel_name, cancel_token);
+        
+        // Generate and log comparison report
+        std::wstring report = AlternativeIPCDemo::GenerateComparisonReport(results, test_video_data);
+        
+        // Split report into chunks for debug log
+        std::wstringstream ss(report);
+        std::wstring line;
+        while (std::getline(ss, line)) {
+            AddDebugLog(L"[REPORT] " + line);
+        }
+        
+        // Summary of findings
+        AddDebugLog(L"[ALTERNATIVE-IPC] Demo completed. Key findings:");
+        AddDebugLog(L"[ALTERNATIVE-IPC] 1. MailSlots require bridge processes due to stdin incompatibility");
+        AddDebugLog(L"[ALTERNATIVE-IPC] 2. Named Pipes are better than MailSlots but add complexity vs anonymous pipes");
+        AddDebugLog(L"[ALTERNATIVE-IPC] 3. Named Pipe HTTP-like service limited to single connections");
+        AddDebugLog(L"[ALTERNATIVE-IPC] 4. Current implementations remain optimal for their use cases");
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::string error_msg = e.what();
+        AddDebugLog(L"[ALTERNATIVE-IPC] Exception during demo: " + std::wstring(error_msg.begin(), error_msg.end()));
+        return false;
+    } catch (...) {
+        AddDebugLog(L"[ALTERNATIVE-IPC] Unknown exception during demo");
+        return false;
+    }
 }
