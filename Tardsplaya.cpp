@@ -1001,6 +1001,18 @@ LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 UpdateAddFavoriteButtonState();
             }
             break;
+        case IDC_IPC_ANONYMOUS:
+            g_current_ipc_method = IPCMethod::ANONYMOUS_PIPES;
+            AddDebugLog(L"[IPC-METHOD] User selected: Anonymous Pipes");
+            break;
+        case IDC_IPC_MAILSLOTS:
+            g_current_ipc_method = IPCMethod::MAILSLOTS;
+            AddDebugLog(L"[IPC-METHOD] User selected: MailSlots");
+            break;
+        case IDC_IPC_NAMED_PIPES:
+            g_current_ipc_method = IPCMethod::NAMED_PIPES;
+            AddDebugLog(L"[IPC-METHOD] User selected: Named Pipes");
+            break;
         }
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -1429,18 +1441,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             break;
         case IDC_CHECK_VERSION:
             CheckVersion();
-            break;
-        case IDC_IPC_ANONYMOUS:
-            g_current_ipc_method = IPCMethod::ANONYMOUS_PIPES;
-            AddDebugLog(L"[IPC-METHOD] User selected: Anonymous Pipes");
-            break;
-        case IDC_IPC_MAILSLOTS:
-            g_current_ipc_method = IPCMethod::MAILSLOTS;
-            AddDebugLog(L"[IPC-METHOD] User selected: MailSlots");
-            break;
-        case IDC_IPC_NAMED_PIPES:
-            g_current_ipc_method = IPCMethod::NAMED_PIPES;
-            AddDebugLog(L"[IPC-METHOD] User selected: Named Pipes");
             break;
         case IDC_FAVORITES_LIST:
             if (HIWORD(wParam) == LBN_DBLCLK) {
