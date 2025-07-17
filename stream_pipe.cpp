@@ -2,6 +2,7 @@
 #include "stream_thread.h"
 #include "twitch_api.h"
 #include "playlist_parser.h"
+#include "mailslot_comparison.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -667,6 +668,79 @@ static void SetPlayerWindowTitle(DWORD processId, const std::wstring& title) {
             SetWindowTextW(playerWindow, title.c_str());
         }
     }
+}
+
+/**
+ * Demonstrates why MailSlots cannot replace pipes for video streaming IPC
+ * This function tests both approaches with sample video data to show the limitations
+ */
+bool DemonstrateMailSlotVsPipeComparison(const std::wstring& channel_name) {
+    AddDebugLog(L"[DEMO] Starting MailSlot vs Pipe IPC comparison for " + channel_name);
+    
+    // Create sample video data (simulating a typical video segment)
+    const size_t SAMPLE_VIDEO_SIZE = 2 * 1024 * 1024; // 2MB typical segment
+    std::vector<char> sample_video_data(SAMPLE_VIDEO_SIZE);
+    
+    // Fill with sample data pattern
+    for (size_t i = 0; i < SAMPLE_VIDEO_SIZE; ++i) {
+        sample_video_data[i] = (char)(i % 256);
+    }
+    
+    AddDebugLog(L"[DEMO] Created sample video segment: " + std::to_wstring(SAMPLE_VIDEO_SIZE) + L" bytes");
+    
+    // Test 1: MailSlot approach
+    std::atomic<bool> cancel_token{false};
+    std::wstring mailslot_name = L"\\\\.\\mailslot\\tardsplaya_test";
+    
+    AddDebugLog(L"[DEMO] Testing MailSlot approach...");
+    MailSlotComparisonResult mailslot_result = TestMailSlotDataTransfer(
+        sample_video_data, 
+        mailslot_name, 
+        cancel_token
+    );
+    
+    // Test 2: Pipe approach simulation
+    AddDebugLog(L"[DEMO] Testing Anonymous Pipe approach...");
+    auto pipe_start = std::chrono::high_resolution_clock::now();
+    
+    HANDLE hRead, hWrite;
+    SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    const DWORD PIPE_BUFFER_SIZE = 1024 * 1024; // 1MB buffer
+    
+    bool pipe_success = false;
+    if (CreatePipe(&hRead, &hWrite, &sa, PIPE_BUFFER_SIZE)) {
+        DWORD bytes_written = 0;
+        pipe_success = WriteFile(hWrite, sample_video_data.data(), (DWORD)sample_video_data.size(), &bytes_written, nullptr);
+        
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        
+        if (pipe_success && bytes_written == sample_video_data.size()) {
+            AddDebugLog(L"[DEMO] Pipe approach: Successfully wrote " + std::to_wstring(bytes_written) + L" bytes in single operation");
+        }
+    }
+    
+    auto pipe_end = std::chrono::high_resolution_clock::now();
+    double pipe_time = std::chrono::duration<double, std::milli>(pipe_end - pipe_start).count();
+    
+    // Generate comparison report
+    std::wstring report = GenerateComparisonReport(mailslot_result, PIPE_BUFFER_SIZE, pipe_success);
+    
+    // Log the complete analysis
+    AddDebugLog(L"[DEMO] === IPC COMPARISON COMPLETE ===");
+    AddDebugLog(L"[DEMO] MailSlot Time: " + std::to_wstring(mailslot_result.time_taken_ms) + L"ms");
+    AddDebugLog(L"[DEMO] Pipe Time: " + std::to_wstring(pipe_time) + L"ms");
+    AddDebugLog(L"[DEMO] MailSlot Messages: " + std::to_wstring(mailslot_result.messages_sent));
+    AddDebugLog(L"[DEMO] Pipe Messages: 1");
+    
+    // Output detailed report to debug log
+    std::wistringstream report_stream(report);
+    std::wstring line;
+    while (std::getline(report_stream, line)) {
+        AddDebugLog(L"[DEMO] " + line);
+    }
+    
+    return true;
 }
 
 bool BufferAndPipeStreamToPlayer(

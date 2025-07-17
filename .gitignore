@@ -412,3 +412,9 @@ FodyWeavers.xsd
 test_freeze_fix
 test_freeze_fix.exe
 test_stream_fix.md
+
+# MailSlot comparison test artifacts
+mailslot_test_mock
+mailslot_test_mock.cpp
+mailslot_test.exe
+mailslot_vs_pipe_analysis.txt

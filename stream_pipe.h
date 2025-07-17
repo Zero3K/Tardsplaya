@@ -14,3 +14,9 @@ bool BufferAndPipeStreamToPlayer(
     std::atomic<int>* chunk_count = nullptr, // Pointer to chunk count for status display
     const std::wstring& selected_quality = L"" // User's selected quality for ad recovery
 );
+
+/**
+ * Demonstrates why MailSlots cannot replace pipes for video streaming IPC
+ * This function tests both approaches with sample video data to show the limitations
+ */
+bool DemonstrateMailSlotVsPipeComparison(const std::wstring& channel_name);
