@@ -8,14 +8,13 @@
  * Alternative IPC Implementation Demo
  * 
  * This demonstrates what happens when using MailSlots and Named Pipes 
- * in place of the three current IPC methods:
+ * as alternatives to the current pipe-based IPC methods:
  * 
- * 1. MailSlots → Replace Anonymous Pipes (main streaming)
- * 2. Named Pipes → Replace Memory-Mapped Files (secondary method)  
- * 3. Named Pipes → Replace TCP/HTTP Server (fallback method)
+ * 1. MailSlots → Replace Anonymous Pipes for streaming
+ * 2. Named Pipes → Enhanced streaming approach
  * 
  * NOTE: This is experimental/demonstration code to show practical
- * challenges and performance implications of alternative approaches.
+ * characteristics and performance of alternative approaches.
  */
 
 struct AlternativeIPCResult {
@@ -96,41 +95,10 @@ private:
 };
 
 /**
- * Named Pipe HTTP-like service (Alternative to TCP/HTTP Server)
- * 
- * Uses Named Pipes to provide HTTP-like streaming protocol
- * instead of actual TCP sockets
- */
-class NamedPipeHttpService {
-public:
-    NamedPipeHttpService();
-    ~NamedPipeHttpService();
-    
-    bool Start(const std::wstring& service_name);
-    AlternativeIPCResult ServeData(const std::vector<char>& data, std::atomic<bool>& cancel_token);
-    void Stop();
-    
-    bool IsRunning() const { return running_; }
-    std::wstring GetServiceUrl() const;
-    
-private:
-    HANDLE pipe_handle_;
-    std::wstring service_name_;
-    std::wstring pipe_name_;
-    bool running_;
-    std::atomic<bool> stop_requested_;
-    
-    bool CreateServicePipe();
-    bool SendHttpLikeResponse(const std::vector<char>& data);
-    void HandleClientRequests();
-    std::thread service_thread_;
-};
-
-/**
- * Demonstration functions to compare all IPC methods
+ * Demonstration functions to compare IPC methods
  */
 namespace AlternativeIPCDemo {
-    // Test all three alternative methods with sample data
+    // Test MailSlot and Named Pipe methods with sample data
     std::vector<AlternativeIPCResult> RunComprehensiveDemo(
         const std::vector<char>& test_data,
         const std::wstring& channel_name,
@@ -143,20 +111,15 @@ namespace AlternativeIPCDemo {
         const std::vector<char>& test_data
     );
     
-    // Test MailSlot streaming specifically (main request)
+    // Test MailSlot streaming specifically
     AlternativeIPCResult TestMailSlotStreamingInsteadOfPipes(
         const std::vector<char>& video_data,
         const std::wstring& player_path,
         std::atomic<bool>& cancel_token
     );
     
-    // Test Named Pipe alternatives
-    AlternativeIPCResult TestNamedPipeInsteadOfMemoryMap(
-        const std::vector<char>& video_data,
-        std::atomic<bool>& cancel_token
-    );
-    
-    AlternativeIPCResult TestNamedPipeInsteadOfHttp(
+    // Test Named Pipe streaming
+    AlternativeIPCResult TestNamedPipeStreaming(
         const std::vector<char>& video_data,
         std::atomic<bool>& cancel_token
     );

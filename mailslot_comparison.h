@@ -11,10 +11,9 @@
  * 2. MailSlots are designed for discrete messages, not continuous streaming
  * 3. Media players expect continuous stdin streams, not discrete messages
  * 4. Would require intermediate process to convert messages to streams
- * 5. Message size limits: 400B for broadcast, larger for individual mailslots
  * 
- * Note: This implementation uses conservative 60KB messages to demonstrate chunking,
- * but even with larger messages, the stdin incompatibility remains the main issue.
+ * Note: Individual mailslots can handle large messages (up to what you specify when creating),
+ * so chunking is minimal, but the stdin incompatibility remains the main issue.
  */
 
 struct MailSlotComparisonResult {

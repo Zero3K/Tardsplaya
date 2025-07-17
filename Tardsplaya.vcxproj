@@ -108,7 +108,6 @@
     <ClCompile Include="favorites.cpp" />
     <ClCompile Include="mailslot_comparison.cpp" />
     <ClCompile Include="playlist_parser.cpp" />
-    <ClCompile Include="stream_memory_map.cpp" />
     <ClCompile Include="stream_pipe.cpp" />
     <ClCompile Include="stream_resource_manager.cpp" />
 
@@ -126,7 +125,6 @@
     <ClInclude Include="mailslot_comparison.h" />
     <ClInclude Include="playlist_parser.h" />
     <ClInclude Include="resource.h" />
-    <ClInclude Include="stream_memory_map.h" />
     <ClInclude Include="stream_pipe.h" />
     <ClInclude Include="stream_resource_manager.h" />
 

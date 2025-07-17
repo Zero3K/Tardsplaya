@@ -5,8 +5,8 @@
 #include <thread>
 #include <fstream>
 
-// MailSlot message size - using a reasonable size for streaming
-const DWORD MAILSLOT_CHUNK_SIZE = 60000; // ~60KB chunks
+// MailSlot message size - using large size for individual mailslots
+const DWORD MAILSLOT_CHUNK_SIZE = 10 * 1024 * 1024; // 10MB - large enough for typical video segments
 
 // Named Pipe buffer size
 const DWORD NAMEDPIPE_BUFFER_SIZE = 1024 * 1024; // 1MB buffer
@@ -426,118 +426,6 @@ void NamedPipeStreaming::Disconnect() {
 }
 
 //==============================================================================
-// NamedPipeHttpService Implementation (Simplified)
-//==============================================================================
-
-NamedPipeHttpService::NamedPipeHttpService() 
-    : pipe_handle_(INVALID_HANDLE_VALUE), running_(false), stop_requested_(false) {
-}
-
-NamedPipeHttpService::~NamedPipeHttpService() {
-    Stop();
-}
-
-bool NamedPipeHttpService::Start(const std::wstring& service_name) {
-    service_name_ = service_name;
-    pipe_name_ = L"\\\\.\\pipe\\tardsplaya_http_" + service_name;
-    
-    if (!CreateServicePipe()) {
-        return false;
-    }
-    
-    running_ = true;
-    AddDebugLog(L"[NAMEDPIPE-HTTP] Started service: " + service_name_);
-    return true;
-}
-
-bool NamedPipeHttpService::CreateServicePipe() {
-    pipe_handle_ = CreateNamedPipeW(
-        pipe_name_.c_str(),
-        PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        PIPE_UNLIMITED_INSTANCES,
-        NAMEDPIPE_BUFFER_SIZE,
-        NAMEDPIPE_BUFFER_SIZE,
-        0,
-        nullptr
-    );
-    
-    return (pipe_handle_ != INVALID_HANDLE_VALUE);
-}
-
-AlternativeIPCResult NamedPipeHttpService::ServeData(const std::vector<char>& data, std::atomic<bool>& cancel_token) {
-    AlternativeIPCResult result = {};
-    result.method_name = L"Named Pipe HTTP-like Service";
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
-    if (!running_) {
-        result.error_message = L"Named Pipe HTTP service not running";
-        return result;
-    }
-    
-    // Wait for client connection
-    if (ConnectNamedPipe(pipe_handle_, nullptr) || GetLastError() == ERROR_PIPE_CONNECTED) {
-        if (SendHttpLikeResponse(data)) {
-            result.success = true;
-            result.bytes_transferred = data.size();
-            result.message_count = 1;
-        } else {
-            result.error_message = L"Failed to send HTTP-like response";
-        }
-        
-        DisconnectNamedPipe(pipe_handle_);
-    } else {
-        result.error_message = L"Failed to accept client connection";
-    }
-    
-    auto end_time = std::chrono::high_resolution_clock::now();
-    result.time_taken_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-    
-    result.performance_notes = L"HTTP-like protocol over Named Pipes. Single connection model, not suitable for multiple concurrent clients like TCP.";
-    
-    return result;
-}
-
-bool NamedPipeHttpService::SendHttpLikeResponse(const std::vector<char>& data) {
-    // Send simple HTTP-like headers
-    std::string headers = 
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/octet-stream\r\n"
-        "Content-Length: " + std::to_string(data.size()) + "\r\n"
-        "\r\n";
-    
-    DWORD bytes_written;
-    if (!WriteFile(pipe_handle_, headers.c_str(), headers.length(), &bytes_written, nullptr)) {
-        return false;
-    }
-    
-    // Send data
-    if (!WriteFile(pipe_handle_, data.data(), data.size(), &bytes_written, nullptr)) {
-        return false;
-    }
-    
-    return true;
-}
-
-std::wstring NamedPipeHttpService::GetServiceUrl() const {
-    return L"namedpipe://" + pipe_name_;
-}
-
-void NamedPipeHttpService::Stop() {
-    if (running_) {
-        stop_requested_ = true;
-        running_ = false;
-        
-        if (pipe_handle_ != INVALID_HANDLE_VALUE) {
-            CloseHandle(pipe_handle_);
-            pipe_handle_ = INVALID_HANDLE_VALUE;
-        }
-        
-        AddDebugLog(L"[NAMEDPIPE-HTTP] Stopped service: " + service_name_);
-    }
-}
-
-//==============================================================================
 // Demo Functions
 //==============================================================================
 
@@ -581,22 +469,6 @@ namespace AlternativeIPCDemo {
                 AlternativeIPCResult result = {};
                 result.method_name = L"Named Pipe Streaming";
                 result.error_message = L"Failed to create Named Pipe server";
-                results.push_back(result);
-            }
-        }
-        
-        // Test 3: Named Pipe HTTP-like service
-        {
-            AddDebugLog(L"[DEMO] Testing Named Pipe HTTP-like service...");
-            NamedPipeHttpService http_service;
-            
-            if (http_service.Start(channel_name)) {
-                auto result = http_service.ServeData(test_data, cancel_token);
-                results.push_back(result);
-            } else {
-                AlternativeIPCResult result = {};
-                result.method_name = L"Named Pipe HTTP-like Service";
-                result.error_message = L"Failed to start Named Pipe HTTP service";
                 results.push_back(result);
             }
         }
@@ -679,35 +551,19 @@ namespace AlternativeIPCDemo {
         return mailslot_stream.StreamData(video_data, cancel_token);
     }
     
-    AlternativeIPCResult TestNamedPipeInsteadOfMemoryMap(
+    AlternativeIPCResult TestNamedPipeStreaming(
         const std::vector<char>& video_data,
         std::atomic<bool>& cancel_token
     ) {
         NamedPipeStreaming pipe_stream;
         
-        if (!pipe_stream.CreateAsServer(L"test_memmap_replacement")) {
+        if (!pipe_stream.CreateAsServer(L"test_namedpipe_streaming")) {
             AlternativeIPCResult result = {};
-            result.method_name = L"Named Pipe instead of Memory-Mapped Files";
+            result.method_name = L"Named Pipe Streaming";
             result.error_message = L"Failed to create Named Pipe server";
             return result;
         }
         
         return pipe_stream.StreamData(video_data, cancel_token);
-    }
-    
-    AlternativeIPCResult TestNamedPipeInsteadOfHttp(
-        const std::vector<char>& video_data,
-        std::atomic<bool>& cancel_token
-    ) {
-        NamedPipeHttpService http_service;
-        
-        if (!http_service.Start(L"test_http_replacement")) {
-            AlternativeIPCResult result = {};
-            result.method_name = L"Named Pipe instead of TCP/HTTP";
-            result.error_message = L"Failed to start Named Pipe HTTP service";
-            return result;
-        }
-        
-        return http_service.ServeData(video_data, cancel_token);
     }
 }

@@ -3,10 +3,9 @@
 #include <chrono>
 #include <sstream>
 
-// MailSlot message size - using conservative limit for demonstration
-// Note: Individual mailslots can have larger limits set when created,
-// but this doesn't solve the fundamental stdin incompatibility issue
-const DWORD MAILSLOT_MAX_MESSAGE_SIZE = 60000; // ~60KB for demonstration purposes
+// MailSlot message size - for individual mailslots, we can set larger limits
+// Note: This doesn't solve the fundamental stdin incompatibility issue
+const DWORD MAILSLOT_MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10MB - large enough for typical video segments
 
 MailSlotComparisonResult TestMailSlotDataTransfer(
     const std::vector<char>& video_data,
@@ -65,13 +64,14 @@ MailSlotComparisonResult WriteVideoSegmentToMailSlot(
         return result;
     }
     
-    // MailSlots require chunking large data into small messages
     size_t total_size = segment_data.size();
-    size_t bytes_remaining = total_size;
-    size_t offset = 0;
     
     AddDebugLog(L"[MAILSLOT] Attempting to send " + std::to_wstring(total_size) + 
-               L" bytes via MailSlot (chunked into ~" + std::to_wstring(MAILSLOT_MAX_MESSAGE_SIZE) + L" byte messages)");
+               L" bytes via MailSlot (up to " + std::to_wstring(MAILSLOT_MAX_MESSAGE_SIZE) + L" bytes per message)");
+    
+    // Send data in chunks only if it exceeds max message size
+    size_t bytes_remaining = total_size;
+    size_t offset = 0;
     
     while (bytes_remaining > 0 && !cancel_token.load()) {
         size_t chunk_size = std::min((size_t)MAILSLOT_MAX_MESSAGE_SIZE, bytes_remaining);
@@ -117,8 +117,8 @@ MailSlotComparisonResult WriteVideoSegmentToMailSlot(
         offset += chunk_size;
         bytes_remaining -= chunk_size;
         
-        // Log progress for large segments
-        if (result.messages_sent % 10 == 0) {
+        // Log progress for multi-message transfers
+        if (result.messages_sent > 1 && result.messages_sent % 5 == 0) {
             AddDebugLog(L"[MAILSLOT] Sent " + std::to_wstring(result.messages_sent) + 
                        L" messages, " + std::to_wstring(result.bytes_written) + L"/" + 
                        std::to_wstring(total_size) + L" bytes");
