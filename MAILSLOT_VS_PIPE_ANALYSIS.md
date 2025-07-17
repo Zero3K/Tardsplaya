@@ -122,3 +122,10 @@ These files provide concrete evidence of why MailSlots are inappropriate for thi
 The current pipe-based IPC implementation is optimal for Tardsplaya's video streaming requirements. MailSlots would introduce significant performance penalties, complexity, and compatibility issues without providing any benefits.
 
 **The answer to "Can MailSlots be used in place of IPC?" is definitively no for this streaming media application.**
+
+## Additional Analysis
+
+For a comprehensive analysis of hybrid approaches (using both MailSlots and Pipes together), see:
+- `HYBRID_IPC_ANALYSIS.md` - Detailed analysis of combination approaches
+
+**Summary**: While hybrid approaches are technically possible, they would add unnecessary complexity without significant benefits for Tardsplaya's current use case.
