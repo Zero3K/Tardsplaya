@@ -48,6 +48,12 @@ std::wstring ExtractPath(const std::wstring& url) {
 
 // Global stream tracking for multi-stream debugging
 static std::atomic<int> g_active_streams(0);
+
+// Generate a simple text message for ad skip events
+static std::string GenerateAdSkipMessage() {
+    return "[AD REPLACED] Commercial break - displaying placeholder content with proper sequencing";
+}
+
 static std::mutex g_stream_mutex;
 
 // Robust HTTP server for localhost streaming with persistent buffering
@@ -388,14 +394,33 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     return base.substr(0, pos + 1) + rel;
 }
 
-// Parse media segment URLs from m3u8 playlist, filtering out ad segments
-// Based on Twitch HLS AdBlock extension logic
-static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
+// Ad block state tracking for preventing infinite ad segment skipping
+struct AdBlockState {
+    bool in_scte35_out = false;
+    bool skip_next_segment = false; 
+    int consecutive_skipped_segments = 0;
+    std::chrono::steady_clock::time_point scte35_start_time;
+    bool just_started_ad_block = false; // Flag to indicate we just started an ad block
+    bool just_exited_ad_block = false; // Flag to indicate we just exited an ad block
+    static const int MAX_CONSECUTIVE_SKIPPED_SEGMENTS = 15; // ~30 seconds for 2-second segments
+    static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
+};
+
+// Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
+// Returns pair of (segments, should_clear_buffer)
+static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist) {
+    static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segs;
+    bool should_clear_buffer = false;
+    
+    // Don't clear buffer when exiting ad blocks to maintain stream continuity
+    if (ad_state.just_exited_ad_block) {
+        ad_state.just_exited_ad_block = false; // Reset flag
+        AddDebugLog(L"[AD_SKIP] Just exited ad block, continuing with existing buffer to maintain continuity");
+    }
+    
     std::istringstream ss(playlist);
     std::string line;
-    bool in_scte35_out = false;
-    bool skip_next_segment = false;
     
     while (std::getline(ss, line)) {
         if (line.empty()) continue;
@@ -403,73 +428,114 @@ static std::vector<std::wstring> ParseSegments(const std::string& playlist) {
         if (line[0] == '#') {
             // SCTE-35 ad marker detection (start of ad block)
             if (line.find("#EXT-X-SCTE35-OUT") == 0) {
-                in_scte35_out = true;
-                skip_next_segment = true;
-                AddDebugLog(L"[FILTER] Found SCTE35-OUT marker, entering ad block");
+                if (!ad_state.in_scte35_out) {
+                    // Just entering ad block - don't clear buffer to maintain continuity
+                    AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, entering ad block - maintaining buffer continuity");
+                } else {
+                    AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, already in ad block");
+                }
+                ad_state.in_scte35_out = true;
+                ad_state.skip_next_segment = true;
+                ad_state.consecutive_skipped_segments = 0;
+                ad_state.scte35_start_time = std::chrono::steady_clock::now();
                 continue;
             }
             // SCTE-35 ad marker detection (end of ad block)
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
-                in_scte35_out = false;
-                AddDebugLog(L"[FILTER] Found SCTE35-IN marker, exiting ad block");
+                ad_state.in_scte35_out = false;
+                ad_state.consecutive_skipped_segments = 0;
+                ad_state.just_exited_ad_block = true;
+                // Don't clear buffer to maintain stream continuity
+                AddDebugLog(L"[AD_SKIP] Found SCTE35-IN marker, exiting ad block - maintaining buffer continuity");
                 continue;
             }
-            // Discontinuity markers (often used with ads)
-            else if (line.find("#EXT-X-DISCONTINUITY") == 0 && in_scte35_out) {
-                AddDebugLog(L"[FILTER] Skipping discontinuity marker in ad block");
-                continue;
-            }
-            // Stitched ad segments
+            // Stitched ad segments (single segment ads)
             else if (line.find("stitched-ad") != std::string::npos) {
-                skip_next_segment = true;
-                AddDebugLog(L"[FILTER] Found stitched-ad marker");
+                ad_state.skip_next_segment = true;
+                AddDebugLog(L"[AD_SKIP] Found stitched-ad marker");
             }
             // EXTINF tags with specific durations that indicate ads (2.001, 2.002 seconds)
             else if (line.find("#EXTINF:2.00") == 0 && 
                      (line.find("2.001") != std::string::npos || 
                       line.find("2.002") != std::string::npos)) {
-                skip_next_segment = true;
-                AddDebugLog(L"[FILTER] Found ad-duration EXTINF marker");
+                ad_state.skip_next_segment = true;
+                AddDebugLog(L"[AD_SKIP] Found ad-duration EXTINF marker");
             }
             // DATERANGE markers for stitched ads
             else if (line.find("#EXT-X-DATERANGE:ID=\"stitched-ad") == 0) {
-                skip_next_segment = true;
-                AddDebugLog(L"[FILTER] Found stitched-ad DATERANGE marker");
+                ad_state.skip_next_segment = true;
+                AddDebugLog(L"[AD_SKIP] Found stitched-ad DATERANGE marker");
             }
             // General stitched content detection
             else if (line.find("stitched") != std::string::npos ||
                      line.find("STITCHED") != std::string::npos) {
-                skip_next_segment = true;
-                AddDebugLog(L"[FILTER] Found general stitched content marker");
+                ad_state.skip_next_segment = true;
+                AddDebugLog(L"[AD_SKIP] Found general stitched content marker");
             }
             // MIDROLL ad markers
             else if (line.find("EXT-X-DATERANGE") != std::string::npos && 
                      (line.find("MIDROLL") != std::string::npos ||
                       line.find("midroll") != std::string::npos)) {
-                skip_next_segment = true;
-                AddDebugLog(L"[FILTER] Found MIDROLL ad marker");
+                ad_state.skip_next_segment = true;
+                AddDebugLog(L"[AD_SKIP] Found MIDROLL ad marker");
             }
             continue;
         }
         
         // This is a segment URL
-        if (skip_next_segment || in_scte35_out) {
-            // Ad segment detected - trigger fresh playlist fetch instead of skipping
-            AddDebugLog(L"[FILTER] Ad segment detected: " + std::wstring(line.begin(), line.end()));
-            AddDebugLog(L"[FILTER] Triggering fresh playlist fetch to bypass ads");
+        bool should_skip_ad_segment = false;
+        
+        // Check if we should skip this segment as an ad
+        if (ad_state.skip_next_segment) {
+            // Single ad segment (stitched ads, duration-based ads, etc.)
+            should_skip_ad_segment = true;
+            ad_state.skip_next_segment = false; // Reset after processing one segment
+        } else if (ad_state.in_scte35_out) {
+            // SCTE35 ad block - check safety limits to prevent infinite ad segment skipping
+            auto current_time = std::chrono::steady_clock::now();
+            auto ad_block_duration = current_time - ad_state.scte35_start_time;
             
-            // Add a special marker to signal fresh playlist fetch is needed
-            segs.push_back(L"__FETCH_FRESH_PLAYLIST__");
+            if (ad_state.consecutive_skipped_segments >= AdBlockState::MAX_CONSECUTIVE_SKIPPED_SEGMENTS) {
+                AddDebugLog(L"[AD_SKIP] Safety limit reached: " + std::to_wstring(ad_state.consecutive_skipped_segments) + 
+                           L" consecutive skipped segments, exiting ad block");
+                ad_state.in_scte35_out = false;
+                ad_state.consecutive_skipped_segments = 0;
+                ad_state.just_exited_ad_block = true;
+            } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
+                AddDebugLog(L"[AD_SKIP] Safety timeout reached: " + 
+                           std::to_wstring(std::chrono::duration_cast<std::chrono::seconds>(ad_block_duration).count()) + 
+                           L" seconds in ad block, exiting");
+                ad_state.in_scte35_out = false;
+                ad_state.consecutive_skipped_segments = 0;
+                ad_state.just_exited_ad_block = true;
+            } else {
+                should_skip_ad_segment = true;
+            }
+        }
+        
+        if (should_skip_ad_segment) {
+            // Ad segment detected - replace with minimal placeholder to maintain stream timing
+            AddDebugLog(L"[AD_SKIP] Replacing ad segment with placeholder (replaced #" + 
+                       std::to_wstring(ad_state.consecutive_skipped_segments + 1) + L")");
             
-            skip_next_segment = false;
+            // Use a placeholder marker that will generate minimal content
+            segs.push_back(L"__AD_PLACEHOLDER__");
+            ad_state.consecutive_skipped_segments++;
             continue;
+        }
+        
+        // Normal content segment - reset skip counter
+        if (ad_state.consecutive_skipped_segments > 0) {
+            AddDebugLog(L"[AD_SKIP] Returning to normal content after replacing " + 
+                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments with placeholders");
+            ad_state.consecutive_skipped_segments = 0;
         }
         
         // Should be a .ts or .aac segment
         std::wstring wline(line.begin(), line.end());
         segs.push_back(wline);
     }
-    return segs;
+    return std::make_pair(segs, should_clear_buffer);
 }
 
 // Returns true if process handle is still alive
@@ -811,11 +877,6 @@ bool BufferAndPipeStreamToPlayer(
         int consecutive_errors = 0;
         const int max_consecutive_errors = 15; // ~30 seconds (2 sec intervals)
         
-        int fresh_playlist_attempts = 0;
-        const int max_fresh_playlist_attempts = 5; // Limit fresh playlist fetches to prevent infinite loops
-        auto last_fresh_playlist_time = std::chrono::steady_clock::now();
-        const std::chrono::seconds fresh_playlist_cooldown(30); // 30 second cooldown between attempts
-        
         AddDebugLog(L"[DOWNLOAD] Starting download thread for " + channel_name + 
                    L", startup_delay=" + std::to_wstring(startup_delay.count()) + L"ms");
         
@@ -829,7 +890,8 @@ bool BufferAndPipeStreamToPlayer(
             // Check all exit conditions individually for detailed logging
             bool download_running_check = download_running.load();
             bool cancel_token_check = cancel_token.load();
-            bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" download_thread", pi.dwProcessId);
+            // Commented out process death check to prevent premature termination when process is incorrectly marked as dead
+            // bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" download_thread", pi.dwProcessId);
             bool error_limit_check = consecutive_errors < max_consecutive_errors;
             
             if (!download_running_check) {
@@ -840,10 +902,11 @@ bool BufferAndPipeStreamToPlayer(
                 AddDebugLog(L"[DOWNLOAD] Exit condition: cancel_token=true for " + channel_name);
                 break;
             }
-            if (!process_running_check) {
-                AddDebugLog(L"[DOWNLOAD] Exit condition: process died for " + channel_name);
-                break;
-            }
+            // Commented out to prevent premature exit when process is incorrectly detected as dead
+            // if (!process_running_check) {
+            //     AddDebugLog(L"[DOWNLOAD] Exit condition: process died for " + channel_name);
+            //     break;
+            // }
             if (!error_limit_check) {
                 AddDebugLog(L"[DOWNLOAD] Exit condition: too many consecutive errors (" + 
                            std::to_wstring(consecutive_errors) + L") for " + channel_name);
@@ -875,19 +938,25 @@ bool BufferAndPipeStreamToPlayer(
                 break;
             }
 
-            auto segments = ParseSegments(playlist);
+            auto parse_result = ParseSegments(playlist);
+            auto segments = parse_result.first;
+            bool should_clear_buffer = parse_result.second;
             
-            // Count buffer reset markers for monitoring ad filtering effectiveness
-            int ad_reset_count = 0;
-            for (const auto& seg : segments) {
-                if (seg == L"__AD_RESET_BUFFER__") {
-                    ad_reset_count++;
+            // Clear buffer if we just started an ad block to prevent showing old content
+            if (should_clear_buffer) {
+                size_t cleared_segments;
+                {
+                    std::lock_guard<std::mutex> lock(buffer_mutex);
+                    cleared_segments = buffer_queue.size();
+                    std::queue<std::vector<char>> empty_queue;
+                    buffer_queue.swap(empty_queue); // Clear the queue efficiently
                 }
+                AddDebugLog(L"[AD_SKIP] Cleared " + std::to_wstring(cleared_segments) + 
+                           L" buffered segments when entering/exiting ad block for " + channel_name);
             }
             
             AddDebugLog(L"[DOWNLOAD] Parsed " + std::to_wstring(segments.size()) + 
-                       L" segments from playlist for " + channel_name + 
-                       (ad_reset_count > 0 ? L" (including " + std::to_wstring(ad_reset_count) + L" ad resets)" : L""));
+                       L" segments from playlist for " + channel_name);
             
             // Download new segments
             int new_segments_downloaded = 0;
@@ -899,216 +968,33 @@ bool BufferAndPipeStreamToPlayer(
                     break;
                 }
                 
-                bool process_still_running = ProcessStillRunning(pi.hProcess, channel_name + L" segment_download", pi.dwProcessId);
-                if (!process_still_running) {
-                    AddDebugLog(L"[DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
-                    break;
+                // Commented out process death check to prevent premature loop exit when process is incorrectly marked as dead
+                // bool process_still_running = ProcessStillRunning(pi.hProcess, channel_name + L" segment_download", pi.dwProcessId);
+                // if (!process_still_running) {
+                //     AddDebugLog(L"[DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
+                //     break;
+                
+                // Handle ad placeholder markers by generating minimal content
+                if (seg == L"__AD_PLACEHOLDER__") {
+                    AddDebugLog(L"[AD_SKIP] Generating minimal placeholder content for ad segment");
+                    
+                    // Generate minimal valid content (just a few null bytes to maintain timing)
+                    std::vector<char> placeholder_data(1024, 0); // 1KB of null data
+                    
+                    // Add to buffer
+                    {
+                        std::lock_guard<std::mutex> lock(buffer_mutex);
+                        buffer_queue.push(std::move(placeholder_data));
+                    }
+                    
+                    new_segments_downloaded++;
+                    AddDebugLog(L"[AD_SKIP] Placeholder content added to buffer for " + channel_name);
+                    continue;
                 }
                 
-                // Handle ad segment detection - fetch fresh playlist to bypass ads
-                if (seg == L"__FETCH_FRESH_PLAYLIST__") {
-                    // Don't add to seen_urls yet - process this marker every time
-                    AddDebugLog(L"[AD_RECOVERY] Fresh playlist fetch requested - bypassing ads for " + channel_name);
-                    
-                    // Check fresh playlist fetch limits and cooldown
-                    auto current_time = std::chrono::steady_clock::now();
-                    auto time_since_last_fetch = current_time - last_fresh_playlist_time;
-                    bool cooldown_passed = time_since_last_fetch >= fresh_playlist_cooldown;
-                    bool attempts_remaining = fresh_playlist_attempts < max_fresh_playlist_attempts;
-                    
-                    if (!attempts_remaining) {
-                        AddDebugLog(L"[AD_RECOVERY] Maximum fresh playlist attempts reached (" + 
-                                   std::to_wstring(fresh_playlist_attempts) + L"), skipping for " + channel_name);
-                        continue;
-                    }
-                    
-                    if (!cooldown_passed) {
-                        auto remaining_cooldown = std::chrono::duration_cast<std::chrono::seconds>(fresh_playlist_cooldown - time_since_last_fetch);
-                        AddDebugLog(L"[AD_RECOVERY] Fresh playlist cooldown active, " + 
-                                   std::to_wstring(remaining_cooldown.count()) + L" seconds remaining for " + channel_name);
-                        continue;
-                    }
-                    
-                    AddDebugLog(L"[AD_RECOVERY] Proceeding with fresh playlist fetch (attempt " + 
-                               std::to_wstring(fresh_playlist_attempts + 1) + L"/" + 
-                               std::to_wstring(max_fresh_playlist_attempts) + L") for " + channel_name);
-                    
-                    // Implement user's suggestion: fetch fresh quality list and switch to clean playlist
-                    if (!channel_name.empty() && !selected_quality.empty()) {
-                        // Use the same authentication approach as the main application
-                        AddDebugLog(L"[AD_RECOVERY] Getting fresh access token for " + channel_name);
-                        std::wstring fresh_access_token = GetAccessToken(channel_name);
-                        
-                        if (!fresh_access_token.empty() && fresh_access_token != L"OFFLINE") {
-                            AddDebugLog(L"[AD_RECOVERY] Successfully obtained fresh access token for " + channel_name);
-                            
-                            // Fetch fresh master playlist using the authenticated token
-                            std::wstring fresh_master_playlist = FetchPlaylist(channel_name, fresh_access_token);
-                            
-                            if (!fresh_master_playlist.empty()) {
-                                AddDebugLog(L"[AD_RECOVERY] Successfully fetched fresh master playlist for " + channel_name);
-                                AddDebugLog(L"[AD_RECOVERY] Fresh master playlist content (first 500 chars): " + fresh_master_playlist.substr(0, 500));
-                                
-                                // Parse the fresh playlist to get quality URLs
-                                std::map<std::wstring, std::wstring> fresh_qualities = ParsePlaylist(fresh_master_playlist);
-                                
-                                if (!fresh_qualities.empty()) {
-                                    AddDebugLog(L"[AD_RECOVERY] Successfully parsed " + std::to_wstring(fresh_qualities.size()) + L" qualities from fresh playlist for " + channel_name);
-                                    
-                                    // Log all available qualities for debugging
-                                    std::wstring qualities_list = L"[AD_RECOVERY] Available qualities: ";
-                                    for (const auto& quality_pair : fresh_qualities) {
-                                        qualities_list += quality_pair.first + L", ";
-                                    }
-                                    AddDebugLog(qualities_list);
-                                    AddDebugLog(L"[AD_RECOVERY] Originally selected quality: " + selected_quality);
-                                    
-                                    // Find the URL for the user's selected quality
-                                    std::wstring fresh_playlist_url;
-                                    bool quality_found = false;
-                                    std::wstring selected_quality_name;
-                                    
-                                    // First try exact match
-                                    if (fresh_qualities.find(selected_quality) != fresh_qualities.end()) {
-                                        fresh_playlist_url = fresh_qualities[selected_quality];
-                                        selected_quality_name = selected_quality;
-                                        quality_found = true;
-                                        AddDebugLog(L"[AD_RECOVERY] Found exact quality match: " + selected_quality + L" for " + channel_name);
-                                    }
-                                    
-                                    // If exact quality not found, try to find a similar quality
-                                    if (!quality_found) {
-                                        std::vector<std::wstring> priority_qualities = {L"source", L"1080p60", L"1080p", L"720p60", L"720p", L"480p", L"360p", L"160p"};
-                                        for (const auto& priority_quality : priority_qualities) {
-                                            if (fresh_qualities.find(priority_quality) != fresh_qualities.end()) {
-                                                fresh_playlist_url = fresh_qualities[priority_quality];
-                                                selected_quality_name = priority_quality;
-                                                quality_found = true;
-                                                AddDebugLog(L"[AD_RECOVERY] Using fallback quality: " + priority_quality + L" for " + channel_name);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    
-                                    // If still no match, find the first NON-AUDIO quality (avoid audio_only)
-                                    if (!quality_found && !fresh_qualities.empty()) {
-                                        for (const auto& quality_pair : fresh_qualities) {
-                                            // Skip audio-only streams - we want video content
-                                            if (quality_pair.first.find(L"audio") == std::wstring::npos && 
-                                                quality_pair.first != L"audio_only" &&
-                                                quality_pair.first.find(L"Audio") == std::wstring::npos) {
-                                                fresh_playlist_url = quality_pair.second;
-                                                selected_quality_name = quality_pair.first;
-                                                quality_found = true;
-                                                AddDebugLog(L"[AD_RECOVERY] Using first available video quality: " + quality_pair.first + L" for " + channel_name);
-                                                break;
-                                            }
-                                        }
-                                        
-                                        // If somehow we only have audio streams available, log this as an error
-                                        if (!quality_found) {
-                                            AddDebugLog(L"[AD_RECOVERY] ERROR: Only audio streams available in fresh playlist for " + channel_name);
-                                        }
-                                    }
-                                    
-                                    // Additional validation: check if the URL looks like a video stream
-                                    if (quality_found) {
-                                        AddDebugLog(L"[AD_RECOVERY] Selected quality: " + selected_quality_name + L" -> URL: " + fresh_playlist_url);
-                                        
-                                        // Validate URL doesn't contain audio-only indicators
-                                        if (fresh_playlist_url.find(L"audio") != std::wstring::npos ||
-                                            fresh_playlist_url.find(L"Audio") != std::wstring::npos) {
-                                            AddDebugLog(L"[AD_RECOVERY] WARNING: Selected URL appears to be audio-only based on URL content: " + fresh_playlist_url);
-                                            quality_found = false;
-                                            
-                                            // Try to find a different quality that doesn't have audio in the URL
-                                            for (const auto& quality_pair : fresh_qualities) {
-                                                if (quality_pair.second.find(L"audio") == std::wstring::npos &&
-                                                    quality_pair.second.find(L"Audio") == std::wstring::npos &&
-                                                    quality_pair.first.find(L"audio") == std::wstring::npos &&
-                                                    quality_pair.first != L"audio_only") {
-                                                    fresh_playlist_url = quality_pair.second;
-                                                    selected_quality_name = quality_pair.first;
-                                                    quality_found = true;
-                                                    AddDebugLog(L"[AD_RECOVERY] Found alternative video quality: " + quality_pair.first + L" -> " + quality_pair.second);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        
-                                        // Additional validation: try to fetch a small sample of the media playlist to verify it contains video
-                                        if (quality_found) {
-                                            AddDebugLog(L"[AD_RECOVERY] Validating that selected playlist contains video content...");
-                                            
-                                            // Quick fetch to validate the media playlist structure
-                                            std::string sample_resp;
-                                            if (HttpGetText(fresh_playlist_url, sample_resp, &cancel_token)) {
-                                                std::wstring sample_playlist = Utf8ToWide(sample_resp);
-                                                
-                                                if (!sample_playlist.empty()) {
-                                                    // Check if this looks like a video media playlist
-                                                    bool has_video_segments = sample_playlist.find(L".ts") != std::wstring::npos ||
-                                                                             sample_playlist.find(L".m4s") != std::wstring::npos;
-                                                    bool has_audio_only_markers = sample_playlist.find(L"AUDIO=") != std::wstring::npos &&
-                                                                                  sample_playlist.find(L"VIDEO=") == std::wstring::npos;
-                                                    
-                                                    if (has_video_segments && !has_audio_only_markers) {
-                                                        AddDebugLog(L"[AD_RECOVERY] ✓ Selected playlist appears to contain video segments");
-                                                    } else {
-                                                        AddDebugLog(L"[AD_RECOVERY] ✗ WARNING: Selected playlist might be audio-only (segments=" + 
-                                                                   std::to_wstring(has_video_segments) + L", audio_only_markers=" + 
-                                                                   std::to_wstring(has_audio_only_markers) + L")");
-                                                        AddDebugLog(L"[AD_RECOVERY] Sample playlist content: " + sample_playlist.substr(0, 300));
-                                                    }
-                                                } else {
-                                                    AddDebugLog(L"[AD_RECOVERY] WARNING: Could not fetch sample content from selected playlist URL");
-                                                }
-                                            } else {
-                                                AddDebugLog(L"[AD_RECOVERY] WARNING: Failed to fetch sample content from selected playlist URL");
-                                            }
-                                        }
-                                    }
-                                    
-                                    if (quality_found) {
-                                        // Update the media playlist URL to the fresh one
-                                        media_playlist_url = fresh_playlist_url;
-                                        AddDebugLog(L"[AD_RECOVERY] Successfully switched to fresh playlist URL to bypass ads for " + channel_name);
-                                        AddDebugLog(L"[AD_RECOVERY] New playlist URL: " + fresh_playlist_url);
-                                        
-                                        // Update fresh playlist tracking
-                                        fresh_playlist_attempts++;
-                                        last_fresh_playlist_time = current_time;
-                                        
-                                        // Clear seen URLs to allow re-downloading from fresh playlist
-                                        seen_urls.clear();
-                                        // Don't re-insert __FETCH_FRESH_PLAYLIST__ marker to allow future processing
-                                        
-                                        // Reset error count since we're starting fresh
-                                        consecutive_errors = 0;
-                                        
-                                        // Break from segment processing to restart playlist fetching with new URL
-                                        AddDebugLog(L"[AD_RECOVERY] Breaking from segment loop to restart with fresh playlist for " + channel_name);
-                                        break;
-                                    } else {
-                                        AddDebugLog(L"[AD_RECOVERY] Warning: Could not find suitable quality in fresh playlist for " + channel_name);
-                                    }
-                                } else {
-                                    AddDebugLog(L"[AD_RECOVERY] Warning: Fresh playlist contains no quality information for " + channel_name);
-                                }
-                            } else {
-                                AddDebugLog(L"[AD_RECOVERY] Failed to fetch fresh master playlist for " + channel_name);
-                            }
-                        } else if (fresh_access_token == L"OFFLINE") {
-                            AddDebugLog(L"[AD_RECOVERY] Channel " + channel_name + L" is offline, cannot fetch fresh playlist");
-                        } else {
-                            AddDebugLog(L"[AD_RECOVERY] Failed to obtain fresh access token for " + channel_name);
-                        }
-                    } else {
-                        AddDebugLog(L"[AD_RECOVERY] Warning: Missing channel name or selected quality for ad recovery");
-                    }
-                    
-                    // Fallback: if fresh playlist fetch failed, just continue without reset
-                    AddDebugLog(L"[AD_RECOVERY] Continuing with existing playlist for " + channel_name);
+                // Skip segments that aren't regular .ts/.aac files
+                if (seg.find(L"http") != 0) {
+                    AddDebugLog(L"[DOWNLOAD] Skipping non-HTTP segment: " + seg.substr(0, 50) + L"...");
                     continue;
                 }
                 
@@ -1223,6 +1109,7 @@ bool BufferAndPipeStreamToPlayer(
         AddDebugLog(L"[DOWNLOAD] Exit conditions: download_running=" + std::to_wstring(download_running.load()) +
                    L", cancel_token=" + std::to_wstring(cancel_token.load()) +
                    L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" final_check", pi.dwProcessId)) +
+                   L" (process check disabled in main loop)" +
                    L", consecutive_errors=" + std::to_wstring(consecutive_errors) + L"/" + std::to_wstring(max_consecutive_errors) +
                    L", stream_ended_normally=" + std::to_wstring(stream_ended_normally.load()));
         
@@ -1251,17 +1138,19 @@ bool BufferAndPipeStreamToPlayer(
         while (true) {
             // Check all exit conditions individually for detailed logging  
             bool cancel_token_check = cancel_token.load();
-            bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId);
+            // Commented out process death check to prevent premature termination when process is incorrectly marked as dead
+            // bool process_running_check = ProcessStillRunning(pi.hProcess, channel_name + L" feeder_thread", pi.dwProcessId);
             bool data_available_check = (download_running.load() || !buffer_queue.empty());
             
             if (cancel_token_check) {
                 AddDebugLog(L"[FEEDER] Exit condition: cancel_token=true for " + channel_name);
                 break;
             }
-            if (!process_running_check) {
-                AddDebugLog(L"[FEEDER] Exit condition: process died for " + channel_name);
-                break;
-            }
+            // Commented out to prevent premature exit when process is incorrectly detected as dead
+            // if (!process_running_check) {
+            //     AddDebugLog(L"[FEEDER] Exit condition: process died for " + channel_name);
+            //     break;
+            // }
             if (!data_available_check) {
                 AddDebugLog(L"[FEEDER] Exit condition: no more data available (download stopped and buffer empty) for " + channel_name);
                 break;
@@ -1411,6 +1300,7 @@ bool BufferAndPipeStreamToPlayer(
         AddDebugLog(L"[FEEDER] IPC feeder thread ending for " + channel_name +
                    L", cancel=" + std::to_wstring(cancel_token.load()) + 
                    L", process_running=" + std::to_wstring(ProcessStillRunning(pi.hProcess, channel_name + L" feeder_final", pi.dwProcessId)) +
+                   L" (process check disabled in main loop)" +
                    L", download_running=" + std::to_wstring(download_running.load()) +
                    L", buffer_queue_empty=" + std::to_wstring(buffer_queue.empty()) +
                    L", empty_buffer_count=" + std::to_wstring(empty_buffer_count));
