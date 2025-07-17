@@ -888,9 +888,9 @@ bool BufferAndPipeStreamToPlayer(
     // Store pipe handle for cleanup
     HANDLE stdin_pipe = hStdinWrite;
     
-    // TSDuck-enhanced buffering parameters - these will be updated dynamically
-    std::atomic<int> dynamic_target_buffer{std::max(buffer_segments, 15)}; // Increased minimum from 10 to 15 segments for better stability
-    std::atomic<int> dynamic_max_buffer{dynamic_target_buffer.load() * 2}; // Don't over-buffer
+    // TSDuck-enhanced buffering parameters - reasonable defaults to prevent overgrowth
+    std::atomic<int> dynamic_target_buffer{std::max(buffer_segments, 10)}; // Reasonable minimum
+    std::atomic<int> dynamic_max_buffer{std::min(dynamic_target_buffer.load() * 2, 30)}; // Cap max at 30
     const int buffer_full_timeout_seconds = 15; // Empty buffer if full for this long
     
     // Buffer fullness timeout tracking
@@ -1005,9 +1005,9 @@ bool BufferAndPipeStreamToPlayer(
                 AddDebugLog(L"[TSDUCK] Using enhanced buffer size: " + std::to_wstring(effective_buffer_size) + 
                            L" instead of " + std::to_wstring(buffer_segments) + L" for " + channel_name);
                 
-                // Update dynamic buffer parameters with higher minimums for stability
-                dynamic_target_buffer.store(std::max(effective_buffer_size, 15)); // Increased minimum from 10 to 15
-                dynamic_max_buffer.store(dynamic_target_buffer.load() * 2);
+                // Update dynamic buffer parameters - cap max buffer to prevent overgrowth
+                dynamic_target_buffer.store(std::max(effective_buffer_size, 10)); // Reasonable minimum
+                dynamic_max_buffer.store(std::min(dynamic_target_buffer.load() * 2, 30)); // Cap max at 30
                 
                 AddDebugLog(L"[TSDUCK] Updated dynamic buffers: target=" + std::to_wstring(dynamic_target_buffer.load()) + 
                            L", max=" + std::to_wstring(dynamic_max_buffer.load()) + L" for " + channel_name);
@@ -1053,14 +1053,18 @@ bool BufferAndPipeStreamToPlayer(
                     // Use ~50KB to slow down consumption and maintain buffer stability
                     std::vector<char> placeholder_data(50 * 1024, 0); // 50KB of null data
                     
-                    // Immediately boost buffer target when processing ad placeholders
+                    // Temporarily boost buffer target when processing ad placeholders, but keep it reasonable
+                    // Don't override TSDuck recommendations with excessive buffering
                     int current_target = dynamic_target_buffer.load();
-                    int boosted_target = std::max(current_target, 20); // Ensure at least 20 segments during ads
-                    if (boosted_target > current_target) {
-                        dynamic_target_buffer.store(boosted_target);
-                        dynamic_max_buffer.store(boosted_target * 2);
-                        AddDebugLog(L"[AD_SKIP] Emergency buffer boost: target=" + std::to_wstring(boosted_target) + 
-                                   L" (was " + std::to_wstring(current_target) + L") for " + channel_name);
+                    int tsduck_target = effective_buffer_size > 0 ? effective_buffer_size : current_target;
+                    int moderate_boost = std::min(tsduck_target + 5, 25); // Only add 5 segments, max 25 total
+                    
+                    if (moderate_boost > current_target) {
+                        dynamic_target_buffer.store(moderate_boost);
+                        dynamic_max_buffer.store(std::min(moderate_boost * 2, 35)); // Cap max buffer at 35
+                        AddDebugLog(L"[AD_SKIP] Moderate buffer boost: target=" + std::to_wstring(moderate_boost) + 
+                                   L" (was " + std::to_wstring(current_target) + L"), max=" + 
+                                   std::to_wstring(dynamic_max_buffer.load()) + L" for " + channel_name);
                     }
                     
                     // Add to buffer
@@ -1173,6 +1177,20 @@ bool BufferAndPipeStreamToPlayer(
             
             AddDebugLog(L"[DOWNLOAD] Segment batch complete - downloaded " + std::to_wstring(new_segments_downloaded) + 
                        L" new segments for " + channel_name);
+            
+            // After processing segments, restore buffer to TSDuck recommendations if overridden by ad handling
+            if (effective_buffer_size > 0) {
+                int current_target = dynamic_target_buffer.load();
+                int tsduck_target = std::max(effective_buffer_size, 10);
+                int tsduck_max = std::min(tsduck_target * 2, 30);
+                
+                if (current_target > tsduck_target + 2) { // Only restore if significantly inflated
+                    dynamic_target_buffer.store(tsduck_target);
+                    dynamic_max_buffer.store(tsduck_max);
+                    AddDebugLog(L"[TSDUCK] Restored buffer to recommended size: target=" + std::to_wstring(tsduck_target) + 
+                               L" (was " + std::to_wstring(current_target) + L"), max=" + std::to_wstring(tsduck_max) + L" for " + channel_name);
+                }
+            }
             
             // Poll playlist more frequently for live streams or when urgent download is needed
             urgent_needed = urgent_download_needed.load();
