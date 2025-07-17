@@ -466,8 +466,9 @@ struct FrameTracker {
     }
     
     bool IsFrameOutOfOrder(uint64_t frame_num) const {
-        // Frame is out of order if it's not the next expected frame and not already sent
-        return frame_num != last_frame_sent_to_player + 1 && frame_num <= last_frame_sent_to_player;
+        // Frame is out of order if it's significantly behind the last sent frame
+        // Allow small gaps but prevent major out-of-order delivery
+        return frame_num < last_frame_sent_to_player && (last_frame_sent_to_player - frame_num) > 5;
     }
     
     void RecordFrameSentToPlayer(uint64_t frame_num) {
