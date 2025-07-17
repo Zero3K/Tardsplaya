@@ -4,6 +4,15 @@
 #include <sstream>
 #include <thread>
 #include <fstream>
+#include <algorithm>
+
+// Undefine Windows min/max macros to avoid conflicts with std::min/std::max
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 
 // Forward declaration for AddDebugLog defined in Tardsplaya.cpp or stream_thread.cpp
 extern void AddDebugLog(const std::wstring& message);
