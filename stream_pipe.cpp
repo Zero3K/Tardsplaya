@@ -418,7 +418,15 @@ struct FrameTracker {
     uint64_t sequence_gaps = 0;                                     // Number of detected sequence gaps
     std::string last_segment_url;                                   // Last processed segment URL for gap detection
     
+    // Frame ordering and duplicate prevention
+    uint64_t last_frame_sent_to_player = 0;                        // Last frame number sent to media player
+    std::set<uint64_t> frames_sent_to_player;                      // Track which frames have been sent to player
+    uint64_t duplicate_frames_skipped = 0;                          // Count of duplicate frames skipped
+    uint64_t out_of_order_frames_detected = 0;                     // Count of out-of-order frames detected
+    uint64_t frames_reordered = 0;                                  // Count of frames that were reordered
+    
     static const size_t MAX_TIMING_HISTORY = 50;                   // Keep last 50 download times
+    static const size_t MAX_SENT_FRAMES_HISTORY = 200;             // Keep last 200 frame numbers for duplicate detection
     
     void RecordSegmentDownload(const std::chrono::milliseconds& download_time) {
         download_times.push_back(download_time);
@@ -451,6 +459,58 @@ struct FrameTracker {
         if (total_segments_processed == 0) return 1.0;
         return static_cast<double>(total_segments_downloaded) / total_segments_processed;
     }
+    
+    // Frame ordering and duplicate detection methods
+    bool IsFrameAlreadySent(uint64_t frame_num) const {
+        return frames_sent_to_player.count(frame_num) > 0;
+    }
+    
+    bool IsFrameOutOfOrder(uint64_t frame_num) const {
+        // Frame is out of order if it's not the next expected frame and not already sent
+        return frame_num != last_frame_sent_to_player + 1 && frame_num <= last_frame_sent_to_player;
+    }
+    
+    void RecordFrameSentToPlayer(uint64_t frame_num) {
+        frames_sent_to_player.insert(frame_num);
+        if (frame_num > last_frame_sent_to_player) {
+            last_frame_sent_to_player = frame_num;
+        }
+        
+        // Maintain rolling window of sent frames to prevent unlimited memory growth
+        if (frames_sent_to_player.size() > MAX_SENT_FRAMES_HISTORY) {
+            // Remove oldest frames (smallest frame numbers)
+            auto it = frames_sent_to_player.begin();
+            frames_sent_to_player.erase(it);
+        }
+    }
+    
+    bool ShouldSkipFrame(uint64_t frame_num, std::wstring& skip_reason) {
+        if (IsFrameAlreadySent(frame_num)) {
+            skip_reason = L"DUPLICATE";
+            duplicate_frames_skipped++;
+            return true;
+        }
+        
+        if (IsFrameOutOfOrder(frame_num)) {
+            skip_reason = L"OUT_OF_ORDER";
+            out_of_order_frames_detected++;
+            return true;
+        }
+        
+        return false;
+    }
+};
+
+// Structure to associate frame numbers with segment data for ordering verification
+struct BufferedSegment {
+    std::vector<char> data;
+    uint64_t frame_number;
+    bool is_ad_placeholder;
+    std::chrono::steady_clock::time_point download_time;
+    
+    BufferedSegment(std::vector<char>&& segment_data, uint64_t frame_num, bool is_ad = false) 
+        : data(std::move(segment_data)), frame_number(frame_num), is_ad_placeholder(is_ad),
+          download_time(std::chrono::steady_clock::now()) {}
 };
 
 // Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
@@ -921,7 +981,7 @@ bool BufferAndPipeStreamToPlayer(
     title_thread.detach();
 
     // 4. IPC streaming with background download threads and direct piping
-    std::queue<std::vector<char>> buffer_queue;
+    std::queue<BufferedSegment> buffer_queue;
     std::mutex buffer_mutex;
     std::set<std::wstring> seen_urls;
     std::atomic<bool> download_running(true);
@@ -1031,7 +1091,7 @@ bool BufferAndPipeStreamToPlayer(
                 {
                     std::lock_guard<std::mutex> lock(buffer_mutex);
                     cleared_segments = buffer_queue.size();
-                    std::queue<std::vector<char>> empty_queue;
+                    std::queue<BufferedSegment> empty_queue;
                     buffer_queue.swap(empty_queue); // Clear the queue efficiently
                 }
                 AddDebugLog(L"[AD_SKIP] Cleared " + std::to_wstring(cleared_segments) + 
@@ -1067,10 +1127,10 @@ bool BufferAndPipeStreamToPlayer(
                     // Generate minimal valid content (just a few null bytes to maintain timing)
                     std::vector<char> placeholder_data(1024, 0); // 1KB of null data
                     
-                    // Add to buffer
+                    // Add to buffer with frame number
                     {
                         std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer_queue.push(std::move(placeholder_data));
+                        buffer_queue.emplace(std::move(placeholder_data), frame_tracker.frame_number, true);
                     }
                     
                     auto placeholder_end = std::chrono::steady_clock::now();
@@ -1121,7 +1181,7 @@ bool BufferAndPipeStreamToPlayer(
                             {
                                 std::lock_guard<std::mutex> lock(buffer_mutex);
                                 cleared_segments = buffer_queue.size();
-                                std::queue<std::vector<char>> empty_queue;
+                                std::queue<BufferedSegment> empty_queue;
                                 buffer_queue.swap(empty_queue); // Clear the queue efficiently
                             }
                             
@@ -1179,10 +1239,10 @@ bool BufferAndPipeStreamToPlayer(
                     frame_tracker.total_segments_downloaded++;
                     frame_tracker.RecordSegmentDownload(download_duration);
                     
-                    // Add to buffer
+                    // Add to buffer with frame number
                     {
                         std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer_queue.push(std::move(seg_data));
+                        buffer_queue.emplace(std::move(seg_data), frame_tracker.frame_number, false);
                     }
                     new_segments_downloaded++;
                     
@@ -1212,6 +1272,9 @@ bool BufferAndPipeStreamToPlayer(
                            L", Downloaded: " + std::to_wstring(frame_tracker.total_segments_downloaded));
                 AddDebugLog(L"[FRAME_TAG] Ad segments skipped: " + std::to_wstring(frame_tracker.total_ad_segments_skipped) +
                            L", Sequence gaps: " + std::to_wstring(frame_tracker.sequence_gaps));
+                AddDebugLog(L"[FRAME_TAG] Frame ordering - Sent to player: " + std::to_wstring(frame_tracker.last_frame_sent_to_player) +
+                           L", Duplicates skipped: " + std::to_wstring(frame_tracker.duplicate_frames_skipped) +
+                           L", Out-of-order detected: " + std::to_wstring(frame_tracker.out_of_order_frames_detected));
                 AddDebugLog(L"[FRAME_TAG] Download times - Avg: " + std::to_wstring(frame_tracker.GetAverageDownloadTime()) + L"ms" +
                            L", Max: " + std::to_wstring(frame_tracker.GetMaxDownloadTime().count()) + L"ms");
                 AddDebugLog(L"[FRAME_TAG] Success rate: " + std::to_wstring(frame_tracker.GetDownloadSuccessRate() * 100.0) + L"%");
@@ -1225,6 +1288,14 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 if (frame_tracker.sequence_gaps > 5) {
                     AddDebugLog(L"[FRAME_TAG] *** CONTINUITY WARNING *** Multiple sequence gaps detected, stream may be unstable");
+                }
+                if (frame_tracker.duplicate_frames_skipped > 0) {
+                    AddDebugLog(L"[FRAME_TAG] *** ORDERING WARNING *** " + std::to_wstring(frame_tracker.duplicate_frames_skipped) + 
+                               L" duplicate frames detected and skipped");
+                }
+                if (frame_tracker.out_of_order_frames_detected > 0) {
+                    AddDebugLog(L"[FRAME_TAG] *** ORDERING WARNING *** " + std::to_wstring(frame_tracker.out_of_order_frames_detected) + 
+                               L" out-of-order frames detected");
                 }
             }
             
@@ -1247,6 +1318,9 @@ bool BufferAndPipeStreamToPlayer(
         AddDebugLog(L"[FRAME_TAG] Total frames processed: " + std::to_wstring(frame_tracker.frame_number));
         AddDebugLog(L"[FRAME_TAG] Segments processed: " + std::to_wstring(frame_tracker.total_segments_processed) + 
                    L", Downloaded: " + std::to_wstring(frame_tracker.total_segments_downloaded));
+        AddDebugLog(L"[FRAME_TAG] Frames sent to player: " + std::to_wstring(frame_tracker.last_frame_sent_to_player) +
+                   L", Duplicates skipped: " + std::to_wstring(frame_tracker.duplicate_frames_skipped) +
+                   L", Out-of-order detected: " + std::to_wstring(frame_tracker.out_of_order_frames_detected));
         AddDebugLog(L"[FRAME_TAG] Ad segments skipped: " + std::to_wstring(frame_tracker.total_ad_segments_skipped) +
                    L", Sequence gaps detected: " + std::to_wstring(frame_tracker.sequence_gaps));
         AddDebugLog(L"[FRAME_TAG] Download performance - Avg: " + std::to_wstring(frame_tracker.GetAverageDownloadTime()) + L"ms" +
@@ -1330,8 +1404,8 @@ bool BufferAndPipeStreamToPlayer(
                 }
             }
             
-            // Multi-segment feeding to maintain continuous flow
-            std::vector<std::vector<char>> segments_to_feed;
+            // Multi-segment feeding with frame ordering verification
+            std::vector<BufferedSegment> segments_to_feed;
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
                 
@@ -1354,20 +1428,35 @@ bool BufferAndPipeStreamToPlayer(
                     }
                 }
                 
+                // Extract segments for feeding with frame ordering verification
                 int segments_fed = 0;
                 while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
-                    segments_to_feed.push_back(std::move(buffer_queue.front()));
+                    BufferedSegment segment = std::move(buffer_queue.front());
                     buffer_queue.pop();
+                    
+                    // Check frame ordering before adding to feed queue
+                    std::wstring skip_reason;
+                    if (frame_tracker.ShouldSkipFrame(segment.frame_number, skip_reason)) {
+                        AddDebugLog(L"[FRAME_TAG] Skipping frame #" + std::to_wstring(segment.frame_number) + 
+                                   L" [" + skip_reason + L"] - Last sent: #" + std::to_wstring(frame_tracker.last_frame_sent_to_player));
+                        continue;
+                    }
+                    
+                    segments_to_feed.push_back(std::move(segment));
                     segments_fed++;
                 }
             }
             
             if (!segments_to_feed.empty()) {
-                // Write segments directly to player stdin pipe with retry logic
+                // Write segments directly to player stdin pipe with retry logic and frame ordering tracking
                 bool write_failed = false;
                 int segments_processed = 0;
                 
-                for (const auto& segment_data : segments_to_feed) {
+                for (auto& buffered_segment : segments_to_feed) {
+                    const auto& segment_data = buffered_segment.data;
+                    uint64_t frame_number = buffered_segment.frame_number;
+                    bool is_ad_placeholder = buffered_segment.is_ad_placeholder;
+                    
                     // Skip empty segments (shouldn't happen with buffer reset approach)
                     if (segment_data.empty()) {
                         AddDebugLog(L"[IPC] Warning: Found empty segment in buffer for " + channel_name);
@@ -1387,6 +1476,13 @@ bool BufferAndPipeStreamToPlayer(
                         if (write_result && bytes_written == segment_data.size()) {
                             segment_written = true;
                             segments_processed++;
+                            
+                            // Record frame as successfully sent to player
+                            frame_tracker.RecordFrameSentToPlayer(frame_number);
+                            
+                            AddDebugLog(L"[FRAME_TAG] Frame #" + std::to_wstring(frame_number) + 
+                                       L" sent to player" + (is_ad_placeholder ? L" [AD_PLACEHOLDER]" : L" [CONTENT]") +
+                                       L" - Size: " + std::to_wstring(segment_data.size()) + L" bytes");
                         } else {
                             write_attempts++;
                             DWORD error = GetLastError();
