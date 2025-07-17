@@ -8,6 +8,7 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <memory>
 
 // Global configuration for IPC method selection
 IPCMethod g_current_ipc_method = IPCMethod::ANONYMOUS_PIPES;
@@ -188,14 +189,16 @@ bool BufferAndMailSlotStreamToPlayer(
     std::thread bridge_thread([mailslot_server, bridge_stdin, channel_name]() {
         AddDebugLog(L"[BRIDGE] MailSlot bridge thread started for " + channel_name);
         
-        char buffer[10 * 1024 * 1024]; // 10MB buffer
+        // Use heap allocation instead of stack to prevent stack overflow
+        const size_t BUFFER_SIZE = 10 * 1024 * 1024; // 10MB buffer
+        std::unique_ptr<char[]> buffer = std::make_unique<char[]>(BUFFER_SIZE);
         DWORD bytes_read, bytes_written;
         
         while (true) {
-            if (ReadFile(mailslot_server, buffer, sizeof(buffer), &bytes_read, nullptr)) {
+            if (ReadFile(mailslot_server, buffer.get(), (DWORD)BUFFER_SIZE, &bytes_read, nullptr)) {
                 if (bytes_read > 0) {
                     AddDebugLog(L"[BRIDGE] Read " + std::to_wstring(bytes_read) + L" bytes from MailSlot");
-                    if (!WriteFile(bridge_stdin, buffer, bytes_read, &bytes_written, nullptr)) {
+                    if (!WriteFile(bridge_stdin, buffer.get(), bytes_read, &bytes_written, nullptr)) {
                         AddDebugLog(L"[BRIDGE] Failed to write to bridge pipe");
                         break;
                     }
@@ -233,8 +236,7 @@ bool BufferAndMailSlotStreamToPlayer(
         return false;
     }
     
-    // Download and stream content (similar to pipe implementation but using MailSlot)
-    // [Rest of streaming logic similar to pipe implementation but sending via MailSlot]
+    // Download and stream content - simplified demonstration
     std::string master;
     if (cancel_token.load()) {
         CloseHandle(mailslot_client);
@@ -249,18 +251,29 @@ bool BufferAndMailSlotStreamToPlayer(
         return false;
     }
     
-    // For demonstration, let's send a small test segment
-    std::vector<char> test_data(1024 * 1024, 'X'); // 1MB test data
-    AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Sending test data via MailSlot");
+    AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Downloaded master playlist, starting streaming demonstration");
     
-    if (!SendVideoSegmentViaMailSlot(mailslot_client, test_data)) {
-        AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Failed to send test data");
-    } else {
-        AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Successfully sent test data via MailSlot");
+    // For demonstration, simulate streaming multiple segments
+    for (int i = 0; i < 3 && !cancel_token.load(); i++) {
+        // Create test video segment (simulating real video data)
+        std::vector<char> segment_data(1024 * 1024, static_cast<char>('A' + i)); // 1MB per segment
+        AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Sending segment " + std::to_wstring(i + 1) + L" via MailSlot");
+        
+        if (!SendVideoSegmentViaMailSlot(mailslot_client, segment_data)) {
+            AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Failed to send segment " + std::to_wstring(i + 1));
+            break;
+        } else {
+            AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Successfully sent segment " + std::to_wstring(i + 1) + L" via MailSlot");
+        }
+        
+        // Small delay between segments to simulate real streaming
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     
-    // Keep process alive briefly for demonstration
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    AddDebugLog(L"BufferAndMailSlotStreamToPlayer: MailSlot streaming demonstration completed");
+    
+    // Keep process alive briefly to observe results
+    std::this_thread::sleep_for(std::chrono::seconds(3));
     
     CloseHandle(mailslot_client);
     CloseHandle(mailslot_server);
@@ -343,7 +356,7 @@ bool BufferAndNamedPipeStreamToPlayer(
     
     AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Named pipe connected");
     
-    // Download and stream content (similar logic but using named pipe)
+    // Download and stream content - simplified demonstration
     std::string master;
     if (cancel_token.load()) {
         CloseHandle(server_handle);
@@ -356,21 +369,32 @@ bool BufferAndNamedPipeStreamToPlayer(
         return false;
     }
     
-    // For demonstration, send test data via named pipe
-    std::vector<char> test_data(1024 * 1024, 'Y'); // 1MB test data
-    DWORD bytes_written;
+    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Downloaded master playlist, starting streaming demonstration");
     
-    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Sending test data via Named Pipe");
-    
-    if (!WriteFile(server_handle, test_data.data(), (DWORD)test_data.size(), &bytes_written, nullptr)) {
-        DWORD error = GetLastError();
-        AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Failed to write to named pipe, error=" + std::to_wstring(error));
-    } else {
-        AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Successfully sent " + std::to_wstring(bytes_written) + L" bytes via Named Pipe");
+    // For demonstration, simulate streaming multiple segments
+    for (int i = 0; i < 3 && !cancel_token.load(); i++) {
+        // Create test video segment (simulating real video data)
+        std::vector<char> segment_data(1024 * 1024, static_cast<char>('A' + i)); // 1MB per segment
+        DWORD bytes_written;
+        
+        AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Sending segment " + std::to_wstring(i + 1) + L" via Named Pipe");
+        
+        if (!WriteFile(server_handle, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, nullptr)) {
+            DWORD error = GetLastError();
+            AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Failed to write segment " + std::to_wstring(i + 1) + L", error=" + std::to_wstring(error));
+            break;
+        } else {
+            AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Successfully sent segment " + std::to_wstring(i + 1) + L" (" + std::to_wstring(bytes_written) + L" bytes) via Named Pipe");
+        }
+        
+        // Small delay between segments to simulate real streaming
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     
-    // Keep process alive briefly for demonstration
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    AddDebugLog(L"BufferAndNamedPipeStreamToPlayer: Named Pipe streaming demonstration completed");
+    
+    // Keep process alive briefly to observe results
+    std::this_thread::sleep_for(std::chrono::seconds(3));
     
     CloseHandle(server_handle);
     
