@@ -110,7 +110,7 @@
     <ClCompile Include="stream_memory_map.cpp" />
     <ClCompile Include="stream_pipe.cpp" />
     <ClCompile Include="stream_resource_manager.cpp" />
-
+    <ClCompile Include="stream_semaphore.cpp" />
     <ClCompile Include="stream_thread.cpp" />
     <ClCompile Include="Tardsplaya.cpp" />
     <ClCompile Include="tlsclient\tlsclient.cpp" />
@@ -127,7 +127,7 @@
     <ClInclude Include="stream_memory_map.h" />
     <ClInclude Include="stream_pipe.h" />
     <ClInclude Include="stream_resource_manager.h" />
-
+    <ClInclude Include="stream_semaphore.h" />
     <ClInclude Include="stream_thread.h" />
     <ClInclude Include="tlsclient\tls.h" />
     <ClInclude Include="tlsclient\tlsclient.h" />

@@ -1,5 +1,6 @@
 #include "stream_pipe.h"
 #include "stream_thread.h"
+#include "stream_semaphore.h"
 #include "twitch_api.h"
 #include "playlist_parser.h"
 #include <winsock2.h>
@@ -379,7 +380,7 @@ static bool HttpGetBinary(const std::wstring& url, std::vector<char>& out, int m
 }
 
 // Utility: HTTP GET (returns as string)
-static bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token) {
+bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token) {
     std::vector<char> data;
     if (!HttpGetBinary(url, data, 3, cancel_token)) return false;
     out.assign(data.begin(), data.end());
@@ -676,7 +677,8 @@ bool BufferAndPipeStreamToPlayer(
     int buffer_segments,
     const std::wstring& channel_name,
     std::atomic<int>* chunk_count,
-    const std::wstring& selected_quality
+    const std::wstring& selected_quality,
+    bool use_semaphore_ipc
 ) {
     // Track active streams for cross-stream interference detection
     int current_stream_count;
@@ -857,6 +859,23 @@ bool BufferAndPipeStreamToPlayer(
     const int max_buffer_segments = target_buffer_segments * 2; // Don't over-buffer
     const int buffer_full_timeout_seconds = 15; // Empty buffer if full for this long
     
+    // Initialize semaphore-based IPC for producer-consumer flow control
+    std::unique_ptr<ProducerConsumerSemaphores> buffer_semaphores;
+    if (use_semaphore_ipc) {
+        // Create semaphores with stream ID based on channel name and current time for uniqueness
+        std::wstring stream_id = channel_name + L"_" + std::to_wstring(GetTickCount64());
+        buffer_semaphores = StreamSemaphoreUtils::CreateStreamSemaphores(stream_id, max_buffer_segments);
+        
+        if (buffer_semaphores && buffer_semaphores->IsValid()) {
+            AddDebugLog(L"[SEMAPHORE] Created producer-consumer semaphores for " + channel_name + 
+                       L" with buffer_size=" + std::to_wstring(max_buffer_segments));
+        } else {
+            AddDebugLog(L"[SEMAPHORE] Warning: Failed to create semaphores for " + channel_name + 
+                       L", falling back to mutex-only synchronization");
+            use_semaphore_ipc = false; // Disable semaphore IPC for this stream
+        }
+    }
+    
     // Buffer fullness timeout tracking
     std::chrono::steady_clock::time_point buffer_full_start_time;
     bool buffer_full_timer_active = false;
@@ -981,14 +1000,34 @@ bool BufferAndPipeStreamToPlayer(
                     // Generate minimal valid content (just a few null bytes to maintain timing)
                     std::vector<char> placeholder_data(1024, 0); // 1KB of null data
                     
-                    // Add to buffer
-                    {
-                        std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer_queue.push(std::move(placeholder_data));
+                    // Producer: wait for available slot, then add to buffer
+                    bool added_successfully = false;
+                    if (use_semaphore_ipc && buffer_semaphores) {
+                        // Use semaphore-based IPC for flow control
+                        if (buffer_semaphores->WaitForProduceSlot(5000)) { // 5 second timeout
+                            {
+                                std::lock_guard<std::mutex> lock(buffer_mutex);
+                                buffer_queue.push(std::move(placeholder_data));
+                            }
+                            buffer_semaphores->SignalItemProduced();
+                            added_successfully = true;
+                            AddDebugLog(L"[SEMAPHORE] Placeholder added using semaphore IPC for " + channel_name);
+                        } else {
+                            AddDebugLog(L"[SEMAPHORE] Warning: Timeout waiting for buffer slot (placeholder) for " + channel_name);
+                        }
+                    } else {
+                        // Fallback to mutex-only approach
+                        {
+                            std::lock_guard<std::mutex> lock(buffer_mutex);
+                            buffer_queue.push(std::move(placeholder_data));
+                        }
+                        added_successfully = true;
                     }
                     
-                    new_segments_downloaded++;
-                    AddDebugLog(L"[AD_SKIP] Placeholder content added to buffer for " + channel_name);
+                    if (added_successfully) {
+                        new_segments_downloaded++;
+                        AddDebugLog(L"[AD_SKIP] Placeholder content added to buffer for " + channel_name);
+                    }
                     continue;
                 }
                 
@@ -1076,14 +1115,34 @@ bool BufferAndPipeStreamToPlayer(
                 }
 
                 if (download_ok && !seg_data.empty()) {
-                    // Add to buffer
-                    {
-                        std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer_queue.push(std::move(seg_data));
+                    // Producer: wait for available slot, then add to buffer
+                    bool added_successfully = false;
+                    if (use_semaphore_ipc && buffer_semaphores) {
+                        // Use semaphore-based IPC for flow control
+                        if (buffer_semaphores->WaitForProduceSlot(5000)) { // 5 second timeout
+                            {
+                                std::lock_guard<std::mutex> lock(buffer_mutex);
+                                buffer_queue.push(std::move(seg_data));
+                            }
+                            buffer_semaphores->SignalItemProduced();
+                            added_successfully = true;
+                        } else {
+                            AddDebugLog(L"[SEMAPHORE] Warning: Timeout waiting for buffer slot for " + channel_name);
+                        }
+                    } else {
+                        // Fallback to mutex-only approach
+                        {
+                            std::lock_guard<std::mutex> lock(buffer_mutex);
+                            buffer_queue.push(std::move(seg_data));
+                        }
+                        added_successfully = true;
                     }
-                    new_segments_downloaded++;
-                    AddDebugLog(L"[DOWNLOAD] Downloaded segment " + std::to_wstring(new_segments_downloaded) + 
-                               L", buffer=" + std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
+                    
+                    if (added_successfully) {
+                        new_segments_downloaded++;
+                        AddDebugLog(L"[DOWNLOAD] Downloaded segment " + std::to_wstring(new_segments_downloaded) + 
+                                   L", buffer=" + std::to_wstring(current_buffer_size + 1) + L" for " + channel_name);
+                    }
                 } else {
                     AddDebugLog(L"[DOWNLOAD] FAILED to download segment after retries for " + channel_name);
                 }
@@ -1201,10 +1260,42 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 
                 int segments_fed = 0;
-                while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
-                    segments_to_feed.push_back(std::move(buffer_queue.front()));
-                    buffer_queue.pop();
-                    segments_fed++;
+                if (use_semaphore_ipc && buffer_semaphores) {
+                    // Consumer: use semaphore-based IPC to wait for available items
+                    while (segments_fed < max_segments_to_feed) {
+                        if (buffer_semaphores->WaitForConsumeItem(100)) { // 100ms timeout per item
+                            // Item available, get it from buffer
+                            {
+                                std::lock_guard<std::mutex> lock(buffer_mutex);
+                                if (!buffer_queue.empty()) {
+                                    segments_to_feed.push_back(std::move(buffer_queue.front()));
+                                    buffer_queue.pop();
+                                    segments_fed++;
+                                    buffer_semaphores->SignalItemConsumed(); // Signal that slot is now free
+                                } else {
+                                    // Race condition: item was consumed by another thread
+                                    // This shouldn't happen in single-consumer case, but handle gracefully
+                                    AddDebugLog(L"[SEMAPHORE] Race condition: semaphore signaled but queue empty for " + channel_name);
+                                    break;
+                                }
+                            }
+                        } else {
+                            // Timeout waiting for item, no more items available
+                            break;
+                        }
+                    }
+                    
+                    if (segments_fed > 0) {
+                        AddDebugLog(L"[SEMAPHORE] Consumer got " + std::to_wstring(segments_fed) + 
+                                   L" segments using semaphore IPC for " + channel_name);
+                    }
+                } else {
+                    // Fallback to mutex-only approach
+                    while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
+                        segments_to_feed.push_back(std::move(buffer_queue.front()));
+                        buffer_queue.pop();
+                        segments_fed++;
+                    }
                 }
             }
             

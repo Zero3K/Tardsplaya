@@ -12,7 +12,8 @@ std::thread StartStreamThread(
     std::atomic<bool>* user_requested_stop,
     HWND main_window,
     size_t tab_index,
-    const std::wstring& selected_quality
+    const std::wstring& selected_quality,
+    bool use_semaphore_ipc
 ) {
     return std::thread([=, &cancel_token]() mutable {
         if (log_callback)
@@ -22,7 +23,7 @@ std::thread StartStreamThread(
                    L", Tab=" + std::to_wstring(tab_index) + 
                    L", BufferSegs=" + std::to_wstring(buffer_segments));
         
-        bool ok = BufferAndPipeStreamToPlayer(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count, selected_quality);
+        bool ok = BufferAndPipeStreamToPlayer(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count, selected_quality, use_semaphore_ipc);
         
         AddDebugLog(L"StartStreamThread: Stream finished, ok=" + std::to_wstring(ok) + 
                    L", Channel=" + channel_name + L", Tab=" + std::to_wstring(tab_index));
