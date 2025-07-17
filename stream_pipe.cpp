@@ -1377,15 +1377,14 @@ bool BufferAndPipeStreamToPlayer(
                 // Slower feeding when processing likely placeholder content (small segments)
                 bool likely_placeholder = false;
                 if (!segments_to_feed.empty()) {
-                    size_t avg_segment_size = 0;
+                    // Check if ANY segment in the batch is small enough to be a placeholder
+                    // This handles cases where placeholder and regular segments are mixed in one batch
                     for (const auto& seg : segments_to_feed) {
-                        avg_segment_size += seg.size();
-                    }
-                    avg_segment_size /= segments_to_feed.size();
-                    
-                    // If average segment size is small (< 100KB), likely placeholder content
-                    if (avg_segment_size < 100 * 1024) {
-                        likely_placeholder = true;
+                        // If any segment size is small (< 100KB), likely placeholder content
+                        if (seg.size() < 100 * 1024) {
+                            likely_placeholder = true;
+                            break;
+                        }
                     }
                 }
                 
