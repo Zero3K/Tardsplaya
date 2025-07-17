@@ -1215,6 +1215,15 @@ bool BufferAndPipeStreamToPlayer(
     const std::wstring& selected_quality
 ) {
     // Use the globally configured IPC method
+    std::wstring method_name;
+    switch (g_current_ipc_method) {
+        case IPCMethod::MAILSLOTS: method_name = L"MailSlots"; break;
+        case IPCMethod::NAMED_PIPES: method_name = L"Named Pipes"; break;
+        case IPCMethod::ANONYMOUS_PIPES: method_name = L"Anonymous Pipes"; break;
+        default: method_name = L"Unknown(" + std::to_wstring((int)g_current_ipc_method) + L")"; break;
+    }
+    AddDebugLog(L"[IPC-METHOD] BufferAndPipeStreamToPlayer wrapper called with method: " + method_name + L" for " + channel_name);
+    
     switch (g_current_ipc_method) {
         case IPCMethod::MAILSLOTS:
             AddDebugLog(L"[IPC-METHOD] Starting stream with MailSlots for " + channel_name);
