@@ -14,8 +14,8 @@ void AddDebugLog(const std::wstring& msg);
 
 // Streaming mode enumeration
 enum class StreamingMode {
-    HLS_SEGMENTS,      // Traditional HLS segment-based streaming (default)
-    TRANSPORT_STREAM   // TSDuck-inspired transport stream routing
+    HLS_SEGMENTS,      // Traditional HLS segment-based streaming (fallback)
+    TRANSPORT_STREAM   // TSDuck-inspired transport stream routing (default)
 };
 
 // Launches a thread to buffer and pipe the stream.
