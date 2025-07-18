@@ -432,6 +432,7 @@ static bool ValidatePlaylistMetadata(const std::string& playlist) {
         "#EXTINF"
     };
     
+    // First check that all required tags are present
     for (const auto& tag : required_tags) {
         if (playlist.find(tag) == std::string::npos) {
             AddDebugLog(L"[VALIDATION] Missing required tag: " + Utf8ToWide(tag));
@@ -439,7 +440,38 @@ static bool ValidatePlaylistMetadata(const std::string& playlist) {
         }
     }
     
-    AddDebugLog(L"[VALIDATION] Playlist validation passed - all required metadata present");
+    // Then check that no extra tags are present
+    std::istringstream ss(playlist);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.empty()) continue;
+        
+        // Skip non-tag lines
+        if (line[0] != '#') continue;
+        
+        // Extract tag name (everything before : or end of line)
+        std::string tag_name = line;
+        size_t colon_pos = line.find(':');
+        if (colon_pos != std::string::npos) {
+            tag_name = line.substr(0, colon_pos + 1);
+        }
+        
+        // Check if this tag is in the required list
+        bool tag_allowed = false;
+        for (const auto& required_tag : required_tags) {
+            if (tag_name.find(required_tag) == 0) {
+                tag_allowed = true;
+                break;
+            }
+        }
+        
+        if (!tag_allowed) {
+            AddDebugLog(L"[VALIDATION] Found extra tag not allowed: " + Utf8ToWide(tag_name));
+            return false;
+        }
+    }
+    
+    AddDebugLog(L"[VALIDATION] Playlist validation passed - only required metadata present");
     return true;
 }
 
