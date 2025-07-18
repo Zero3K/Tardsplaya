@@ -1127,10 +1127,18 @@ bool BufferAndPipeStreamToPlayer(
                 if (seen_urls.count(seg)) continue;
                 
                 // Check buffer size before downloading more (unless urgent download is needed)
-                size_t current_buffer_size;
-                {
+                size_t current_buffer_size = 0;
+                try {
                     std::lock_guard<std::mutex> lock(buffer_mutex);
                     current_buffer_size = buffer_queue.size();
+                } catch (const std::exception& e) {
+                    // Mutex operation failed - use safe default and continue
+                    AddDebugLog(L"[DOWNLOAD] Exception during buffer size check for " + channel_name + L" - using safe default");
+                    current_buffer_size = 0; // Safe default to allow download to continue
+                } catch (...) {
+                    // Unknown exception during mutex operation
+                    AddDebugLog(L"[DOWNLOAD] Unknown exception during buffer size check for " + channel_name + L" - using safe default");
+                    current_buffer_size = 0; // Safe default to allow download to continue
                 }
                 
                 bool urgent_bypass = urgent_download_needed.load();
@@ -1206,22 +1214,34 @@ bool BufferAndPipeStreamToPlayer(
                     if (use_semaphore_ipc && buffer_semaphores) {
                         // Use semaphore-based IPC for flow control
                         if (buffer_semaphores->WaitForProduceSlot(5000)) { // 5 second timeout
-                            {
+                            try {
                                 std::lock_guard<std::mutex> lock(buffer_mutex);
                                 buffer_queue.push(std::move(seg_data));
+                                buffer_semaphores->SignalItemProduced();
+                                added_successfully = true;
+                            } catch (const std::exception& e) {
+                                // Mutex operation failed - log error and continue
+                                AddDebugLog(L"[DOWNLOAD] Exception during buffer push (semaphore) for " + channel_name + L" - segment lost");
+                            } catch (...) {
+                                // Unknown exception during mutex operation
+                                AddDebugLog(L"[DOWNLOAD] Unknown exception during buffer push (semaphore) for " + channel_name + L" - segment lost");
                             }
-                            buffer_semaphores->SignalItemProduced();
-                            added_successfully = true;
                         } else {
                             AddDebugLog(L"[SEMAPHORE] Warning: Timeout waiting for buffer slot for " + channel_name);
                         }
                     } else {
                         // Fallback to mutex-only approach
-                        {
+                        try {
                             std::lock_guard<std::mutex> lock(buffer_mutex);
                             buffer_queue.push(std::move(seg_data));
+                            added_successfully = true;
+                        } catch (const std::exception& e) {
+                            // Mutex operation failed - log error and continue
+                            AddDebugLog(L"[DOWNLOAD] Exception during buffer push (mutex-only) for " + channel_name + L" - segment lost");
+                        } catch (...) {
+                            // Unknown exception during mutex operation
+                            AddDebugLog(L"[DOWNLOAD] Unknown exception during buffer push (mutex-only) for " + channel_name + L" - segment lost");
                         }
-                        added_successfully = true;
                     }
                     
                     if (added_successfully) {
@@ -1314,10 +1334,18 @@ bool BufferAndPipeStreamToPlayer(
                 break;
             }
             
-            size_t buffer_size;
-            {
+            size_t buffer_size = 0;
+            try {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
                 buffer_size = buffer_queue.size();
+            } catch (const std::exception& e) {
+                // Mutex operation failed - use safe default
+                AddDebugLog(L"[FEEDER] Exception during buffer size check for " + channel_name + L" - using safe default");
+                buffer_size = 0; // Safe default
+            } catch (...) {
+                // Unknown exception during mutex operation
+                AddDebugLog(L"[FEEDER] Unknown exception during buffer size check for " + channel_name + L" - using safe default");
+                buffer_size = 0; // Safe default
             }
             
             // Wait for initial buffer before starting - increased for stability
@@ -1368,28 +1396,48 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 
                 int segments_fed = 0;
-                if (use_semaphore_ipc && buffer_semaphores) {
+                if (use_semaphore_ipc && buffer_semaphores && buffer_semaphores->IsValid()) {
                     // Consumer: use semaphore-based IPC to wait for available items
                     while (segments_fed < max_segments_to_feed) {
-                        if (buffer_semaphores->WaitForConsumeItem(100)) { // 100ms timeout per item
-                            // Item available, get it from buffer
-                            {
-                                std::lock_guard<std::mutex> lock(buffer_mutex);
-                                if (!buffer_queue.empty()) {
-                                    segments_to_feed.push_back(std::move(buffer_queue.front()));
-                                    buffer_queue.pop();
-                                    segments_fed++;
-                                    buffer_semaphores->SignalItemConsumed(); // Signal that slot is now free
-                                } else {
-                                    // Race condition: item was consumed by another thread
-                                    // This shouldn't happen in single-consumer case, but handle gracefully
-                                    AddDebugLog(L"[SEMAPHORE] Race condition: semaphore signaled but queue empty for " + channel_name);
-                                    break;
+                        try {
+                            if (buffer_semaphores->WaitForConsumeItem(100)) { // 100ms timeout per item
+                                // Item available, get it from buffer
+                                try {
+                                    std::lock_guard<std::mutex> lock(buffer_mutex);
+                                    if (!buffer_queue.empty()) {
+                                        segments_to_feed.push_back(std::move(buffer_queue.front()));
+                                        buffer_queue.pop();
+                                        segments_fed++;
+                                        buffer_semaphores->SignalItemConsumed(); // Signal that slot is now free
+                                    } else {
+                                        // Race condition: item was consumed by another thread
+                                        // This shouldn't happen in single-consumer case, but handle gracefully
+                                        AddDebugLog(L"[SEMAPHORE] Race condition: semaphore signaled but queue empty for " + channel_name);
+                                        break;
+                                    }
+                                } catch (const std::exception& e) {
+                                    // Mutex operation failed - likely due to resource contention or corruption
+                                    AddDebugLog(L"[SEMAPHORE] Exception during mutex lock operation for " + channel_name + L" - stopping semaphore operations");
+                                    break; // Exit the while loop to avoid further crashes
+                                } catch (...) {
+                                    // Unknown exception during mutex operation
+                                    AddDebugLog(L"[SEMAPHORE] Unknown exception during mutex lock operation for " + channel_name + L" - stopping semaphore operations");
+                                    break; // Exit the while loop to avoid further crashes
                                 }
+                            } else {
+                                // Timeout waiting for item, no more items available
+                                break;
                             }
-                        } else {
-                            // Timeout waiting for item, no more items available
-                            break;
+                        } catch (const std::exception& e) {
+                            // Semaphore operation failed - likely the semaphore system is corrupted
+                            AddDebugLog(L"[SEMAPHORE] Exception during semaphore operation for " + channel_name + L" - falling back to mutex-only mode");
+                            use_semaphore_ipc = false; // Disable semaphore IPC for remainder of stream
+                            break; // Exit semaphore loop and fall back to mutex-only approach
+                        } catch (...) {
+                            // Unknown exception during semaphore operation
+                            AddDebugLog(L"[SEMAPHORE] Unknown exception during semaphore operation for " + channel_name + L" - falling back to mutex-only mode");
+                            use_semaphore_ipc = false; // Disable semaphore IPC for remainder of stream
+                            break; // Exit semaphore loop and fall back to mutex-only approach
                         }
                     }
                     
@@ -1399,10 +1447,18 @@ bool BufferAndPipeStreamToPlayer(
                     }
                 } else {
                     // Fallback to mutex-only approach
-                    while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
-                        segments_to_feed.push_back(std::move(buffer_queue.front()));
-                        buffer_queue.pop();
-                        segments_fed++;
+                    try {
+                        while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
+                            segments_to_feed.push_back(std::move(buffer_queue.front()));
+                            buffer_queue.pop();
+                            segments_fed++;
+                        }
+                    } catch (const std::exception& e) {
+                        // Mutex operation failed - likely due to resource contention or corruption
+                        AddDebugLog(L"[MUTEX] Exception during fallback mutex operation for " + channel_name + L" - stopping buffer operations");
+                    } catch (...) {
+                        // Unknown exception during mutex operation
+                        AddDebugLog(L"[MUTEX] Unknown exception during fallback mutex operation for " + channel_name + L" - stopping buffer operations");
                     }
                 }
             }
