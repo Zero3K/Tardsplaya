@@ -798,39 +798,8 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     
     PROCESS_INFORMATION pi = {};
     
-    // Build command line with appropriate arguments for transport stream
-    std::wstring cmd_line;
-    std::wstring player_name = config.player_path;
-    
-    // Extract just the executable name for player-specific handling
-    size_t last_slash = player_name.find_last_of(L"\\/");
-    if (last_slash != std::wstring::npos) {
-        player_name = player_name.substr(last_slash + 1);
-    }
-    std::transform(player_name.begin(), player_name.end(), player_name.begin(), ::towlower);
-    
-    // Use simple stdin reading approach for all players, similar to regular HLS mode
-    if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
-        // MPC-HC: read from stdin
-        cmd_line = L"\"" + config.player_path + L"\" - /new /nofocus";
-        if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPC-HC stdin arguments");
-        }
-    }
-    else if (player_name.find(L"vlc") != std::wstring::npos) {
-        // VLC: read from stdin
-        cmd_line = L"\"" + config.player_path + L"\" - --intf dummy --no-one-instance";
-        if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using VLC stdin arguments");
-        }
-    }
-    else {
-        // Generic player (including MPV): read from stdin
-        cmd_line = L"\"" + config.player_path + L"\" -";
-        if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using generic stdin arguments");
-        }
-    }
+    // Build command line using the configured player arguments (simple approach like HLS mode)
+    std::wstring cmd_line = L"\"" + config.player_path + L"\" " + config.player_args;
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Launching player: " + cmd_line);
