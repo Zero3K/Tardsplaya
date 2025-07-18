@@ -13,7 +13,6 @@ PlaylistParser::PlaylistParser() {
 
 bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
     segments_.clear();
-    has_ad_markers_ = false;
     has_discontinuities_ = false;
     
     std::istringstream stream(m3u8_content);
@@ -58,19 +57,12 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
             }
             else if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 current_segment.has_scte35_out = true;
-                current_segment.is_ad_segment = true;
-                has_ad_markers_ = true;
             }
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
                 current_segment.has_scte35_in = true;
             }
             else if (line.find("#EXT-X-DATERANGE") == 0) {
                 ParseDateRangeLine(line, current_segment);
-            }
-            // Enhanced ad detection patterns
-            else if (ContainsAdMarkers(line)) {
-                current_segment.is_ad_segment = true;
-                has_ad_markers_ = true;
             }
         }
         else if (expecting_segment_url) {
@@ -86,9 +78,8 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
         }
     }
     
-    // Post-processing: calculate precise timing and analyze patterns
+    // Post-processing: calculate precise timing
     CalculatePreciseTiming();
-    AnalyzeAdPatterns();
     
     return !segments_.empty();
 }
@@ -112,14 +103,6 @@ void PlaylistParser::ParseInfoLine(const std::string& line, MediaSegment& curren
         current_segment.duration = std::chrono::milliseconds(static_cast<int64_t>(duration_seconds * 1000));
         current_segment.precise_duration = current_segment.duration;
         current_segment.target_duration = duration_seconds;
-        
-        // TSDuck-style ad detection based on suspicious durations
-        if (std::abs(duration_seconds - 2.001) < 0.01 || 
-            std::abs(duration_seconds - 2.002) < 0.01 ||
-            std::abs(duration_seconds - 30.0) < 0.1) {
-            current_segment.is_ad_segment = true;
-            has_ad_markers_ = true;
-        }
     }
     catch (const std::exception&) {
         // Default to target duration if parsing fails
@@ -129,14 +112,8 @@ void PlaylistParser::ParseInfoLine(const std::string& line, MediaSegment& curren
 }
 
 void PlaylistParser::ParseDateRangeLine(const std::string& line, MediaSegment& current_segment) {
-    // Enhanced DATERANGE parsing for ad detection
-    if (line.find("stitched-ad") != std::string::npos ||
-        line.find("STITCHED-AD") != std::string::npos ||
-        line.find("MIDROLL") != std::string::npos ||
-        line.find("midroll") != std::string::npos) {
-        current_segment.is_ad_segment = true;
-        has_ad_markers_ = true;
-    }
+    // Basic DATERANGE parsing - store the line for reference
+    current_segment.daterange_line = line;
 }
 
 void PlaylistParser::ParseScte35Line(const std::string& line, MediaSegment& current_segment) {
@@ -170,25 +147,6 @@ double PlaylistParser::ExtractFloatFromTag(const std::string& line, const std::s
     return 0.0;
 }
 
-bool PlaylistParser::ContainsAdMarkers(const std::string& line) {
-    // TSDuck-inspired comprehensive ad marker detection
-    const std::vector<std::string> ad_patterns = {
-        "stitched", "STITCHED",
-        "ad-break", "AD-BREAK", 
-        "commercial", "COMMERCIAL",
-        "advertisement", "ADVERTISEMENT",
-        "EXT-X-CUE-OUT", "EXT-X-CUE-IN",
-        "SCTE-35", "scte-35"
-    };
-    
-    for (const auto& pattern : ad_patterns) {
-        if (line.find(pattern) != std::string::npos) {
-            return true;
-        }
-    }
-    
-    return false;
-}
 
 void PlaylistParser::CalculatePreciseTiming() {
     // TSDuck-style precise timing calculation
@@ -214,34 +172,7 @@ void PlaylistParser::CalculatePreciseTiming() {
     }
 }
 
-void PlaylistParser::AnalyzeAdPatterns() {
-    // TSDuck-style ad pattern analysis for better detection
-    for (size_t i = 0; i < segments_.size(); ++i) {
-        auto& segment = segments_[i];
-        
-        // Look for ad pattern sequences
-        if (i > 0 && i < segments_.size() - 1) {
-            const auto& prev = segments_[i-1];
-            // const auto& next = segments_[i+1]; // Will be used for future pattern analysis
-            
-            // Pattern: Discontinuity followed by different duration segments often indicates ads
-            if (segment.has_discontinuity && 
-                std::abs(segment.target_duration - prev.target_duration) > 0.5) {
-                segment.is_ad_segment = true;
-                has_ad_markers_ = true;
-            }
-            
-            // Pattern: Segments with significantly different durations
-            if (segment.target_duration > 0 && prev.target_duration > 0) {
-                double duration_ratio = segment.target_duration / prev.target_duration;
-                if (duration_ratio > 15.0 || duration_ratio < 0.067) { // 30s vs 2s segments
-                    segment.is_ad_segment = true;
-                    has_ad_markers_ = true;
-                }
-            }
-        }
-    }
-}
+
 
 int PlaylistParser::GetOptimalBufferSegments() const {
     return BufferingOptimizer::CalculateOptimalBufferSize(segments_);
@@ -261,11 +192,10 @@ int BufferingOptimizer::CalculateOptimalBufferSize(const std::vector<MediaSegmen
     
     // TSDuck-inspired buffer calculation based on segment characteristics
     double avg_duration = 0.0;
-    int ad_segments = 0;
     
     for (const auto& segment : segments) {
         avg_duration += segment.target_duration;
-        if (segment.is_ad_segment) ad_segments++;
+        // Note: Ad detection removed - processing all segments equally
     }
     
     if (!segments.empty()) {
@@ -274,12 +204,6 @@ int BufferingOptimizer::CalculateOptimalBufferSize(const std::vector<MediaSegmen
     
     // Calculate optimal buffer: aim for 10-15 seconds of content for better stability
     int optimal_segments = static_cast<int>(std::ceil(12.0 / avg_duration)); // 12 seconds target (increased from 8)
-    
-    // Adjust for ad density - more ads = larger buffer for smoother skipping
-    double ad_ratio = static_cast<double>(ad_segments) / segments.size();
-    if (ad_ratio > 0.3) { // More than 30% ads
-        optimal_segments = static_cast<int>(optimal_segments * 1.5);
-    }
     
     // Clamp to reasonable range with higher minimums for stability
     return std::max(6, std::min(optimal_segments, 15)); // Increased minimum from 2 to 6, max from 8 to 15
@@ -301,8 +225,7 @@ std::chrono::milliseconds BufferingOptimizer::CalculatePreloadTime(const std::ve
 
 bool BufferingOptimizer::ShouldFlushBuffer(const MediaSegment& current, const MediaSegment& next) {
     // TSDuck-style discontinuity analysis
-    return next.has_discontinuity || 
-           (current.is_ad_segment != next.is_ad_segment && !current.is_ad_segment);
+    return next.has_discontinuity;
 }
 
 } // namespace tsduck_hls
