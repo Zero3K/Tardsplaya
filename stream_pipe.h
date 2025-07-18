@@ -12,5 +12,6 @@ bool BufferAndPipeStreamToPlayer(
     int buffer_segments = 3, // How many segments to buffer before starting playback
     const std::wstring& channel_name = L"", // Channel name for window title
     std::atomic<int>* chunk_count = nullptr, // Pointer to chunk count for status display
-    const std::wstring& selected_quality = L"" // User's selected quality for ad recovery
+    const std::wstring& selected_quality = L"", // User's selected quality for ad recovery
+    HANDLE* player_process_handle = nullptr // Optional pointer to store player process handle
 );

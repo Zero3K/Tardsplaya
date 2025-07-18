@@ -942,7 +942,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         g_hMainWnd, // main window handle for auto-stop messages
         tabIndex, // tab index for identifying which stream to auto-stop
         originalQuality, // selected quality for ad recovery
-        mode // streaming mode (HLS or Transport Stream)
+        mode, // streaming mode (HLS or Transport Stream)
+        &tab.playerProcess // player process handle for monitoring
     );
     
     AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));
@@ -1465,6 +1466,24 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         break;
     }
+    case WM_USER + 3: {
+        // Handle player process death
+        size_t tabIndex = (size_t)wParam;
+        AddDebugLog(L"WM_USER + 3: Player died for tab " + std::to_wstring(tabIndex));
+        
+        if (tabIndex < g_streams.size() && g_streams[tabIndex].isStreaming) {
+            auto& tab = g_streams[tabIndex];
+            AddDebugLog(L"WM_USER + 3: Stopping stream for dead player, channel=" + tab.channel);
+            
+            // Stop the stream (don't mark as user-requested)
+            StopStream(tab);
+            
+            AddLog(L"Stream stopped (media player closed): " + tab.channel);
+        } else {
+            AddDebugLog(L"WM_USER + 3: Invalid tab index or not streaming: " + std::to_wstring(tabIndex));
+        }
+        break;
+    }
     case WM_TIMER:
         if (wParam == TIMER_PLAYER_CHECK) {
             // Update all streaming tabs that are still in "Starting..." state
@@ -1477,12 +1496,44 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             KillTimer(hwnd, TIMER_PLAYER_CHECK);
         } else if (wParam == TIMER_CHUNK_UPDATE) {
             // Check if any stream is active and get total chunk count
+            // Also check for dead player processes
             bool hasActiveStream = false;
             int totalChunkCount = 0;
-            for (const auto& tab : g_streams) {
+            
+            for (auto& tab : g_streams) {
                 if (tab.isStreaming) {
                     hasActiveStream = true;
                     totalChunkCount += tab.chunkCount.load();
+                    
+                    // Check if player process is still running
+                    if (tab.playerProcess && tab.playerProcess != INVALID_HANDLE_VALUE) {
+                        DWORD exitCode;
+                        if (GetExitCodeProcess(tab.playerProcess, &exitCode)) {
+                            if (exitCode != STILL_ACTIVE) {
+                                // Player process has died - stop the stream
+                                AddDebugLog(L"TIMER_CHUNK_UPDATE: Player process died for " + tab.channel + 
+                                           L", exit code=" + std::to_wstring(exitCode));
+                                AddLog(L"Media player closed for " + tab.channel + L" - stopping stream");
+                                
+                                // Set cancel token to stop the streaming thread
+                                tab.cancelToken = true;
+                                
+                                // Wait a moment and then update UI
+                                PostMessage(hwnd, WM_USER + 3, (WPARAM)(&tab - &g_streams[0]), 0);
+                            }
+                        } else {
+                            // Failed to get exit code - might be dead process
+                            DWORD error = GetLastError();
+                            if (error == ERROR_INVALID_HANDLE) {
+                                AddDebugLog(L"TIMER_CHUNK_UPDATE: Invalid player process handle for " + tab.channel + 
+                                           L" - stopping stream");
+                                AddLog(L"Media player connection lost for " + tab.channel + L" - stopping stream");
+                                
+                                tab.cancelToken = true;
+                                PostMessage(hwnd, WM_USER + 3, (WPARAM)(&tab - &g_streams[0]), 0);
+                            }
+                        }
+                    }
                 }
             }
             
