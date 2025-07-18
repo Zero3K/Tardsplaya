@@ -33,7 +33,8 @@ std::thread StartStreamThread(
     HWND main_window = nullptr,
     size_t tab_index = 0,
     const std::wstring& selected_quality = L"",
-    StreamingMode mode = StreamingMode::TRANSPORT_STREAM
+    StreamingMode mode = StreamingMode::TRANSPORT_STREAM,
+    HANDLE* player_process_handle = nullptr
 );
 
 // Start TSDuck transport stream routing (alternative to traditional HLS streaming)
@@ -45,5 +46,6 @@ std::thread StartTransportStreamThread(
     size_t buffer_packets = 5000,
     const std::wstring& channel_name = L"",
     HWND main_window = nullptr,
-    size_t tab_index = 0
+    size_t tab_index = 0,
+    HANDLE* player_process_handle = nullptr
 );

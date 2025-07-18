@@ -469,6 +469,9 @@ uint32_t HLSToTSConverter::CalculateCRC32(const uint8_t* data, size_t length) {
 
 // TransportStreamRouter implementation
 TransportStreamRouter::TransportStreamRouter() {
+    // Initialize member variables
+    player_process_handle_ = INVALID_HANDLE_VALUE;
+    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();
@@ -537,6 +540,9 @@ void TransportStreamRouter::StopRouting() {
     if (ts_router_thread_.joinable()) {
         ts_router_thread_.join();
     }
+    
+    // Clear stored process handle since routing has stopped
+    player_process_handle_ = INVALID_HANDLE_VALUE;
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Transport stream routing stopped");
@@ -703,6 +709,9 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
         return;
     }
     
+    // Store player process handle for external monitoring
+    player_process_handle_ = player_process;
+    
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Media player launched successfully");
     }
@@ -721,12 +730,19 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                     if (log_callback_) {
                         log_callback_(L"[TS_ROUTER] Media player process exited (code: " + std::to_wstring(exit_code) + L")");
                     }
+                    // Set cancel token to signal this was due to player death, not normal completion
+                    cancel_token = true;
                     break;
                 }
             } else {
                 DWORD error = GetLastError();
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to check player process status (error: " + std::to_wstring(error) + L")");
+                }
+                // If we can't check the process status, it's likely dead - set cancel token
+                if (error == ERROR_INVALID_HANDLE) {
+                    cancel_token = true;
+                    break;
                 }
             }
         }
@@ -777,6 +793,8 @@ cleanup_and_exit:
             TerminateProcess(player_process, 0);
         }
         CloseHandle(player_process);
+        // Clear stored handle
+        player_process_handle_ = INVALID_HANDLE_VALUE;
     }
     
     if (log_callback_) {

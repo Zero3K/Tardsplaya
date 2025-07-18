@@ -640,7 +640,8 @@ bool BufferAndPipeStreamToPlayer(
     int buffer_segments,
     const std::wstring& channel_name,
     std::atomic<int>* chunk_count,
-    const std::wstring& selected_quality
+    const std::wstring& selected_quality,
+    HANDLE* player_process_handle
 ) {
     // Track active streams for cross-stream interference detection
     int current_stream_count;
@@ -784,6 +785,11 @@ bool BufferAndPipeStreamToPlayer(
     }
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Process created successfully for " + channel_name + 
                L", PID=" + std::to_wstring(pi.dwProcessId) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
+    
+    // Store player process handle if pointer provided
+    if (player_process_handle) {
+        *player_process_handle = pi.hProcess;
+    }
     
     // Set process priority for better multi-stream performance using resource manager recommendations
     DWORD recommended_priority = resource_manager.GetRecommendedProcessPriority();

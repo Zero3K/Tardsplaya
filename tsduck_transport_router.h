@@ -143,6 +143,9 @@ namespace tsduck_transport {
         };
         BufferStats GetBufferStats() const;
         
+        // Get player process handle for external monitoring
+        HANDLE GetPlayerProcessHandle() const { return player_process_handle_; }
+        
     private:
         std::unique_ptr<TSBuffer> ts_buffer_;
         std::unique_ptr<HLSToTSConverter> hls_converter_;
@@ -154,6 +157,7 @@ namespace tsduck_transport {
         
         RouterConfig current_config_;
         std::function<void(const std::wstring&)> log_callback_;
+        HANDLE player_process_handle_;
         
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);

@@ -942,7 +942,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         g_hMainWnd, // main window handle for auto-stop messages
         tabIndex, // tab index for identifying which stream to auto-stop
         originalQuality, // selected quality for ad recovery
-        mode // streaming mode (HLS or Transport Stream)
+        mode, // streaming mode (HLS or Transport Stream)
+        &tab.playerProcess // player process handle for monitoring
     );
     
     AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));
@@ -1477,12 +1478,41 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             KillTimer(hwnd, TIMER_PLAYER_CHECK);
         } else if (wParam == TIMER_CHUNK_UPDATE) {
             // Check if any stream is active and get total chunk count
+            // Also check for dead player processes
             bool hasActiveStream = false;
             int totalChunkCount = 0;
-            for (const auto& tab : g_streams) {
+            
+            for (auto& tab : g_streams) {
                 if (tab.isStreaming) {
                     hasActiveStream = true;
                     totalChunkCount += tab.chunkCount.load();
+                    
+                    // Check if player process is still running
+                    if (tab.playerProcess && tab.playerProcess != INVALID_HANDLE_VALUE) {
+                        DWORD exitCode;
+                        if (GetExitCodeProcess(tab.playerProcess, &exitCode)) {
+                            if (exitCode != STILL_ACTIVE) {
+                                // Player process has died - stop the stream
+                                AddDebugLog(L"TIMER_CHUNK_UPDATE: Player process died for " + tab.channel + 
+                                           L", exit code=" + std::to_wstring(exitCode));
+                                AddLog(L"Media player closed for " + tab.channel + L" - stopping stream");
+                                
+                                // Simulate Stop button click to follow exact same code path as manual click
+                                PostMessage(tab.hStopBtn, BM_CLICK, 0, 0);
+                            }
+                        } else {
+                            // Failed to get exit code - might be dead process
+                            DWORD error = GetLastError();
+                            if (error == ERROR_INVALID_HANDLE) {
+                                AddDebugLog(L"TIMER_CHUNK_UPDATE: Invalid player process handle for " + tab.channel + 
+                                           L" - stopping stream");
+                                AddLog(L"Media player connection lost for " + tab.channel + L" - stopping stream");
+                                
+                                // Simulate Stop button click to follow exact same code path as manual click
+                                PostMessage(tab.hStopBtn, BM_CLICK, 0, 0);
+                            }
+                        }
+                    }
                 }
             }
             

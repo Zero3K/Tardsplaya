@@ -15,7 +15,8 @@ std::thread StartStreamThread(
     HWND main_window,
     size_t tab_index,
     const std::wstring& selected_quality,
-    StreamingMode mode
+    StreamingMode mode,
+    HANDLE* player_process_handle
 ) {
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
@@ -35,7 +36,7 @@ std::thread StartStreamThread(
         }
         
         return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
-                                         base_buffer_packets, channel_name, main_window, tab_index);
+                                         base_buffer_packets, channel_name, main_window, tab_index, player_process_handle);
     }
     
     // Use traditional HLS streaming
@@ -47,7 +48,7 @@ std::thread StartStreamThread(
                    L", Tab=" + std::to_wstring(tab_index) + 
                    L", BufferSegs=" + std::to_wstring(buffer_segments));
         
-        bool ok = BufferAndPipeStreamToPlayer(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count, selected_quality);
+        bool ok = BufferAndPipeStreamToPlayer(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count, selected_quality, player_process_handle);
         
         AddDebugLog(L"StartStreamThread: Stream finished, ok=" + std::to_wstring(ok) + 
                    L", Channel=" + channel_name + L", Tab=" + std::to_wstring(tab_index));
@@ -82,7 +83,8 @@ std::thread StartTransportStreamThread(
     size_t buffer_packets,
     const std::wstring& channel_name,
     HWND main_window,
-    size_t tab_index
+    size_t tab_index,
+    HANDLE* player_process_handle
 ) {
     return std::thread([=, &cancel_token]() mutable {
         if (log_callback)
@@ -117,6 +119,11 @@ std::thread StartTransportStreamThread(
             bool routing_started = router.StartRouting(playlist_url, config, cancel_token, log_callback);
             
             if (routing_started) {
+                // Store player process handle if pointer provided
+                if (player_process_handle) {
+                    *player_process_handle = router.GetPlayerProcessHandle();
+                }
+                
                 if (log_callback) {
                     log_callback(L"[TS_MODE] Transport stream routing active");
                 }
