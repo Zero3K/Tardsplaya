@@ -219,22 +219,6 @@ void PlaylistParser::AnalyzeAdPatterns() {
     for (size_t i = 0; i < segments_.size(); ++i) {
         auto& segment = segments_[i];
         
-        // Check URL patterns for ad detection
-        std::wstring url_lower = segment.url;
-        std::transform(url_lower.begin(), url_lower.end(), url_lower.begin(), ::towlower);
-        
-        // Common ad URL patterns
-        if (url_lower.find(L"ad-") != std::wstring::npos ||
-            url_lower.find(L"ads-") != std::wstring::npos ||
-            url_lower.find(L"advertisement") != std::wstring::npos ||
-            url_lower.find(L"commercial") != std::wstring::npos ||
-            url_lower.find(L"stitched") != std::wstring::npos ||
-            url_lower.find(L"midroll") != std::wstring::npos ||
-            url_lower.find(L"preroll") != std::wstring::npos) {
-            segment.is_ad_segment = true;
-            has_ad_markers_ = true;
-        }
-        
         // Look for ad pattern sequences
         if (i > 0 && i < segments_.size() - 1) {
             const auto& prev = segments_[i-1];

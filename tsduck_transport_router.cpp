@@ -1,6 +1,7 @@
 #include "tsduck_transport_router.h"
 #include "twitch_api.h"
 #include "playlist_parser.h"
+#include "tsduck_hls_wrapper.h"
 #define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
@@ -160,6 +161,18 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     if (pos == std::wstring::npos) return rel;
     return base.substr(0, pos + 1) + rel;
 }
+
+// Ad block state tracking for preventing infinite ad segment skipping
+struct AdBlockState {
+    bool in_scte35_out = false;
+    bool skip_next_segment = false; 
+    int consecutive_skipped_segments = 0;
+    std::chrono::steady_clock::time_point scte35_start_time;
+    bool just_started_ad_block = false; // Flag to indicate we just started an ad block
+    bool just_exited_ad_block = false; // Flag to indicate we just exited an ad block
+    static const int MAX_CONSECUTIVE_SKIPPED_SEGMENTS = 15; // ~30 seconds for 2-second segments
+    static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
+};
 
 // TSPacket implementation
 void TSPacket::ParseHeader() {
@@ -898,10 +911,32 @@ bool TransportStreamRouter::FetchHLSSegment(const std::wstring& segment_url, std
 }
 
 std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::string& playlist_content, const std::wstring& base_url) {
+    static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segment_urls;
+    
+    // First run TSDuck analysis to get sophisticated ad detection results
+    tsduck_hls::PlaylistParser tsduck_parser;
+    bool tsduck_available = tsduck_parser.ParsePlaylist(playlist_content);
+    std::vector<tsduck_hls::MediaSegment> tsduck_segments;
+    if (tsduck_available) {
+        tsduck_segments = tsduck_parser.GetSegments();
+        if (log_callback_) {
+            log_callback_(L"[TS_AD_SKIP] TSDuck analysis found " + std::to_wstring(tsduck_segments.size()) + 
+                         L" segments, " + std::to_wstring(tsduck_parser.HasAdMarkers() ? 1 : 0) + L" ad markers detected");
+        }
+    }
+    
+    // Don't clear buffer when exiting ad blocks to maintain stream continuity
+    if (ad_state.just_exited_ad_block) {
+        ad_state.just_exited_ad_block = false; // Reset flag
+        if (log_callback_) {
+            log_callback_(L"[TS_AD_SKIP] Just exited ad block, continuing with existing buffer to maintain continuity");
+        }
+    }
     
     std::istringstream stream(playlist_content);
     std::string line;
+    int current_segment_index = 0; // Track which segment we're processing for TSDuck correlation
     
     while (std::getline(stream, line)) {
         // Remove trailing whitespace
@@ -909,14 +944,154 @@ std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::str
             line.pop_back();
         }
         
-        if (line.empty() || line[0] == '#') {
-            continue; // Skip empty lines and comments
+        if (line.empty()) continue;
+        
+        if (line[0] == '#') {
+            // SCTE-35 ad marker detection (start of ad block)
+            if (line.find("#EXT-X-SCTE35-OUT") == 0) {
+                if (!ad_state.in_scte35_out) {
+                    // Just entering ad block - don't clear buffer to maintain continuity
+                    if (log_callback_) {
+                        log_callback_(L"[TS_AD_SKIP] Found SCTE35-OUT marker, entering ad block - maintaining buffer continuity");
+                    }
+                } else {
+                    if (log_callback_) {
+                        log_callback_(L"[TS_AD_SKIP] Found SCTE35-OUT marker, already in ad block");
+                    }
+                }
+                ad_state.in_scte35_out = true;
+                ad_state.consecutive_skipped_segments = 0;
+                ad_state.scte35_start_time = std::chrono::steady_clock::now();
+                continue;
+            }
+            // SCTE-35 ad marker detection (end of ad block)
+            else if (line.find("#EXT-X-SCTE35-IN") == 0) {
+                ad_state.in_scte35_out = false;
+                ad_state.consecutive_skipped_segments = 0;
+                ad_state.just_exited_ad_block = true;
+                if (log_callback_) {
+                    log_callback_(L"[TS_AD_SKIP] Found SCTE35-IN marker, exiting ad block - maintaining buffer continuity");
+                }
+                continue;
+            }
+            // Stitched ad segments (single segment ads)
+            else if (line.find("stitched-ad") != std::string::npos) {
+                ad_state.skip_next_segment = true;
+                if (log_callback_) {
+                    log_callback_(L"[TS_AD_SKIP] Found stitched-ad marker");
+                }
+            }
+            // EXTINF tags with specific durations that indicate ads (2.001, 2.002 seconds)
+            else if (line.find("#EXTINF:2.00") == 0 && 
+                     (line.find("2.001") != std::string::npos || 
+                      line.find("2.002") != std::string::npos)) {
+                ad_state.skip_next_segment = true;
+                if (log_callback_) {
+                    log_callback_(L"[TS_AD_SKIP] Found ad-duration EXTINF marker");
+                }
+            }
+            // DATERANGE markers for stitched ads
+            else if (line.find("#EXT-X-DATERANGE:ID=\"stitched-ad") == 0) {
+                ad_state.skip_next_segment = true;
+                if (log_callback_) {
+                    log_callback_(L"[TS_AD_SKIP] Found stitched-ad DATERANGE marker");
+                }
+            }
+            // General stitched content detection
+            else if (line.find("stitched") != std::string::npos ||
+                     line.find("STITCHED") != std::string::npos) {
+                ad_state.skip_next_segment = true;
+                if (log_callback_) {
+                    log_callback_(L"[TS_AD_SKIP] Found general stitched content marker");
+                }
+            }
+            // MIDROLL ad markers
+            else if (line.find("EXT-X-DATERANGE") != std::string::npos && 
+                     (line.find("MIDROLL") != std::string::npos ||
+                      line.find("midroll") != std::string::npos)) {
+                ad_state.skip_next_segment = true;
+                if (log_callback_) {
+                    log_callback_(L"[TS_AD_SKIP] Found MIDROLL ad marker");
+                }
+            }
+            continue;
         }
         
-        // This is a segment URL - convert to wide string and join with base URL
-        std::wstring rel_url(line.begin(), line.end());
-        std::wstring full_url = JoinUrl(base_url, rel_url);
-        segment_urls.push_back(full_url);
+        // This is a segment URL
+        bool should_skip_ad_segment = false;
+        
+        // First check TSDuck ad detection results if available
+        if (tsduck_available && current_segment_index < static_cast<int>(tsduck_segments.size())) {
+            const auto& tsduck_segment = tsduck_segments[current_segment_index];
+            if (tsduck_segment.is_ad_segment) {
+                should_skip_ad_segment = true;
+                if (log_callback_) {
+                    log_callback_(L"[TS_AD_SKIP] TSDuck detected ad segment: " + std::wstring(line.begin(), line.end()));
+                }
+            }
+        }
+        
+        // Fallback to legacy ad detection logic if TSDuck didn't detect an ad
+        if (!should_skip_ad_segment) {
+            // Check if we should skip this segment as an ad using legacy detection
+            if (ad_state.skip_next_segment) {
+                // Single ad segment (stitched ads, duration-based ads, etc.)
+                should_skip_ad_segment = true;
+                ad_state.skip_next_segment = false; // Reset after processing one segment
+            } else if (ad_state.in_scte35_out) {
+                // SCTE35 ad block - check safety limits to prevent infinite ad segment skipping
+                auto current_time = std::chrono::steady_clock::now();
+                auto ad_block_duration = current_time - ad_state.scte35_start_time;
+                
+                if (ad_state.consecutive_skipped_segments >= AdBlockState::MAX_CONSECUTIVE_SKIPPED_SEGMENTS) {
+                    if (log_callback_) {
+                        log_callback_(L"[TS_AD_SKIP] Safety limit reached: " + std::to_wstring(ad_state.consecutive_skipped_segments) + 
+                                     L" consecutive skipped segments, exiting ad block");
+                    }
+                    ad_state.in_scte35_out = false;
+                    ad_state.consecutive_skipped_segments = 0;
+                    ad_state.just_exited_ad_block = true;
+                } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
+                    if (log_callback_) {
+                        log_callback_(L"[TS_AD_SKIP] Safety timeout reached: " + 
+                                     std::to_wstring(std::chrono::duration_cast<std::chrono::seconds>(ad_block_duration).count()) + 
+                                     L" seconds in ad block, exiting");
+                    }
+                    ad_state.in_scte35_out = false;
+                    ad_state.consecutive_skipped_segments = 0;
+                    ad_state.just_exited_ad_block = true;
+                } else {
+                    should_skip_ad_segment = true;
+                }
+            }
+        }
+        
+        if (should_skip_ad_segment) {
+            // Ad segment detected - skip it entirely for transport stream mode
+            if (log_callback_) {
+                log_callback_(L"[TS_AD_SKIP] Skipping ad segment (skipped #" + 
+                             std::to_wstring(ad_state.consecutive_skipped_segments + 1) + L"): " + 
+                             std::wstring(line.begin(), line.end()));
+            }
+            ad_state.consecutive_skipped_segments++;
+            // Don't add this segment to the list - it will be completely skipped
+        } else {
+            // Normal content segment - reset skip counter and add to list
+            if (ad_state.consecutive_skipped_segments > 0) {
+                if (log_callback_) {
+                    log_callback_(L"[TS_AD_SKIP] Returning to normal content after skipping " + 
+                                 std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments");
+                }
+                ad_state.consecutive_skipped_segments = 0;
+            }
+            
+            // Convert to wide string and join with base URL
+            std::wstring rel_url(line.begin(), line.end());
+            std::wstring full_url = JoinUrl(base_url, rel_url);
+            segment_urls.push_back(full_url);
+        }
+        
+        current_segment_index++; // Increment for TSDuck correlation
     }
     
     return segment_urls;
