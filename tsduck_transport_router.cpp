@@ -311,6 +311,12 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         // Parse packet header
         packet.ParseHeader();
         
+        // TODO: Add TS packet content analysis for ad detection
+        // This could include parsing SCTE-35 splice commands within the TS packets
+        // for more sophisticated ad detection based on actual packet data rather than
+        // just playlist metadata. SCTE-35 splice commands are typically in PID 0x1FFB
+        // or other designated PIDs and contain splice_insert() and splice_null() commands.
+        
         // Don't modify continuity counters - preserve original TS packet timing and sequencing
         // The original HLS TS segments should have correct continuity counters
         
