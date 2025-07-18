@@ -694,11 +694,7 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
     auto last_log_time = std::chrono::steady_clock::now();
     auto last_packet_time = std::chrono::steady_clock::now();
     
-    // Calculate target packet rate for smooth delivery
-    // Use burst-based timing: send bursts with reasonable intervals for TS streams
-    const auto target_packet_interval = std::chrono::microseconds(1500); // 1.5ms between bursts of 7 packets
-    
-    // Send TS packets to player with proper timing
+    // Send TS packets to player with natural timing - let the stream flow naturally
     while (routing_active_ && !cancel_token) {
         // Check if player process is still running with better error reporting
         if (player_process != INVALID_HANDLE_VALUE) {
@@ -718,22 +714,9 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             }
         }
         
-        // Send multiple packets in small bursts for better TS timing
-        std::vector<TSPacket> packet_burst;
-        const int burst_size = 7; // Send 7 packets per burst (typical TS behavior)
-        
-        // Collect packets for burst
-        for (int i = 0; i < burst_size && routing_active_ && !cancel_token; ++i) {
-            TSPacket packet;
-            if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(10))) {
-                packet_burst.push_back(packet);
-            } else {
-                break; // No more packets available
-            }
-        }
-        
-        // Send the burst of packets
-        for (const auto& packet : packet_burst) {
+        // Get and send packets as they become available
+        TSPacket packet;
+        if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(100))) {
             if (!SendTSPacketToPlayer(player_stdin, packet)) {
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
@@ -741,12 +724,7 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                 goto cleanup_and_exit;
             }
             packets_sent++;
-        }
-        
-        // Rate limiting after burst
-        if (!packet_burst.empty()) {
             last_packet_time = std::chrono::steady_clock::now();
-            std::this_thread::sleep_for(target_packet_interval);
         } else {
             // No packet available, check if we should continue waiting
             if (ts_buffer_->IsEmpty() && packets_sent == 0) {
@@ -830,10 +808,10 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     
     // Configure player-specific arguments for transport stream input
     if (player_name.find(L"mpv") != std::wstring::npos) {
-        // MPV specific arguments for transport stream - optimized for live streaming
-        cmd_line = config.player_path + L" --demuxer=mpegts --no-cache --untimed --no-correct-pts --framedrop=vo --no-resume-playback --";
+        // MPV specific arguments for transport stream - respect natural timing
+        cmd_line = config.player_path + L" --demuxer=mpegts --cache-secs=1 --no-resume-playback --";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPV-specific TS arguments for live streaming");
+            log_callback_(L"[TS_ROUTER] Using MPV-specific TS arguments with natural timing");
         }
     }
     else if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
@@ -945,75 +923,9 @@ std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::str
 }
 
 void TransportStreamRouter::InsertPCR(TSPacket& packet, uint64_t pcr_value) {
-    // Only insert PCR into video PID packets for timing reference
-    if (packet.pid != 0x1001) return; // Video PID
-    
-    // Check if packet has adaptation field or needs one
-    bool has_adaptation = (packet.data[3] & 0x20) != 0;
-    bool has_payload = (packet.data[3] & 0x10) != 0;
-    
-    if (!has_adaptation) {
-        // Need to create adaptation field for PCR
-        
-        // Shift payload data to make room for adaptation field
-        size_t payload_start = 4;
-        size_t available_space = TS_PACKET_SIZE - payload_start;
-        size_t adaptation_size = 8; // Minimum size for PCR
-        
-        if (has_payload && available_space > adaptation_size) {
-            // Move payload data
-            size_t payload_size = available_space - adaptation_size - 1; // -1 for adaptation length byte
-            memmove(&packet.data[payload_start + adaptation_size + 1], 
-                   &packet.data[payload_start], payload_size);
-            
-            // Update adaptation field control bits
-            packet.data[3] = (packet.data[3] & 0xCF) | 0x30; // Both adaptation and payload
-            
-            // Set adaptation field length
-            packet.data[4] = adaptation_size - 1; // Length excludes the length byte itself
-            
-            // Set PCR flag in adaptation field
-            packet.data[5] = 0x10; // PCR flag set
-            
-            // Insert PCR value (33-bit base + 6-bit extension = 48 bits total)
-            // PCR_base is 33 bits, PCR_ext is 9 bits (only 6 used)
-            uint64_t pcr_base = pcr_value / 300; // Convert to 27MHz base
-            uint16_t pcr_ext = pcr_value % 300;   // Remainder for extension
-            
-            // Pack PCR into 6 bytes (48 bits)
-            packet.data[6] = (pcr_base >> 25) & 0xFF;          // bits 32-25
-            packet.data[7] = (pcr_base >> 17) & 0xFF;          // bits 24-17  
-            packet.data[8] = (pcr_base >> 9) & 0xFF;           // bits 16-9
-            packet.data[9] = (pcr_base >> 1) & 0xFF;           // bits 8-1
-            packet.data[10] = ((pcr_base & 0x01) << 7) |       // bit 0
-                             0x7E |                            // reserved bits
-                             ((pcr_ext >> 8) & 0x01);         // PCR_ext bit 8
-            packet.data[11] = pcr_ext & 0xFF;                  // PCR_ext bits 7-0
-            
-            // Fill remaining adaptation field with padding
-            for (size_t i = 12; i < payload_start + adaptation_size; ++i) {
-                packet.data[i] = 0xFF;
-            }
-        }
-    } else {
-        // Adaptation field exists, check if we can insert PCR
-        uint8_t adaptation_length = packet.data[4];
-        if (adaptation_length >= 7) { // Need at least 7 bytes for PCR
-            // Set PCR flag
-            packet.data[5] |= 0x10;
-            
-            // Insert PCR value 
-            uint64_t pcr_base = pcr_value / 300;
-            uint16_t pcr_ext = pcr_value % 300;
-            
-            packet.data[6] = (pcr_base >> 25) & 0xFF;
-            packet.data[7] = (pcr_base >> 17) & 0xFF;
-            packet.data[8] = (pcr_base >> 9) & 0xFF;
-            packet.data[9] = (pcr_base >> 1) & 0xFF;
-            packet.data[10] = ((pcr_base & 0x01) << 7) | 0x7E | ((pcr_ext >> 8) & 0x01);
-            packet.data[11] = pcr_ext & 0xFF;
-        }
-    }
+    // PCR insertion disabled - HLS segments already have proper timing information
+    // Modifying PCR can interfere with the original stream timing and cause playback issues
+    // Let the original TS packets pass through unchanged for best compatibility
 }
 
 
