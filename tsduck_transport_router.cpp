@@ -224,8 +224,15 @@ TSBuffer::TSBuffer(size_t max_packets) : max_packets_(max_packets), producer_act
 bool TSBuffer::AddPacket(const TSPacket& packet) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    if (packet_queue_.size() >= max_packets_) {
-        // Buffer full - remove oldest packet to make room
+    // In low-latency mode, more aggressively drop old packets
+    if (low_latency_mode_ && packet_queue_.size() >= max_packets_ / 2) {
+        // Drop multiple old packets to make room for new ones
+        size_t packets_to_drop = std::min(packet_queue_.size() / 4, size_t(10));
+        for (size_t i = 0; i < packets_to_drop && !packet_queue_.empty(); ++i) {
+            packet_queue_.pop();
+        }
+    } else if (packet_queue_.size() >= max_packets_) {
+        // Standard mode - remove oldest packet to make room
         packet_queue_.pop();
     }
     
@@ -610,6 +617,7 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     // Reset converter and buffer
     hls_converter_->Reset();
     ts_buffer_->Reset(); // This will clear packets and reset producer_active
+    ts_buffer_->SetLowLatencyMode(config.low_latency_mode); // Configure buffer for latency mode
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Starting TSDuck-inspired transport stream routing");
@@ -744,14 +752,33 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 continue;
             }
             
-            // Process new segments
+            // Process new segments with low-latency optimizations
             int segments_processed = 0;
-            for (const auto& segment_url : segment_urls) {
+            size_t total_segments = segment_urls.size();
+            
+            for (size_t i = 0; i < segment_urls.size(); ++i) {
                 if (cancel_token || !routing_active_) break;
+                
+                const auto& segment_url = segment_urls[i];
                 
                 // Skip already processed segments
                 if (std::find(processed_segments.begin(), processed_segments.end(), segment_url) != processed_segments.end()) {
                     continue;
+                }
+                
+                // Low-latency optimization: If we have multiple unprocessed segments and this isn't
+                // one of the newest ones, skip it to stay closer to live edge
+                if (current_config_.low_latency_mode && current_config_.skip_old_segments) {
+                    size_t remaining_segments = total_segments - i;
+                    if (remaining_segments > current_config_.max_segments_to_buffer && 
+                        i < (total_segments - current_config_.max_segments_to_buffer)) {
+                        
+                        processed_segments.push_back(segment_url); // Mark as processed to avoid reprocessing
+                        if (log_callback_) {
+                            log_callback_(L"[LOW_LATENCY] Skipping older segment to maintain live edge");
+                        }
+                        continue;
+                    }
                 }
                 
                 // Fetch segment data
@@ -823,6 +850,10 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             
             if (segments_processed > 0 && log_callback_) {
                 log_callback_(L"[TS_ROUTER] Batch complete: " + std::to_wstring(segments_processed) + L" new segments processed");
+                
+                if (current_config_.low_latency_mode) {
+                    log_callback_(L"[LOW_LATENCY] Targeting live edge with " + std::to_wstring(current_config_.max_segments_to_buffer) + L" segment buffer");
+                }
             }
             
             // Wait before next playlist refresh, use configurable interval for low-latency

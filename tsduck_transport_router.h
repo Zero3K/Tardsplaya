@@ -80,11 +80,15 @@ namespace tsduck_transport {
         // Check if producer is still active
         bool IsProducerActive() const { return producer_active_.load(); }
         
+        // Enable low-latency mode for more aggressive packet dropping
+        void SetLowLatencyMode(bool enabled) { low_latency_mode_ = enabled; }
+        
     private:
         mutable std::mutex mutex_;
         std::queue<TSPacket> packet_queue_;
         size_t max_packets_;
         std::atomic<bool> producer_active_{true};
+        bool low_latency_mode_{false};
     };
     
     // HLS to Transport Stream converter
