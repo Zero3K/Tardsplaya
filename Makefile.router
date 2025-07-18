@@ -1,0 +1,24 @@
+# Simplified test Makefile for TSDuck Transport Router only
+# Test compilation without TLS client components
+
+CXX = x86_64-w64-mingw32-g++
+CXXFLAGS = -std=c++17 -Wall -O2 -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601
+LIBS = -lwinhttp -lcomctl32 -lws2_32
+
+# Core source files for transport router test
+SOURCES = tsduck_transport_router.cpp \
+          tsduck_hls_wrapper.cpp
+
+# Test compilation
+test-router:
+	$(CXX) $(CXXFLAGS) -fsyntax-only $(SOURCES)
+	@echo "Transport Router syntax check completed successfully"
+
+# Test DLL compilation
+test-dll:
+	$(CXX) $(CXXFLAGS) -shared -DBUILD_DLL -o tsduck_transport_test.dll \
+		tsduck_transport_router.cpp tsduck_hls_wrapper.cpp \
+		$(LIBS)
+	@echo "Transport Router DLL test build completed"
+
+.PHONY: test-router test-dll

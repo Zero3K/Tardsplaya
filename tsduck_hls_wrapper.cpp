@@ -221,7 +221,7 @@ void PlaylistParser::AnalyzeAdPatterns() {
         // Look for ad pattern sequences
         if (i > 0 && i < segments_.size() - 1) {
             const auto& prev = segments_[i-1];
-            const auto& next = segments_[i+1];
+            // const auto& next = segments_[i+1]; // Will be used for future pattern analysis
             
             // Pattern: Discontinuity followed by different duration segments often indicates ads
             if (segment.has_discontinuity && 
