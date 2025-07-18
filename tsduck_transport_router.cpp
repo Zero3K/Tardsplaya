@@ -615,6 +615,12 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
         log_callback_(L"[TS_ROUTER] Starting TSDuck-inspired transport stream routing");
         log_callback_(L"[TS_ROUTER] Player: " + config.player_path);
         log_callback_(L"[TS_ROUTER] Buffer size: " + std::to_wstring(config.buffer_size_packets) + L" packets");
+        
+        if (config.low_latency_mode) {
+            log_callback_(L"[LOW_LATENCY] Mode enabled - targeting minimal stream delay");
+            log_callback_(L"[LOW_LATENCY] Max segments: " + std::to_wstring(config.max_segments_to_buffer) + 
+                         L", Refresh: " + std::to_wstring(config.playlist_refresh_interval.count()) + L"ms");
+        }
     }
     
     // Start HLS fetcher thread
@@ -769,16 +775,28 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Add to buffer with improved flow control for multiple streams
-                    size_t buffer_high_watermark = current_config_.buffer_size_packets * 9 / 10; // 90% full for better buffering
-                    size_t buffer_low_watermark = current_config_.buffer_size_packets / 4;       // 25% full for faster recovery
+                    // Add to buffer with flow control optimized for latency mode
+                    size_t buffer_high_watermark, buffer_low_watermark;
+                    
+                    if (current_config_.low_latency_mode) {
+                        // For low-latency, use smaller buffers and more aggressive flow control
+                        buffer_high_watermark = current_config_.buffer_size_packets * 6 / 10; // 60% full for low latency
+                        buffer_low_watermark = current_config_.buffer_size_packets / 8;       // 12.5% full for faster response
+                    } else {
+                        // Standard buffering for quality over latency
+                        buffer_high_watermark = current_config_.buffer_size_packets * 9 / 10; // 90% full for better buffering
+                        buffer_low_watermark = current_config_.buffer_size_packets / 4;       // 25% full for faster recovery
+                    }
                     
                     for (const auto& packet : ts_packets) {
                         if (!routing_active_ || cancel_token) break;
                         
-                        // Implement more aggressive flow control to maintain larger buffers and prevent frame drops
+                        // Implement flow control with latency-optimized timing
                         while (ts_buffer_->GetBufferedPackets() >= buffer_high_watermark && routing_active_ && !cancel_token) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(2)); // Faster response to buffer pressure
+                            auto sleep_duration = current_config_.low_latency_mode ? 
+                                std::chrono::milliseconds(1) :   // Faster response for low latency
+                                std::chrono::milliseconds(2);    // Standard response
+                            std::this_thread::sleep_for(sleep_duration);
                         }
                         
                         ts_buffer_->AddPacket(packet);
@@ -807,9 +825,17 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 log_callback_(L"[TS_ROUTER] Batch complete: " + std::to_wstring(segments_processed) + L" new segments processed");
             }
             
-            // Wait before next playlist refresh, but check cancellation more frequently
-            for (int i = 0; i < 20 && routing_active_ && !cancel_token; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 2 seconds, but check every 100ms
+            // Wait before next playlist refresh, use configurable interval for low-latency
+            auto refresh_interval = current_config_.low_latency_mode ? 
+                current_config_.playlist_refresh_interval : 
+                std::chrono::milliseconds(2000);  // Default 2 seconds
+                
+            // Break the wait into smaller chunks to check cancellation more frequently
+            auto chunk_duration = std::chrono::milliseconds(100);
+            auto chunks_needed = refresh_interval.count() / chunk_duration.count();
+            
+            for (int i = 0; i < chunks_needed && routing_active_ && !cancel_token; ++i) {
+                std::this_thread::sleep_for(chunk_duration);
             }
             
         } catch (const std::exception& e) {
@@ -897,9 +923,13 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             }
         }
         
-        // Get and send packets with reduced timeout for better responsiveness in multiple streams
+        // Get and send packets with timeout optimized for latency mode
         TSPacket packet;
-        if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(50))) { // Faster timeout for more responsive streaming
+        auto packet_timeout = current_config_.low_latency_mode ? 
+            std::chrono::milliseconds(10) :   // Very fast timeout for low latency
+            std::chrono::milliseconds(50);    // Standard timeout
+            
+        if (ts_buffer_->GetNextPacket(packet, packet_timeout)) {
             // Frame Number Tagging: Track frame statistics
             if (packet.frame_number > 0) {
                 // Check for frame drops or duplicates
@@ -1196,6 +1226,23 @@ std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::str
         std::wstring rel_url(line.begin(), line.end());
         std::wstring full_url = JoinUrl(base_url, rel_url);
         segment_urls.push_back(full_url);
+    }
+    
+    // For low-latency mode, only return the newest segments (live edge)
+    if (current_config_.low_latency_mode && segment_urls.size() > current_config_.max_segments_to_buffer) {
+        // Keep only the most recent segments for minimal latency
+        size_t start_index = segment_urls.size() - current_config_.max_segments_to_buffer;
+        std::vector<std::wstring> live_edge_segments(
+            segment_urls.begin() + start_index, 
+            segment_urls.end()
+        );
+        
+        if (log_callback_) {
+            log_callback_(L"[LOW_LATENCY] Targeting live edge: " + std::to_wstring(live_edge_segments.size()) + 
+                         L" of " + std::to_wstring(segment_urls.size()) + L" segments");
+        }
+        
+        return live_edge_segments;
     }
     
     return segment_urls;

@@ -20,19 +20,18 @@ std::thread StartStreamThread(
 ) {
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
-        // Calculate adaptive buffer size for multiple streams to prevent frame drops
+        // For low-latency streaming, use smaller buffers to reduce delay
+        size_t base_buffer_packets = 3000;  // Reduced from 1000*segments to fixed 3000 for low latency
+        
+        // For multiple streams, still scale but keep it reasonable for latency
         auto& resource_manager = StreamResourceManager::getInstance();
         int active_streams = resource_manager.GetActiveStreamCount();
         
-        // Base calculation: segments * 1000 packets per segment
-        size_t base_buffer_packets = static_cast<size_t>(buffer_segments * 1000);
-        
-        // Scale buffer up for multiple streams to maintain quality
         if (active_streams > 1) {
-            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 1.5); // 50% larger for multiple streams
+            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 1.2); // Only 20% larger
         }
         if (active_streams > 3) {
-            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 2.0); // Double for many streams
+            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 1.5); // Max 50% larger
         }
         
         return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
@@ -99,7 +98,7 @@ std::thread StartTransportStreamThread(
             // Create transport stream router
             tsduck_transport::TransportStreamRouter router;
             
-            // Configure router
+            // Configure router with low-latency optimizations
             tsduck_transport::TransportStreamRouter::RouterConfig config;
             config.player_path = player_path;
             config.player_args = L"-";  // Read from stdin
@@ -109,6 +108,12 @@ std::thread StartTransportStreamThread(
             config.pcr_interval = std::chrono::milliseconds(40);
             config.enable_pat_pmt_repetition = true;
             config.pat_pmt_interval = std::chrono::milliseconds(100);
+            
+            // Enable low-latency mode for reduced stream delay
+            config.low_latency_mode = true;
+            config.max_segments_to_buffer = 2;  // Only buffer latest 2 segments
+            config.playlist_refresh_interval = std::chrono::milliseconds(500);  // Check every 500ms
+            config.skip_old_segments = true;
             
             if (log_callback) {
                 log_callback(L"[TS_MODE] Starting TSDuck transport stream routing");

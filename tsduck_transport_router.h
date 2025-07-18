@@ -146,6 +146,12 @@ namespace tsduck_transport {
             std::chrono::milliseconds pcr_interval{40}; // PCR every 40ms
             bool enable_pat_pmt_repetition = true;
             std::chrono::milliseconds pat_pmt_interval{100}; // PAT/PMT every 100ms
+            
+            // Low-latency streaming optimizations
+            bool low_latency_mode = true;  // Enable aggressive latency reduction
+            size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
+            std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
+            bool skip_old_segments = true;  // Skip older segments when catching up
         };
         
         // Start routing HLS stream to media player via transport stream
