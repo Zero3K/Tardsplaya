@@ -649,16 +649,16 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Add to buffer with flow control
-                    size_t buffer_high_watermark = current_config_.buffer_size_packets * 3 / 4; // 75% full
-                    size_t buffer_low_watermark = current_config_.buffer_size_packets / 4;      // 25% full
+                    // Add to buffer with gentler flow control
+                    size_t buffer_high_watermark = current_config_.buffer_size_packets * 4 / 5; // 80% full
+                    size_t buffer_low_watermark = current_config_.buffer_size_packets / 5;      // 20% full
                     
                     for (const auto& packet : ts_packets) {
                         if (!routing_active_ || cancel_token) break;
                         
-                        // Implement flow control to prevent buffer overflow
+                        // Implement gentler flow control to prevent buffer overflow
                         while (ts_buffer_->GetBufferedPackets() >= buffer_high_watermark && routing_active_ && !cancel_token) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                            std::this_thread::sleep_for(std::chrono::milliseconds(5)); // Less aggressive waiting
                         }
                         
                         ts_buffer_->AddPacket(packet);
@@ -736,41 +736,36 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
     size_t packets_sent = 0;
     auto last_log_time = std::chrono::steady_clock::now();
     auto last_packet_time = std::chrono::steady_clock::now();
-    auto pcr_reference_time = std::chrono::steady_clock::now();
-    uint64_t pcr_value = 0;
     
-    // Calculate target packet rate for smooth delivery (assuming ~6-8 Mbps stream)
-    // 188 bytes * 8 bits = 1504 bits per packet
-    // For 6 Mbps: 6,000,000 / 1504 ≈ 4000 packets/second → 250 microseconds per packet
-    const auto target_packet_interval = std::chrono::microseconds(250);
+    // Calculate target packet rate for smooth delivery - more conservative timing
+    // Use 1ms intervals instead of 250μs for better compatibility and less CPU usage
+    const auto target_packet_interval = std::chrono::milliseconds(1);
     
     // Send TS packets to player with proper timing
     while (routing_active_ && !cancel_token) {
-        // Check if player process is still running
+        // Check if player process is still running with better error reporting
         if (player_process != INVALID_HANDLE_VALUE) {
             DWORD exit_code;
-            if (GetExitCodeProcess(player_process, &exit_code) && exit_code != STILL_ACTIVE) {
-                if (log_callback_) {
-                    log_callback_(L"[TS_ROUTER] Media player process has exited (code: " + std::to_wstring(exit_code) + L")");
+            if (GetExitCodeProcess(player_process, &exit_code)) {
+                if (exit_code != STILL_ACTIVE) {
+                    if (log_callback_) {
+                        log_callback_(L"[TS_ROUTER] Media player process exited (code: " + std::to_wstring(exit_code) + L")");
+                    }
+                    break;
                 }
-                break;
+            } else {
+                DWORD error = GetLastError();
+                if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Failed to check player process status (error: " + std::to_wstring(error) + L")");
+                }
             }
         }
         
         TSPacket packet;
         if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(200))) {
-            // Insert PCR values for timing synchronization
+            // Simple rate limiting for smooth delivery
             auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - pcr_reference_time);
-            if (elapsed >= current_config_.pcr_interval) {
-                // Update PCR value (90kHz clock, simplified)
-                pcr_value += static_cast<uint64_t>(elapsed.count()) * 90;
-                InsertPCR(packet, pcr_value);
-                pcr_reference_time = now;
-            }
-            
-            // Rate limiting: ensure we don't send packets too fast
-            auto time_since_last = std::chrono::duration_cast<std::chrono::microseconds>(now - last_packet_time);
+            auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_packet_time);
             if (time_since_last < target_packet_interval) {
                 auto sleep_time = target_packet_interval - time_since_last;
                 std::this_thread::sleep_for(sleep_time);
@@ -831,9 +826,9 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
     
-    // Create pipe for stdin with larger buffer for TS data
+    // Create pipe for stdin with moderate buffer for TS data
     HANDLE stdin_read, stdin_write;
-    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 131072)) { // 128KB buffer for smooth TS streaming
+    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 65536)) { // 64KB buffer for good balance
         if (log_callback_) {
             log_callback_(L"[TS_ROUTER] Failed to create pipe for media player");
         }
@@ -867,24 +862,24 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     
     // Configure player-specific arguments for transport stream input
     if (player_name.find(L"mpv") != std::wstring::npos) {
-        // MPV specific arguments for transport stream - optimized for smooth playback
-        cmd_line = config.player_path + L" --demuxer=mpegts --no-cache --cache=no --cache-secs=0 --demuxer-readahead-secs=1 --no-correct-pts --video-sync=audio --audio-buffer=0.2 --no-resume-playbook --";
+        // MPV specific arguments for transport stream - simplified and more stable
+        cmd_line = config.player_path + L" --demuxer=mpegts --cache-secs=1 --demuxer-readahead-secs=2 --fps=30 --no-resume-playback --";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPV-specific optimized TS arguments");
+            log_callback_(L"[TS_ROUTER] Using MPV-specific TS arguments");
         }
     }
     else if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
-        // MPC-HC specific arguments for transport stream - use standard input
+        // MPC-HC specific arguments for transport stream - simplified
         cmd_line = config.player_path + L" /play /close \"-\"";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPC-HC-specific optimized arguments");
+            log_callback_(L"[TS_ROUTER] Using MPC-HC arguments");
         }
     }
     else if (player_name.find(L"vlc") != std::wstring::npos) {
-        // VLC specific arguments for transport stream - reduce buffering for live streams
-        cmd_line = config.player_path + L" --demux=ts --intf=dummy --play-and-exit --network-caching=300 --file-caching=300 --live-caching=300 -";
+        // VLC specific arguments for transport stream - simplified
+        cmd_line = config.player_path + L" --demux=ts --intf=dummy --play-and-exit --network-caching=500 -";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using VLC-specific optimized TS arguments");
+            log_callback_(L"[TS_ROUTER] Using VLC TS arguments");
         }
     }
     else {
@@ -896,7 +891,7 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     }
     
     if (log_callback_) {
-        log_callback_(L"[TS_ROUTER] Launching: " + cmd_line);
+        log_callback_(L"[TS_ROUTER] Launching player: " + cmd_line);
     }
     
     // Launch process
