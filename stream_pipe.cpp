@@ -897,10 +897,7 @@ bool BufferAndPipeStreamToPlayer(
     
     // Initialize semaphore-based IPC for producer-consumer flow control
     std::unique_ptr<ProducerConsumerSemaphores> buffer_semaphores;
-    // Use atomic flag for thread-safe semaphore IPC control across producer/consumer threads
-    std::atomic<bool> use_semaphore_ipc_atomic(use_semaphore_ipc);
-    
-    if (use_semaphore_ipc_atomic.load()) {
+    if (use_semaphore_ipc) {
         // Create semaphores with stream ID based on channel name and current time for uniqueness
         std::wstring stream_id = channel_name + L"_" + std::to_wstring(GetTickCount64());
         buffer_semaphores = StreamSemaphoreUtils::CreateStreamSemaphores(stream_id, dynamic_max_buffer.load());
@@ -911,7 +908,7 @@ bool BufferAndPipeStreamToPlayer(
         } else {
             AddDebugLog(L"[SEMAPHORE] Warning: Failed to create semaphores for " + channel_name + 
                        L", falling back to mutex-only synchronization");
-            use_semaphore_ipc_atomic.store(false); // Disable semaphore IPC for this stream
+            use_semaphore_ipc = false; // Disable semaphore IPC for this stream
         }
     }
     
@@ -1091,53 +1088,26 @@ bool BufferAndPipeStreamToPlayer(
                     
                     // Producer: wait for available slot, then add to buffer
                     bool added_successfully = false;
-                    if (use_semaphore_ipc_atomic.load() && buffer_semaphores) {
+                    if (use_semaphore_ipc && buffer_semaphores) {
                         // Use semaphore-based IPC for flow control
                         if (buffer_semaphores->WaitForProduceSlot(5000)) { // 5 second timeout
-                            try {
+                            {
                                 std::lock_guard<std::mutex> lock(buffer_mutex);
                                 buffer_queue.push(std::move(placeholder_data));
-                                added_successfully = true;
-                            } catch (const std::exception& e) {
-                                // Mutex operation failed - disable semaphore IPC and fallback to mutex-only
-                                AddDebugLog(L"[AD_SKIP] Exception during placeholder buffer push (semaphore) for " + channel_name + L" - disabling semaphore IPC");
-                                use_semaphore_ipc_atomic.store(false); // Disable semaphore IPC to prevent further issues
-                            } catch (...) {
-                                // Unknown exception during mutex operation
-                                AddDebugLog(L"[AD_SKIP] Unknown exception during placeholder buffer push (semaphore) for " + channel_name + L" - disabling semaphore IPC");
-                                use_semaphore_ipc_atomic.store(false); // Disable semaphore IPC to prevent further issues
                             }
-                            
-                            // Only signal if mutex operation was successful
-                            if (added_successfully) {
-                                try {
-                                    buffer_semaphores->SignalItemProduced();
-                                    AddDebugLog(L"[SEMAPHORE] Placeholder added using semaphore IPC for " + channel_name);
-                                } catch (...) {
-                                    // If signaling fails, disable semaphore IPC
-                                    AddDebugLog(L"[AD_SKIP] Failed to signal placeholder produced for " + channel_name + L" - disabling semaphore IPC");
-                                    use_semaphore_ipc_atomic.store(false);
-                                }
-                            }
+                            buffer_semaphores->SignalItemProduced();
+                            added_successfully = true;
+                            AddDebugLog(L"[SEMAPHORE] Placeholder added using semaphore IPC for " + channel_name);
                         } else {
                             AddDebugLog(L"[SEMAPHORE] Warning: Timeout waiting for buffer slot (placeholder) for " + channel_name);
                         }
-                    }
-                    
-                    // If semaphore IPC failed or is disabled, fall back to mutex-only approach
-                    if (!added_successfully && (!use_semaphore_ipc_atomic.load() || !buffer_semaphores)) {
+                    } else {
                         // Fallback to mutex-only approach
-                        try {
+                        {
                             std::lock_guard<std::mutex> lock(buffer_mutex);
                             buffer_queue.push(std::move(placeholder_data));
-                            added_successfully = true;
-                        } catch (const std::exception& e) {
-                            // Mutex operation failed - log error and continue
-                            AddDebugLog(L"[AD_SKIP] Exception during placeholder buffer push (mutex-only) for " + channel_name + L" - placeholder lost");
-                        } catch (...) {
-                            // Unknown exception during mutex operation
-                            AddDebugLog(L"[AD_SKIP] Unknown exception during placeholder buffer push (mutex-only) for " + channel_name + L" - placeholder lost");
                         }
+                        added_successfully = true;
                     }
                     
                     if (added_successfully) {
@@ -1241,40 +1211,25 @@ bool BufferAndPipeStreamToPlayer(
                 if (download_ok && !seg_data.empty()) {
                     // Producer: wait for available slot, then add to buffer
                     bool added_successfully = false;
-                    if (use_semaphore_ipc_atomic.load() && buffer_semaphores) {
+                    if (use_semaphore_ipc && buffer_semaphores) {
                         // Use semaphore-based IPC for flow control
                         if (buffer_semaphores->WaitForProduceSlot(5000)) { // 5 second timeout
                             try {
                                 std::lock_guard<std::mutex> lock(buffer_mutex);
                                 buffer_queue.push(std::move(seg_data));
+                                buffer_semaphores->SignalItemProduced();
                                 added_successfully = true;
                             } catch (const std::exception& e) {
-                                // Mutex operation failed - disable semaphore IPC and fallback to mutex-only
-                                AddDebugLog(L"[DOWNLOAD] Exception during buffer push (semaphore) for " + channel_name + L" - disabling semaphore IPC");
-                                use_semaphore_ipc_atomic.store(false); // Disable semaphore IPC to prevent further issues
+                                // Mutex operation failed - log error and continue
+                                AddDebugLog(L"[DOWNLOAD] Exception during buffer push (semaphore) for " + channel_name + L" - segment lost");
                             } catch (...) {
                                 // Unknown exception during mutex operation
-                                AddDebugLog(L"[DOWNLOAD] Unknown exception during buffer push (semaphore) for " + channel_name + L" - disabling semaphore IPC");
-                                use_semaphore_ipc_atomic.store(false); // Disable semaphore IPC to prevent further issues
-                            }
-                            
-                            // Only signal if mutex operation was successful
-                            if (added_successfully) {
-                                try {
-                                    buffer_semaphores->SignalItemProduced();
-                                } catch (...) {
-                                    // If signaling fails, disable semaphore IPC
-                                    AddDebugLog(L"[DOWNLOAD] Failed to signal item produced for " + channel_name + L" - disabling semaphore IPC");
-                                    use_semaphore_ipc_atomic.store(false);
-                                }
+                                AddDebugLog(L"[DOWNLOAD] Unknown exception during buffer push (semaphore) for " + channel_name + L" - segment lost");
                             }
                         } else {
                             AddDebugLog(L"[SEMAPHORE] Warning: Timeout waiting for buffer slot for " + channel_name);
                         }
-                    }
-                    
-                    // If semaphore IPC failed or is disabled, fall back to mutex-only approach
-                    if (!added_successfully && (!use_semaphore_ipc_atomic.load() || !buffer_semaphores)) {
+                    } else {
                         // Fallback to mutex-only approach
                         try {
                             std::lock_guard<std::mutex> lock(buffer_mutex);
@@ -1441,57 +1396,33 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 
                 int segments_fed = 0;
-                if (use_semaphore_ipc_atomic.load() && buffer_semaphores && buffer_semaphores->IsValid()) {
+                if (use_semaphore_ipc && buffer_semaphores && buffer_semaphores->IsValid()) {
                     // Consumer: use semaphore-based IPC to wait for available items
                     while (segments_fed < max_segments_to_feed) {
                         try {
                             if (buffer_semaphores->WaitForConsumeItem(100)) { // 100ms timeout per item
                                 // Item available, get it from buffer
-                                bool mutex_operation_successful = false;
                                 try {
                                     std::lock_guard<std::mutex> lock(buffer_mutex);
                                     if (!buffer_queue.empty()) {
                                         segments_to_feed.push_back(std::move(buffer_queue.front()));
                                         buffer_queue.pop();
                                         segments_fed++;
-                                        mutex_operation_successful = true;
+                                        buffer_semaphores->SignalItemConsumed(); // Signal that slot is now free
                                     } else {
                                         // Race condition: item was consumed by another thread
                                         // This shouldn't happen in single-consumer case, but handle gracefully
                                         AddDebugLog(L"[SEMAPHORE] Race condition: semaphore signaled but queue empty for " + channel_name);
-                                        mutex_operation_successful = true; // No error, just empty queue
+                                        break;
                                     }
                                 } catch (const std::exception& e) {
                                     // Mutex operation failed - likely due to resource contention or corruption
-                                    AddDebugLog(L"[SEMAPHORE] Exception during mutex lock operation for " + channel_name + L" - disabling semaphore IPC and falling back to mutex-only mode");
-                                    use_semaphore_ipc_atomic.store(false); // Disable semaphore IPC immediately
-                                    mutex_operation_successful = false;
+                                    AddDebugLog(L"[SEMAPHORE] Exception during mutex lock operation for " + channel_name + L" - stopping semaphore operations");
+                                    break; // Exit the while loop to avoid further crashes
                                 } catch (...) {
                                     // Unknown exception during mutex operation
-                                    AddDebugLog(L"[SEMAPHORE] Unknown exception during mutex lock operation for " + channel_name + L" - disabling semaphore IPC and falling back to mutex-only mode");
-                                    use_semaphore_ipc_atomic.store(false); // Disable semaphore IPC immediately  
-                                    mutex_operation_successful = false;
-                                }
-                                
-                                // Only signal consumed if mutex operation was successful and we actually got an item
-                                if (mutex_operation_successful && segments_fed > 0) {
-                                    try {
-                                        buffer_semaphores->SignalItemConsumed(); // Signal that slot is now free
-                                    } catch (...) {
-                                        // If signaling fails, disable semaphore IPC to prevent further issues
-                                        AddDebugLog(L"[SEMAPHORE] Failed to signal item consumed for " + channel_name + L" - disabling semaphore IPC");
-                                        use_semaphore_ipc_atomic.store(false);
-                                    }
-                                }
-                                
-                                // If mutex operation failed, break out of semaphore loop to fall back to mutex-only
-                                if (!mutex_operation_successful) {
-                                    break;
-                                }
-                                
-                                // If we had a race condition (empty queue), break to avoid infinite loop
-                                if (mutex_operation_successful && segments_fed == 0) {
-                                    break;
+                                    AddDebugLog(L"[SEMAPHORE] Unknown exception during mutex lock operation for " + channel_name + L" - stopping semaphore operations");
+                                    break; // Exit the while loop to avoid further crashes
                                 }
                             } else {
                                 // Timeout waiting for item, no more items available
@@ -1500,12 +1431,12 @@ bool BufferAndPipeStreamToPlayer(
                         } catch (const std::exception& e) {
                             // Semaphore operation failed - likely the semaphore system is corrupted
                             AddDebugLog(L"[SEMAPHORE] Exception during semaphore operation for " + channel_name + L" - falling back to mutex-only mode");
-                            use_semaphore_ipc_atomic.store(false); // Disable semaphore IPC for remainder of stream
+                            use_semaphore_ipc = false; // Disable semaphore IPC for remainder of stream
                             break; // Exit semaphore loop and fall back to mutex-only approach
                         } catch (...) {
                             // Unknown exception during semaphore operation
                             AddDebugLog(L"[SEMAPHORE] Unknown exception during semaphore operation for " + channel_name + L" - falling back to mutex-only mode");
-                            use_semaphore_ipc_atomic.store(false); // Disable semaphore IPC for remainder of stream
+                            use_semaphore_ipc = false; // Disable semaphore IPC for remainder of stream
                             break; // Exit semaphore loop and fall back to mutex-only approach
                         }
                     }
