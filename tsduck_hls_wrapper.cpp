@@ -112,8 +112,8 @@ void PlaylistParser::ParseInfoLine(const std::string& line, MediaSegment& curren
 }
 
 void PlaylistParser::ParseDateRangeLine(const std::string& line, MediaSegment& current_segment) {
-    // Basic DATERANGE parsing - store the line for reference
-    current_segment.daterange_line = line;
+    // Basic DATERANGE parsing - no processing needed after ad detection removal
+    // DATERANGE tags are validated but not stored per segment
 }
 
 void PlaylistParser::ParseScte35Line(const std::string& line, MediaSegment& current_segment) {
