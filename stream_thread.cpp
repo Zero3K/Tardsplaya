@@ -36,7 +36,7 @@ std::thread StartStreamThread(
         }
         
         return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
-                                         base_buffer_packets, channel_name, main_window, tab_index, player_process_handle);
+                                         base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle);
     }
     
     // Use traditional HLS streaming
@@ -82,6 +82,7 @@ std::thread StartTransportStreamThread(
     std::function<void(const std::wstring&)> log_callback,
     size_t buffer_packets,
     const std::wstring& channel_name,
+    std::atomic<int>* chunk_count,
     HWND main_window,
     size_t tab_index,
     HANDLE* player_process_handle
