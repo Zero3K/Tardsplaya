@@ -258,12 +258,34 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
     }
     
     // HLS segments are already MPEG-TS formatted data
-    // Extract and validate existing TS packets
+    // Extract and validate existing TS packets with better synchronization
     size_t data_size = hls_data.size();
     const uint8_t* data_ptr = hls_data.data();
     
-    // Process data in 188-byte TS packet chunks
-    for (size_t offset = 0; offset + TS_PACKET_SIZE <= data_size; offset += TS_PACKET_SIZE) {
+    // Find first sync byte to ensure proper alignment
+    size_t sync_offset = 0;
+    for (; sync_offset < data_size; ++sync_offset) {
+        if (data_ptr[sync_offset] == 0x47) {
+            // Check if this looks like a valid TS packet start
+            if (sync_offset + TS_PACKET_SIZE <= data_size) {
+                // Look ahead to see if next packet is also aligned
+                if (sync_offset + TS_PACKET_SIZE < data_size && 
+                    data_ptr[sync_offset + TS_PACKET_SIZE] == 0x47) {
+                    break; // Found valid sync
+                }
+            }
+        }
+    }
+    
+    if (sync_offset >= data_size) {
+        return ts_packets; // No valid sync found
+    }
+    
+    // Store PID-specific continuity counters for proper packet sequencing
+    static std::map<uint16_t, uint8_t> pid_continuity_counters;
+    
+    // Process data in 188-byte TS packet chunks starting from sync position
+    for (size_t offset = sync_offset; offset + TS_PACKET_SIZE <= data_size; offset += TS_PACKET_SIZE) {
         TSPacket packet;
         
         // Copy packet data
@@ -272,25 +294,21 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         
         // Validate sync byte
         if (packet.data[0] != 0x47) {
-            // Try to find next sync byte
-            bool found_sync = false;
-            for (size_t search_offset = offset + 1; search_offset + TS_PACKET_SIZE <= data_size; search_offset++) {
-                if (data_ptr[search_offset] == 0x47) {
-                    // Found potential sync byte, adjust offset
-                    offset = search_offset - TS_PACKET_SIZE; // Will be incremented by loop
-                    found_sync = true;
-                    break;
-                }
-            }
-            
-            if (!found_sync) {
-                break; // No more valid packets found
-            }
-            continue;
+            // Sync lost, try to resynchronize
+            break;
         }
         
         // Parse packet header
         packet.ParseHeader();
+        
+        // Fix continuity counter for smooth playback
+        bool has_payload = (packet.data[3] & 0x10) != 0;
+        if (has_payload && packet.pid > 0) {
+            // Update continuity counter for this PID
+            auto& counter = pid_continuity_counters[packet.pid];
+            packet.data[3] = (packet.data[3] & 0xF0) | (counter & 0x0F);
+            counter = (counter + 1) & 0x0F;
+        }
         
         // For the first segment, ensure we have PAT and PMT
         if (is_first_segment && (packet.pid == 0x0000 || packet.pid == pmt_pid_)) {
@@ -306,12 +324,22 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         std::vector<TSPacket> psi_packets;
         
         if (!pat_sent_) {
-            psi_packets.push_back(GeneratePAT());
+            auto pat_packet = GeneratePAT();
+            // Ensure proper continuity counter
+            auto& counter = pid_continuity_counters[0x0000];
+            pat_packet.data[3] = (pat_packet.data[3] & 0xF0) | (counter & 0x0F);
+            counter = (counter + 1) & 0x0F;
+            psi_packets.push_back(pat_packet);
             pat_sent_ = true;
         }
         
         if (!pmt_sent_) {
-            psi_packets.push_back(GeneratePMT());
+            auto pmt_packet = GeneratePMT();
+            // Ensure proper continuity counter
+            auto& counter = pid_continuity_counters[pmt_pid_];
+            pmt_packet.data[3] = (pmt_packet.data[3] & 0xF0) | (counter & 0x0F);
+            counter = (counter + 1) & 0x0F;
+            psi_packets.push_back(pmt_packet);
             pmt_sent_ = true;
         }
         
@@ -621,9 +649,18 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Add to buffer
+                    // Add to buffer with flow control
+                    size_t buffer_high_watermark = current_config_.buffer_size_packets * 3 / 4; // 75% full
+                    size_t buffer_low_watermark = current_config_.buffer_size_packets / 4;      // 25% full
+                    
                     for (const auto& packet : ts_packets) {
                         if (!routing_active_ || cancel_token) break;
+                        
+                        // Implement flow control to prevent buffer overflow
+                        while (ts_buffer_->GetBufferedPackets() >= buffer_high_watermark && routing_active_ && !cancel_token) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        }
+                        
                         ts_buffer_->AddPacket(packet);
                         total_packets_processed_++;
                     }
@@ -698,8 +735,16 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
     
     size_t packets_sent = 0;
     auto last_log_time = std::chrono::steady_clock::now();
+    auto last_packet_time = std::chrono::steady_clock::now();
+    auto pcr_reference_time = std::chrono::steady_clock::now();
+    uint64_t pcr_value = 0;
     
-    // Send TS packets to player
+    // Calculate target packet rate for smooth delivery (assuming ~6-8 Mbps stream)
+    // 188 bytes * 8 bits = 1504 bits per packet
+    // For 6 Mbps: 6,000,000 / 1504 ≈ 4000 packets/second → 250 microseconds per packet
+    const auto target_packet_interval = std::chrono::microseconds(250);
+    
+    // Send TS packets to player with proper timing
     while (routing_active_ && !cancel_token) {
         // Check if player process is still running
         if (player_process != INVALID_HANDLE_VALUE) {
@@ -714,6 +759,23 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
         
         TSPacket packet;
         if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(200))) {
+            // Insert PCR values for timing synchronization
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - pcr_reference_time);
+            if (elapsed >= current_config_.pcr_interval) {
+                // Update PCR value (90kHz clock, simplified)
+                pcr_value += static_cast<uint64_t>(elapsed.count()) * 90;
+                InsertPCR(packet, pcr_value);
+                pcr_reference_time = now;
+            }
+            
+            // Rate limiting: ensure we don't send packets too fast
+            auto time_since_last = std::chrono::duration_cast<std::chrono::microseconds>(now - last_packet_time);
+            if (time_since_last < target_packet_interval) {
+                auto sleep_time = target_packet_interval - time_since_last;
+                std::this_thread::sleep_for(sleep_time);
+            }
+            
             if (!SendTSPacketToPlayer(player_stdin, packet)) {
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
@@ -722,14 +784,14 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             }
             
             packets_sent++;
+            last_packet_time = std::chrono::steady_clock::now();
             
             // Log progress periodically
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log_time).count() >= 30) {
+            if (std::chrono::duration_cast<std::chrono::seconds>(last_packet_time - last_log_time).count() >= 30) {
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Streaming progress: " + std::to_wstring(packets_sent) + L" packets sent");
                 }
-                last_log_time = now;
+                last_log_time = last_packet_time;
             }
         } else {
             // No packet available, check if we should continue waiting
@@ -769,9 +831,9 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
     
-    // Create pipe for stdin
+    // Create pipe for stdin with larger buffer for TS data
     HANDLE stdin_read, stdin_write;
-    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 65536)) { // Larger buffer for TS data
+    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 131072)) { // 128KB buffer for smooth TS streaming
         if (log_callback_) {
             log_callback_(L"[TS_ROUTER] Failed to create pipe for media player");
         }
@@ -805,24 +867,24 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     
     // Configure player-specific arguments for transport stream input
     if (player_name.find(L"mpv") != std::wstring::npos) {
-        // MPV specific arguments for transport stream
-        cmd_line = config.player_path + L" --demuxer=mpegts --no-cache --no-correct-pts --fps=30 --no-audio-display --";
+        // MPV specific arguments for transport stream - optimized for smooth playback
+        cmd_line = config.player_path + L" --demuxer=mpegts --no-cache --cache=no --cache-secs=0 --demuxer-readahead-secs=1 --no-correct-pts --video-sync=audio --audio-buffer=0.2 --no-resume-playbook --";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPV-specific TS arguments");
+            log_callback_(L"[TS_ROUTER] Using MPV-specific optimized TS arguments");
         }
     }
     else if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
-        // MPC-HC specific arguments for transport stream
-        cmd_line = config.player_path + L" /play /close \"pipe://stdin\"";
+        // MPC-HC specific arguments for transport stream - better buffering control
+        cmd_line = config.player_path + L" /play /close /buffer=512 \"pipe://stdin\"";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPC-HC-specific arguments");
+            log_callback_(L"[TS_ROUTER] Using MPC-HC-specific optimized arguments");
         }
     }
     else if (player_name.find(L"vlc") != std::wstring::npos) {
-        // VLC specific arguments for transport stream
-        cmd_line = config.player_path + L" --demux=ts --intf=dummy --play-and-exit -";
+        // VLC specific arguments for transport stream - reduce buffering for live streams
+        cmd_line = config.player_path + L" --demux=ts --intf=dummy --play-and-exit --network-caching=300 --file-caching=300 --live-caching=300 -";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using VLC-specific TS arguments");
+            log_callback_(L"[TS_ROUTER] Using VLC-specific optimized TS arguments");
         }
     }
     else {
@@ -920,8 +982,75 @@ std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::str
 }
 
 void TransportStreamRouter::InsertPCR(TSPacket& packet, uint64_t pcr_value) {
-    // Simplified PCR insertion - would need proper implementation for production
-    // This is a placeholder for TSDuck-style PCR handling
+    // Only insert PCR into video PID packets for timing reference
+    if (packet.pid != 0x1001) return; // Video PID
+    
+    // Check if packet has adaptation field or needs one
+    bool has_adaptation = (packet.data[3] & 0x20) != 0;
+    bool has_payload = (packet.data[3] & 0x10) != 0;
+    
+    if (!has_adaptation) {
+        // Need to create adaptation field for PCR
+        
+        // Shift payload data to make room for adaptation field
+        size_t payload_start = 4;
+        size_t available_space = TS_PACKET_SIZE - payload_start;
+        size_t adaptation_size = 8; // Minimum size for PCR
+        
+        if (has_payload && available_space > adaptation_size) {
+            // Move payload data
+            size_t payload_size = available_space - adaptation_size - 1; // -1 for adaptation length byte
+            memmove(&packet.data[payload_start + adaptation_size + 1], 
+                   &packet.data[payload_start], payload_size);
+            
+            // Update adaptation field control bits
+            packet.data[3] = (packet.data[3] & 0xCF) | 0x30; // Both adaptation and payload
+            
+            // Set adaptation field length
+            packet.data[4] = adaptation_size - 1; // Length excludes the length byte itself
+            
+            // Set PCR flag in adaptation field
+            packet.data[5] = 0x10; // PCR flag set
+            
+            // Insert PCR value (33-bit base + 6-bit extension = 48 bits total)
+            // PCR_base is 33 bits, PCR_ext is 9 bits (only 6 used)
+            uint64_t pcr_base = pcr_value / 300; // Convert to 27MHz base
+            uint16_t pcr_ext = pcr_value % 300;   // Remainder for extension
+            
+            // Pack PCR into 6 bytes (48 bits)
+            packet.data[6] = (pcr_base >> 25) & 0xFF;          // bits 32-25
+            packet.data[7] = (pcr_base >> 17) & 0xFF;          // bits 24-17  
+            packet.data[8] = (pcr_base >> 9) & 0xFF;           // bits 16-9
+            packet.data[9] = (pcr_base >> 1) & 0xFF;           // bits 8-1
+            packet.data[10] = ((pcr_base & 0x01) << 7) |       // bit 0
+                             0x7E |                            // reserved bits
+                             ((pcr_ext >> 8) & 0x01);         // PCR_ext bit 8
+            packet.data[11] = pcr_ext & 0xFF;                  // PCR_ext bits 7-0
+            
+            // Fill remaining adaptation field with padding
+            for (size_t i = 12; i < payload_start + adaptation_size; ++i) {
+                packet.data[i] = 0xFF;
+            }
+        }
+    } else {
+        // Adaptation field exists, check if we can insert PCR
+        uint8_t adaptation_length = packet.data[4];
+        if (adaptation_length >= 7) { // Need at least 7 bytes for PCR
+            // Set PCR flag
+            packet.data[5] |= 0x10;
+            
+            // Insert PCR value 
+            uint64_t pcr_base = pcr_value / 300;
+            uint16_t pcr_ext = pcr_value % 300;
+            
+            packet.data[6] = (pcr_base >> 25) & 0xFF;
+            packet.data[7] = (pcr_base >> 17) & 0xFF;
+            packet.data[8] = (pcr_base >> 9) & 0xFF;
+            packet.data[9] = (pcr_base >> 1) & 0xFF;
+            packet.data[10] = ((pcr_base & 0x01) << 7) | 0x7E | ((pcr_ext >> 8) & 0x01);
+            packet.data[11] = pcr_ext & 0xFF;
+        }
+    }
 }
 
 
