@@ -441,6 +441,33 @@ static std::pair<int, std::chrono::milliseconds> AnalyzePlaylistWithTSDuck(const
     return std::make_pair(optimal_buffer_segments, playlist_duration);
 }
 
+// Validate m3u8 playlist has required metadata tags for proper processing
+static bool ValidatePlaylistMetadata(const std::string& playlist) {
+    // Required tags for high-quality Twitch playlists
+    std::vector<std::string> required_tags = {
+        "#EXTM3U",
+        "#EXT-X-VERSION",
+        "#EXT-X-TARGETDURATION",
+        "#EXT-X-MEDIA-SEQUENCE",
+        "#EXT-X-TWITCH-LIVE-SEQUENCE",
+        "#EXT-X-TWITCH-ELAPSED-SECS",
+        "#EXT-X-TWITCH-TOTAL-SECS:",
+        "#EXT-X-DATERANGE",
+        "#EXT-X-PROGRAM-DATE-TIME",
+        "#EXTINF"
+    };
+    
+    for (const auto& tag : required_tags) {
+        if (playlist.find(tag) == std::string::npos) {
+            AddDebugLog(L"[VALIDATION] Missing required tag: " + Utf8ToWide(tag));
+            return false;
+        }
+    }
+    
+    AddDebugLog(L"[VALIDATION] Playlist validation passed - all required metadata present");
+    return true;
+}
+
 // Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
 // Returns pair of (segments, should_clear_buffer)
 static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist) {
@@ -996,6 +1023,13 @@ bool BufferAndPipeStreamToPlayer(
                 AddDebugLog(L"[DOWNLOAD] Found #EXT-X-ENDLIST - stream actually ended for " + channel_name);
                 stream_ended_normally = true;
                 break;
+            }
+
+            // Validate playlist has required metadata before processing
+            if (!ValidatePlaylistMetadata(playlist)) {
+                AddDebugLog(L"[VALIDATION] Playlist validation failed - skipping this playlist update for " + channel_name);
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
             }
 
             auto parse_result = ParseSegments(playlist);

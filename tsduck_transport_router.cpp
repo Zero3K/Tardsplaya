@@ -916,9 +916,48 @@ bool TransportStreamRouter::FetchHLSSegment(const std::wstring& segment_url, std
     return HttpGetBinary(segment_url, data, cancel_token);
 }
 
+// Validate m3u8 playlist has required metadata tags for proper processing
+static bool ValidatePlaylistMetadata(const std::string& playlist, std::function<void(const std::wstring&)> log_callback = nullptr) {
+    // Required tags for high-quality Twitch playlists
+    std::vector<std::string> required_tags = {
+        "#EXTM3U",
+        "#EXT-X-VERSION", 
+        "#EXT-X-TARGETDURATION",
+        "#EXT-X-MEDIA-SEQUENCE",
+        "#EXT-X-TWITCH-LIVE-SEQUENCE",
+        "#EXT-X-TWITCH-ELAPSED-SECS",
+        "#EXT-X-TWITCH-TOTAL-SECS:",
+        "#EXT-X-DATERANGE",
+        "#EXT-X-PROGRAM-DATE-TIME",
+        "#EXTINF"
+    };
+    
+    for (const auto& tag : required_tags) {
+        if (playlist.find(tag) == std::string::npos) {
+            if (log_callback) {
+                log_callback(L"[TS_VALIDATION] Missing required tag: " + Utf8ToWide(tag));
+            }
+            return false;
+        }
+    }
+    
+    if (log_callback) {
+        log_callback(L"[TS_VALIDATION] Playlist validation passed - all required metadata present");
+    }
+    return true;
+}
+
 std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::string& playlist_content, const std::wstring& base_url) {
     static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segment_urls;
+    
+    // Validate playlist has required metadata before processing
+    if (!ValidatePlaylistMetadata(playlist_content, log_callback_)) {
+        if (log_callback_) {
+            log_callback_(L"[TS_VALIDATION] Playlist validation failed - skipping this playlist");
+        }
+        return segment_urls; // Return empty vector
+    }
     
     // First run TSDuck analysis to get sophisticated ad detection results
     tsduck_hls::PlaylistParser tsduck_parser;
