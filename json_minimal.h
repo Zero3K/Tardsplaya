@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <vector>
 #include <cctype>
+#include <cstring>
 
 // Minimal JSON parser for flat/nested objects and arrays (string/number/bool/null support)
 class JsonValue {

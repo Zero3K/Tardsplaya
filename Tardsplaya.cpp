@@ -518,7 +518,7 @@ std::wstring GetAccessToken(const std::wstring& channel) {
     AddLog(L"Parsing JSON response...");
     JsonValue jv = parse_json(resp);
     std::string token, sig;
-    if (jv.type == JsonValue::Object) {
+    if (jv.type == JsonValue::Type::Object) {
         token = jv["token"].as_str();
         sig = jv["sig"].as_str();
         if (!token.empty() && !sig.empty()) {
