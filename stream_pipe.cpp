@@ -1104,7 +1104,10 @@ bool BufferAndPipeStreamToPlayer(
                 std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Very short delay for urgent downloads
             } else {
                 AddDebugLog(L"[DOWNLOAD] Sleeping 1.5s before next playlist fetch for " + channel_name);
-                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                // Sleep with frequent cancellation checks for responsiveness
+                for (int i = 0; i < 15 && download_running.load() && !cancel_token.load(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 1.5 seconds, but check every 100ms
+                }
             }
         }
         
@@ -1207,7 +1210,10 @@ bool BufferAndPipeStreamToPlayer(
                         // Emergency pause - wait for buffer to rebuild before feeding more
                         // This prevents rapid cycling when buffer stays at 0
                         AddDebugLog(L"[FEEDER] Emergency pause - waiting for buffer rebuild for " + channel_name);
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // 1 second pause
+                        // Sleep with frequent cancellation checks for responsiveness
+                        for (int i = 0; i < 10 && !cancel_token.load(); ++i) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 1 second, but check every 100ms
+                        }
                         continue; // Skip feeding this cycle to allow buffer to rebuild
                     }
                 }
