@@ -26,6 +26,5 @@ std::thread StartStreamThread(
     std::atomic<bool>* user_requested_stop = nullptr,
     HWND main_window = nullptr,
     size_t tab_index = 0,
-    const std::wstring& selected_quality = L"",
-    bool use_semaphore_ipc = true  // Enable semaphore-based IPC for flow control
+    const std::wstring& selected_quality = L""
 );
