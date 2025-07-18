@@ -2,6 +2,10 @@
 #include <string>
 #include <atomic>
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 // Launches the player and pipes the HLS stream (playlist_url) to its stdin with a buffer.
 // Provides a cancel_token for cooperative cancellation. Returns true on success.
 // Set cancel_token to true to request stop.
