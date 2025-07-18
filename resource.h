@@ -39,7 +39,7 @@
 #define IDC_FAVORITES_EDIT      1109
 #define IDC_CHECK_VERSION       1110
 #define IDC_STATUS_BAR          1111
-#define IDC_TSDUCK_MODE         1112  // TSDuck transport stream mode checkbox
+
 
 // Tray icon support
 #define WM_TRAYICON             (WM_USER + 100)

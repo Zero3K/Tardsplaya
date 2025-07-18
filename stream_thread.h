@@ -33,7 +33,7 @@ std::thread StartStreamThread(
     HWND main_window = nullptr,
     size_t tab_index = 0,
     const std::wstring& selected_quality = L"",
-    StreamingMode mode = StreamingMode::HLS_SEGMENTS
+    StreamingMode mode = StreamingMode::TRANSPORT_STREAM
 );
 
 // Start TSDuck transport stream routing (alternative to traditional HLS streaming)
