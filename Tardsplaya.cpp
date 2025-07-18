@@ -1475,8 +1475,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             auto& tab = g_streams[tabIndex];
             AddDebugLog(L"WM_USER + 3: Stopping stream for dead player, channel=" + tab.channel);
             
-            // Programmatically "click" the Stop button to trigger the same behavior
-            SendMessage(tab.hStopBtn, BM_CLICK, 0, 0);
+            // Directly call StopStream to ensure proper UI updates
+            StopStream(tab, true); // Set userInitiated=true to behave like Stop button click
             
             AddLog(L"Stream stopped (media player closed): " + tab.channel);
         } else {
@@ -1515,10 +1515,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                            L", exit code=" + std::to_wstring(exitCode));
                                 AddLog(L"Media player closed for " + tab.channel + L" - stopping stream");
                                 
-                                // Set cancel token to stop the streaming thread
-                                tab.cancelToken = true;
-                                
-                                // Wait a moment and then update UI
+                                // Post message to update UI and stop stream properly
                                 PostMessage(hwnd, WM_USER + 3, (WPARAM)(&tab - &g_streams[0]), 0);
                             }
                         } else {
@@ -1529,7 +1526,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                            L" - stopping stream");
                                 AddLog(L"Media player connection lost for " + tab.channel + L" - stopping stream");
                                 
-                                tab.cancelToken = true;
+                                // Post message to update UI and stop stream properly
                                 PostMessage(hwnd, WM_USER + 3, (WPARAM)(&tab - &g_streams[0]), 0);
                             }
                         }
