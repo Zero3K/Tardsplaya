@@ -15,79 +15,117 @@ extern bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<b
 std::wstring Utf8ToWide(const std::string& str);
 void AddDebugLog(const std::wstring& msg);
 
-// HttpGetBinary implementation for transport stream router
+// HttpGetBinary implementation for transport stream router with retry logic
 bool HttpGetBinary(const std::wstring& url, std::vector<uint8_t>& out, std::atomic<bool>* cancel_token = nullptr) {
-    URL_COMPONENTS uc = { sizeof(uc) };
-    wchar_t host[256] = L"", path[2048] = L"";
-    uc.lpszHostName = host; uc.dwHostNameLength = 255;
-    uc.lpszUrlPath = path; uc.dwUrlPathLength = 2047;
-    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) {
-        return false;
-    }
+    const int max_attempts = 3;
+    
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        if (cancel_token && cancel_token->load()) return false;
+        
+        URL_COMPONENTS uc = { sizeof(uc) };
+        wchar_t host[256] = L"", path[2048] = L"";
+        uc.lpszHostName = host; uc.dwHostNameLength = 255;
+        uc.lpszUrlPath = path; uc.dwUrlPathLength = 2047;
+        if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) {
+            if (attempt < max_attempts - 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(600));
+                continue;
+            }
+            return false;
+        }
 
-    HINTERNET hSession = WinHttpOpen(L"Tardsplaya/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, 0, 0, 0);
-    if (!hSession) return false;
-    
-    HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
-    if (!hConnect) { 
-        WinHttpCloseHandle(hSession); 
-        return false; 
-    }
-    
-    HINTERNET hRequest = WinHttpOpenRequest(
-        hConnect, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-        (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0);
-    
-    if (!hRequest) {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return false;
-    }
-    
-    // For HTTPS, ignore certificate errors for compatibility
-    if (uc.nScheme == INTERNET_SCHEME_HTTPS) {
-        DWORD dwSecurityFlags = SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                               SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
-                               SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                               SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-        WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwSecurityFlags, sizeof(dwSecurityFlags));
-    }
-    
-    BOOL res = WinHttpSendRequest(hRequest, 0, 0, 0, 0, 0, 0) && WinHttpReceiveResponse(hRequest, 0);
-    if (!res) { 
+        HINTERNET hSession = WinHttpOpen(L"Tardsplaya/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, 0, 0, 0);
+        if (!hSession) {
+            if (attempt < max_attempts - 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(600));
+                continue;
+            }
+            return false;
+        }
+        
+        HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
+        if (!hConnect) { 
+            WinHttpCloseHandle(hSession);
+            if (attempt < max_attempts - 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(600));
+                continue;
+            }
+            return false; 
+        }
+        
+        HINTERNET hRequest = WinHttpOpenRequest(
+            hConnect, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+            (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0);
+        
+        if (!hRequest) {
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            if (attempt < max_attempts - 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(600));
+                continue;
+            }
+            return false;
+        }
+        
+        // For HTTPS, ignore certificate errors for compatibility
+        if (uc.nScheme == INTERNET_SCHEME_HTTPS) {
+            DWORD dwSecurityFlags = SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                                   SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                                   SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                                   SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+            WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &dwSecurityFlags, sizeof(dwSecurityFlags));
+        }
+        
+        BOOL res = WinHttpSendRequest(hRequest, 0, 0, 0, 0, 0, 0) && WinHttpReceiveResponse(hRequest, 0);
+        if (!res) { 
+            WinHttpCloseHandle(hRequest); 
+            WinHttpCloseHandle(hConnect); 
+            WinHttpCloseHandle(hSession);
+            if (attempt < max_attempts - 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(600));
+                continue;
+            }
+            return false; 
+        }
+
+        DWORD dwSize = 0;
+        out.clear();
+        bool error = false;
+        do {
+            if (cancel_token && cancel_token->load()) { 
+                error = true; 
+                break; 
+            }
+            
+            DWORD dwDownloaded = 0;
+            WinHttpQueryDataAvailable(hRequest, &dwSize);
+            if (!dwSize) break;
+            
+            size_t prev_size = out.size();
+            out.resize(prev_size + dwSize);
+            
+            if (!WinHttpReadData(hRequest, out.data() + prev_size, dwSize, &dwDownloaded) || dwDownloaded == 0) {
+                error = true;
+                break;
+            }
+            
+            if (dwDownloaded < dwSize) {
+                out.resize(prev_size + dwDownloaded);
+            }
+        } while (dwSize > 0);
+
         WinHttpCloseHandle(hRequest); 
         WinHttpCloseHandle(hConnect); 
-        WinHttpCloseHandle(hSession); 
-        return false; 
+        WinHttpCloseHandle(hSession);
+        
+        if (!error && !out.empty()) return true;
+        
+        if (attempt < max_attempts - 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        }
     }
-
-    DWORD dwSize = 0;
-    std::vector<uint8_t> data;
-    do {
-        if (cancel_token && cancel_token->load()) break;
-        
-        DWORD dwDownloaded = 0;
-        WinHttpQueryDataAvailable(hRequest, &dwSize);
-        if (!dwSize) break;
-        
-        size_t prev_size = data.size();
-        data.resize(prev_size + dwSize);
-        
-        if (!WinHttpReadData(hRequest, data.data() + prev_size, dwSize, &dwDownloaded)) {
-            break;
-        }
-        
-        if (dwDownloaded < dwSize) {
-            data.resize(prev_size + dwDownloaded);
-        }
-    } while (dwSize > 0);
-
-    WinHttpCloseHandle(hRequest); 
-    WinHttpCloseHandle(hConnect); 
-    WinHttpCloseHandle(hSession);
-
-    out = std::move(data);
-    return !data.empty();
+    
+    return false;
 }
 
 // Minimal HTTP implementation for standalone DLL
@@ -114,6 +152,14 @@ void AddDebugLog(const std::wstring& msg) {
 #endif
 
 namespace tsduck_transport {
+
+// Helper: join relative URL to base
+static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
+    if (rel.find(L"http") == 0) return rel;
+    size_t pos = base.rfind(L'/');
+    if (pos == std::wstring::npos) return rel;
+    return base.substr(0, pos + 1) + rel;
+}
 
 // TSPacket implementation
 void TSPacket::ParseHeader() {
@@ -534,7 +580,7 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             consecutive_failures = 0; // Reset failure counter on success
             
             // Parse segment URLs
-            auto segment_urls = ParseHLSPlaylist(playlist_content);
+            auto segment_urls = ParseHLSPlaylist(playlist_content, playlist_url);
             
             if (segment_urls.empty()) {
                 if (log_callback_) {
@@ -556,7 +602,7 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 
                 // Fetch segment data
                 std::vector<uint8_t> segment_data;
-                if (FetchHLSSegment(segment_url, segment_data)) {
+                if (FetchHLSSegment(segment_url, segment_data, &cancel_token)) {
                     if (segment_data.empty()) {
                         if (log_callback_) {
                             log_callback_(L"[TS_ROUTER] Empty segment downloaded: " + segment_url);
@@ -843,12 +889,12 @@ bool TransportStreamRouter::SendTSPacketToPlayer(HANDLE stdin_handle, const TSPa
     return true;
 }
 
-bool TransportStreamRouter::FetchHLSSegment(const std::wstring& segment_url, std::vector<uint8_t>& data) {
+bool TransportStreamRouter::FetchHLSSegment(const std::wstring& segment_url, std::vector<uint8_t>& data, std::atomic<bool>* cancel_token) {
     // Use binary HTTP download for proper segment data handling
-    return HttpGetBinary(segment_url, data, &routing_active_);
+    return HttpGetBinary(segment_url, data, cancel_token);
 }
 
-std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::string& playlist_content) {
+std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::string& playlist_content, const std::wstring& base_url) {
     std::vector<std::wstring> segment_urls;
     
     std::istringstream stream(playlist_content);
@@ -864,8 +910,10 @@ std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::str
             continue; // Skip empty lines and comments
         }
         
-        // This is a segment URL
-        segment_urls.push_back(std::wstring(line.begin(), line.end()));
+        // This is a segment URL - convert to wide string and join with base URL
+        std::wstring rel_url(line.begin(), line.end());
+        std::wstring full_url = JoinUrl(base_url, rel_url);
+        segment_urls.push_back(full_url);
     }
     
     return segment_urls;

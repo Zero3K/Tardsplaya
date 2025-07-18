@@ -168,10 +168,10 @@ namespace tsduck_transport {
         bool SendTSPacketToPlayer(HANDLE stdin_handle, const TSPacket& packet);
         
         // Fetch HLS segment data
-        bool FetchHLSSegment(const std::wstring& segment_url, std::vector<uint8_t>& data);
+        bool FetchHLSSegment(const std::wstring& segment_url, std::vector<uint8_t>& data, std::atomic<bool>* cancel_token = nullptr);
         
         // Parse HLS playlist for segment URLs
-        std::vector<std::wstring> ParseHLSPlaylist(const std::string& playlist_content);
+        std::vector<std::wstring> ParseHLSPlaylist(const std::string& playlist_content, const std::wstring& base_url);
         
         // Insert PCR (Program Clock Reference) for timing
         void InsertPCR(TSPacket& packet, uint64_t pcr_value);
