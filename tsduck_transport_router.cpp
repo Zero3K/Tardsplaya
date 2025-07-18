@@ -182,6 +182,41 @@ void TSPacket::ParseHeader() {
     }
 }
 
+// Frame Number Tagging implementations
+void TSPacket::SetFrameInfo(uint64_t global_frame, uint32_t segment_frame, bool key_frame, std::chrono::milliseconds duration) {
+    frame_number = global_frame;
+    segment_frame_number = segment_frame;
+    is_key_frame = key_frame;
+    frame_duration = duration;
+}
+
+std::wstring TSPacket::GetFrameDebugInfo() const {
+    std::wstring info = L"Frame#" + std::to_wstring(frame_number) + 
+                       L" Seg#" + std::to_wstring(segment_frame_number) +
+                       L" PID:" + std::to_wstring(pid);
+    
+    if (is_key_frame) info += L" [KEY]";
+    if (payload_unit_start) info += L" [START]";
+    if (discontinuity) info += L" [DISC]";
+    
+    if (frame_duration.count() > 0) {
+        info += L" (" + std::to_wstring(frame_duration.count()) + L"ms)";
+    }
+    
+    return info;
+}
+
+bool TSPacket::IsFrameDropDetected(const TSPacket& previous_packet) const {
+    // Detect frame drops by checking sequence continuity
+    if (frame_number <= previous_packet.frame_number) {
+        return false; // Not a drop, possibly duplicate or reordered
+    }
+    
+    // Check if we skipped frame numbers (indicating dropped frames)
+    uint64_t expected_frame = previous_packet.frame_number + 1;
+    return frame_number > expected_frame;
+}
+
 // TSBuffer implementation
 TSBuffer::TSBuffer(size_t max_packets) : max_packets_(max_packets), producer_active_(true) {
 }
@@ -261,6 +296,12 @@ void HLSToTSConverter::Reset() {
     continuity_counter_ = 0;
     pat_sent_ = false;
     pmt_sent_ = false;
+    
+    // Frame Number Tagging: Reset frame counters
+    global_frame_counter_ = 0;
+    segment_frame_counter_ = 0;
+    last_frame_time_ = std::chrono::steady_clock::now();
+    estimated_frame_duration_ = std::chrono::milliseconds(33); // Reset to default ~30fps
 }
 
 std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
@@ -294,6 +335,12 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         return ts_packets; // No valid sync found
     }
     
+    // Frame Number Tagging: Reset segment frame counter for new segment
+    if (is_first_segment) {
+        segment_frame_counter_ = 0;
+        last_frame_time_ = std::chrono::steady_clock::now();
+    }
+    
     // Process data in 188-byte TS packet chunks starting from sync position
     for (size_t offset = sync_offset; offset + TS_PACKET_SIZE <= data_size; offset += TS_PACKET_SIZE) {
         TSPacket packet;
@@ -310,6 +357,44 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         
         // Parse packet header
         packet.ParseHeader();
+        
+        // Frame Number Tagging: Assign frame numbers for video packets
+        if (packet.pid == video_pid_ || packet.payload_unit_start) {
+            // Increment frame counters for video packets or new payload units
+            global_frame_counter_++;
+            segment_frame_counter_++;
+            
+            // Estimate frame duration based on timing
+            auto now = std::chrono::steady_clock::now();
+            auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_frame_time_);
+            if (time_since_last.count() > 0 && segment_frame_counter_ > 1) {
+                estimated_frame_duration_ = time_since_last;
+            }
+            last_frame_time_ = now;
+            
+            // Check for key frame indicators in the payload
+            bool is_key_frame = false;
+            if (packet.payload_unit_start && packet.data[4] == 0x00) {
+                // Look for MPEG start codes that might indicate I-frames
+                if (offset + TS_PACKET_SIZE + 8 < data_size) {
+                    const uint8_t* payload = data_ptr + offset + 4;
+                    // Simple heuristic: look for I-frame patterns
+                    for (int i = 0; i < 16 && i < TS_PACKET_SIZE - 8; i++) {
+                        if (payload[i] == 0x00 && payload[i+1] == 0x00 && payload[i+2] == 0x01) {
+                            uint8_t frame_type = payload[i+3];
+                            // MPEG-2 I-frame detection (simplified)
+                            if ((frame_type & 0x38) == 0x08) {
+                                is_key_frame = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Set frame information
+            packet.SetFrameInfo(global_frame_counter_, segment_frame_counter_, is_key_frame, estimated_frame_duration_);
+        }
         
         // Don't modify continuity counters - preserve original TS packet timing and sequencing
         // The original HLS TS segments should have correct continuity counters
@@ -481,6 +566,14 @@ TransportStreamRouter::TransportStreamRouter() {
     // Initialize member variables
     player_process_handle_ = INVALID_HANDLE_VALUE;
     
+    // Frame Number Tagging: Initialize frame tracking
+    total_frames_processed_ = 0;
+    frames_dropped_ = 0;
+    frames_duplicated_ = 0;
+    last_frame_number_ = 0;
+    last_frame_time_ = std::chrono::steady_clock::now();
+    stream_start_time_ = std::chrono::steady_clock::now();
+    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();
@@ -571,6 +664,24 @@ TransportStreamRouter::BufferStats TransportStreamRouter::GetBufferStats() const
     
     if (current_config_.buffer_size_packets > 0) {
         stats.buffer_utilization = static_cast<double>(stats.buffered_packets) / current_config_.buffer_size_packets;
+    }
+    
+    // Frame Number Tagging statistics
+    stats.total_frames_processed = total_frames_processed_.load();
+    stats.frames_dropped = frames_dropped_.load();
+    stats.frames_duplicated = frames_duplicated_.load();
+    
+    // Calculate current FPS
+    auto now = std::chrono::steady_clock::now();
+    auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - stream_start_time_);
+    if (time_elapsed.count() > 1000 && stats.total_frames_processed > 0) {
+        stats.current_fps = static_cast<double>(stats.total_frames_processed * 1000) / time_elapsed.count();
+    }
+    
+    // Calculate average frame interval
+    if (stats.total_frames_processed > 1) {
+        auto avg_interval_ms = time_elapsed.count() / stats.total_frames_processed;
+        stats.avg_frame_interval = std::chrono::milliseconds(avg_interval_ms);
     }
     
     return stats;
@@ -789,6 +900,43 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
         // Get and send packets with reduced timeout for better responsiveness in multiple streams
         TSPacket packet;
         if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(50))) { // Faster timeout for more responsive streaming
+            // Frame Number Tagging: Track frame statistics
+            if (packet.frame_number > 0) {
+                // Check for frame drops or duplicates
+                uint64_t current_frame = packet.frame_number;
+                uint64_t last_frame = last_frame_number_.load();
+                
+                if (current_frame > last_frame + 1) {
+                    // Frame drop detected
+                    uint32_t dropped = static_cast<uint32_t>(current_frame - last_frame - 1);
+                    frames_dropped_ += dropped;
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[FRAME_TAG] Frame drop detected: " + std::to_wstring(dropped) + 
+                                     L" frames dropped between #" + std::to_wstring(last_frame) + 
+                                     L" and #" + std::to_wstring(current_frame));
+                    }
+                } else if (current_frame <= last_frame && last_frame > 0) {
+                    // Potential duplicate or reordered frame
+                    frames_duplicated_++;
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[FRAME_TAG] Duplicate/reordered frame: #" + std::to_wstring(current_frame) + 
+                                     L" (last: #" + std::to_wstring(last_frame) + L")");
+                    }
+                }
+                
+                last_frame_number_ = current_frame;
+                total_frames_processed_++;
+                
+                // Log frame info for key frames or periodically
+                if (packet.is_key_frame || (current_frame % 300 == 0)) { // Every 300 frames or key frames
+                    if (log_callback_) {
+                        log_callback_(L"[FRAME_TAG] " + packet.GetFrameDebugInfo());
+                    }
+                }
+            }
+            
             if (!SendTSPacketToPlayer(player_stdin, packet)) {
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");

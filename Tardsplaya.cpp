@@ -843,7 +843,7 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
         }
         
         if (!hasActiveStream) {
-            UpdateStatusBar(L"Chunk Queue: 0");
+            UpdateStatusBar(L"Buffer: 0 packets");
         }
         
         AddLog(L"Stream stopped.");
@@ -895,7 +895,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     }
     
     std::wstring url = it->second;
-    AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L")");
+    AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L") with Frame Number Tagging");
     
     // Log current stream status for debugging multi-stream issues
     int active_streams = 0;
@@ -958,7 +958,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     EnableWindow(tab.hQualities, FALSE);
     EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), FALSE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
-    UpdateStatusBar(L"Chunk Queue: Buffering...");
+    UpdateStatusBar(L"Buffer: Buffering... | Frame Tagging Active");
     
     AddDebugLog(L"WatchStream: UI updated, stream starting for tab " + std::to_wstring(tabIndex));
     
@@ -1383,7 +1383,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         InitLogList(g_hLogList);
         
         // Create status bar
-        g_hStatusBar = CreateWindowEx(0, L"msctls_statusbar32", L"Chunk Queue: 0", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS_BAR, g_hInst, nullptr);
+        g_hStatusBar = CreateWindowEx(0, L"msctls_statusbar32", L"Buffer: 0 packets | Frame Tagging Ready", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS_BAR, g_hInst, nullptr);
         SendMessage(g_hStatusBar, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         
         // Load favorites
@@ -1539,13 +1539,18 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             
             if (hasActiveStream) {
-                // Show actual chunk queue count from streaming threads
-                std::wstring status = L"Chunk Queue: " + std::to_wstring(totalChunkCount);
+                // Show actual chunk queue count and frame statistics from streaming threads
+                std::wstring status = L"Buffer: " + std::to_wstring(totalChunkCount) + L" packets";
+                
+                // Add frame information if available (for transport stream mode)
+                // This would require accessing transport stream router stats, which we'll add as needed
+                // For now, show basic buffer info
+                
                 UpdateStatusBar(status);
             } else {
                 // No active streams, stop the timer
                 KillTimer(hwnd, TIMER_CHUNK_UPDATE);
-                UpdateStatusBar(L"Chunk Queue: 0");
+                UpdateStatusBar(L"Buffer: 0 packets | Frame Tagging Ready");
             }
         }
         break;

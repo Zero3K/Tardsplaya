@@ -132,11 +132,31 @@ std::thread StartTransportStreamThread(
                 while (router.IsRouting() && !cancel_token) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     
-                    // Optionally report buffer status
+                    // Report buffer and frame statistics
                     auto stats = router.GetBufferStats();
+                    
+                    // Update chunk count for status bar (convert frames to approximate chunks)
+                    if (chunk_count) {
+                        *chunk_count = static_cast<int>(stats.buffered_packets);
+                    }
+                    
+                    // Periodic logging with frame information
                     if (log_callback && stats.total_packets_processed % 1000 == 0) {
-                        log_callback(L"[TS_MODE] Buffer: " + std::to_wstring(stats.buffered_packets) + 
-                                   L" packets, Utilization: " + std::to_wstring(int(stats.buffer_utilization * 100)) + L"%");
+                        std::wstring status_msg = L"[TS_MODE] Buffer: " + std::to_wstring(stats.buffered_packets) + 
+                                   L" packets, Utilization: " + std::to_wstring(int(stats.buffer_utilization * 100)) + L"%";
+                        
+                        // Add frame information if available
+                        if (stats.total_frames_processed > 0) {
+                            status_msg += L", Frames: " + std::to_wstring(stats.total_frames_processed);
+                            if (stats.current_fps > 0) {
+                                status_msg += L", FPS: " + std::to_wstring(static_cast<int>(stats.current_fps));
+                            }
+                            if (stats.frames_dropped > 0) {
+                                status_msg += L", Dropped: " + std::to_wstring(stats.frames_dropped);
+                            }
+                        }
+                        
+                        log_callback(status_msg);
                     }
                 }
                 

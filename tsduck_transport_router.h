@@ -29,6 +29,12 @@ namespace tsduck_transport {
         bool payload_unit_start = false;
         bool discontinuity = false;
         
+        // Frame Number Tagging for lag reduction
+        uint64_t frame_number = 0;        // Global frame sequence number
+        uint32_t segment_frame_number = 0; // Frame number within current segment
+        bool is_key_frame = false;        // Indicates if this is a key/I-frame
+        std::chrono::milliseconds frame_duration{0}; // Expected frame duration for timing
+        
         TSPacket() {
             memset(data, 0, TS_PACKET_SIZE);
             timestamp = std::chrono::steady_clock::now();
@@ -39,6 +45,11 @@ namespace tsduck_transport {
         
         // Check if this is a valid TS packet
         bool IsValid() const { return data[0] == 0x47; }
+        
+        // Frame Number Tagging methods
+        void SetFrameInfo(uint64_t global_frame, uint32_t segment_frame, bool key_frame = false, std::chrono::milliseconds duration = std::chrono::milliseconds(0));
+        std::wstring GetFrameDebugInfo() const;
+        bool IsFrameDropDetected(const TSPacket& previous_packet) const;
     };
     
     // Transport Stream buffer for smooth re-routing
@@ -100,6 +111,12 @@ namespace tsduck_transport {
         bool pat_sent_ = false;
         bool pmt_sent_ = false;
         
+        // Frame Number Tagging state
+        uint64_t global_frame_counter_ = 0;     // Total frames processed across all segments
+        uint32_t segment_frame_counter_ = 0;    // Frames in current segment
+        std::chrono::steady_clock::time_point last_frame_time_;
+        std::chrono::milliseconds estimated_frame_duration_{33}; // Default ~30fps
+        
         // Generate PAT (Program Association Table)
         TSPacket GeneratePAT();
         
@@ -149,6 +166,13 @@ namespace tsduck_transport {
             size_t total_packets_processed = 0;
             double buffer_utilization = 0.0; // 0.0 to 1.0
             std::chrono::milliseconds avg_packet_interval{0};
+            
+            // Frame Number Tagging statistics
+            uint64_t total_frames_processed = 0;
+            uint32_t frames_dropped = 0;
+            uint32_t frames_duplicated = 0;
+            double current_fps = 0.0;
+            std::chrono::milliseconds avg_frame_interval{0};
         };
         BufferStats GetBufferStats() const;
         
@@ -167,6 +191,14 @@ namespace tsduck_transport {
         RouterConfig current_config_;
         std::function<void(const std::wstring&)> log_callback_;
         HANDLE player_process_handle_;
+        
+        // Frame Number Tagging statistics
+        std::atomic<uint64_t> total_frames_processed_{0};
+        std::atomic<uint32_t> frames_dropped_{0};
+        std::atomic<uint32_t> frames_duplicated_{0};
+        std::atomic<uint64_t> last_frame_number_{0};
+        std::chrono::steady_clock::time_point last_frame_time_;
+        std::chrono::steady_clock::time_point stream_start_time_;
         
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
