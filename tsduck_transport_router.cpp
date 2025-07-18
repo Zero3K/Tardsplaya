@@ -281,9 +281,6 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         return ts_packets; // No valid sync found
     }
     
-    // Store PID-specific continuity counters for proper packet sequencing
-    static std::map<uint16_t, uint8_t> pid_continuity_counters;
-    
     // Process data in 188-byte TS packet chunks starting from sync position
     for (size_t offset = sync_offset; offset + TS_PACKET_SIZE <= data_size; offset += TS_PACKET_SIZE) {
         TSPacket packet;
@@ -301,50 +298,10 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         // Parse packet header
         packet.ParseHeader();
         
-        // Fix continuity counter for smooth playback
-        bool has_payload = (packet.data[3] & 0x10) != 0;
-        if (has_payload && packet.pid > 0) {
-            // Update continuity counter for this PID
-            auto& counter = pid_continuity_counters[packet.pid];
-            packet.data[3] = (packet.data[3] & 0xF0) | (counter & 0x0F);
-            counter = (counter + 1) & 0x0F;
-        }
-        
-        // For the first segment, ensure we have PAT and PMT
-        if (is_first_segment && (packet.pid == 0x0000 || packet.pid == pmt_pid_)) {
-            if (packet.pid == 0x0000) pat_sent_ = true;
-            if (packet.pid == pmt_pid_) pmt_sent_ = true;
-        }
+        // Don't modify continuity counters - preserve original TS packet timing and sequencing
+        // The original HLS TS segments should have correct continuity counters
         
         ts_packets.push_back(packet);
-    }
-    
-    // If this is the first segment and we didn't find PAT/PMT, generate them
-    if (is_first_segment && (!pat_sent_ || !pmt_sent_)) {
-        std::vector<TSPacket> psi_packets;
-        
-        if (!pat_sent_) {
-            auto pat_packet = GeneratePAT();
-            // Ensure proper continuity counter
-            auto& counter = pid_continuity_counters[0x0000];
-            pat_packet.data[3] = (pat_packet.data[3] & 0xF0) | (counter & 0x0F);
-            counter = (counter + 1) & 0x0F;
-            psi_packets.push_back(pat_packet);
-            pat_sent_ = true;
-        }
-        
-        if (!pmt_sent_) {
-            auto pmt_packet = GeneratePMT();
-            // Ensure proper continuity counter
-            auto& counter = pid_continuity_counters[pmt_pid_];
-            pmt_packet.data[3] = (pmt_packet.data[3] & 0xF0) | (counter & 0x0F);
-            counter = (counter + 1) & 0x0F;
-            psi_packets.push_back(pmt_packet);
-            pmt_sent_ = true;
-        }
-        
-        // Insert PSI packets at the beginning
-        ts_packets.insert(ts_packets.begin(), psi_packets.begin(), psi_packets.end());
     }
     
     return ts_packets;
@@ -737,9 +694,9 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
     auto last_log_time = std::chrono::steady_clock::now();
     auto last_packet_time = std::chrono::steady_clock::now();
     
-    // Calculate target packet rate for smooth delivery - more conservative timing
-    // Use 1ms intervals instead of 250μs for better compatibility and less CPU usage
-    const auto target_packet_interval = std::chrono::milliseconds(1);
+    // Calculate target packet rate for smooth delivery
+    // Use burst-based timing: send bursts with reasonable intervals for TS streams
+    const auto target_packet_interval = std::chrono::microseconds(1500); // 1.5ms between bursts of 7 packets
     
     // Send TS packets to player with proper timing
     while (routing_active_ && !cancel_token) {
@@ -761,25 +718,36 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             }
         }
         
-        TSPacket packet;
-        if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(200))) {
-            // Simple rate limiting for smooth delivery
-            auto now = std::chrono::steady_clock::now();
-            auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_packet_time);
-            if (time_since_last < target_packet_interval) {
-                auto sleep_time = target_packet_interval - time_since_last;
-                std::this_thread::sleep_for(sleep_time);
+        // Send multiple packets in small bursts for better TS timing
+        std::vector<TSPacket> packet_burst;
+        const int burst_size = 7; // Send 7 packets per burst (typical TS behavior)
+        
+        // Collect packets for burst
+        for (int i = 0; i < burst_size && routing_active_ && !cancel_token; ++i) {
+            TSPacket packet;
+            if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(10))) {
+                packet_burst.push_back(packet);
+            } else {
+                break; // No more packets available
             }
-            
+        }
+        
+        // Send the burst of packets
+        for (const auto& packet : packet_burst) {
             if (!SendTSPacketToPlayer(player_stdin, packet)) {
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
                 }
-                break;
+                goto cleanup_and_exit;
             }
-            
             packets_sent++;
+        }
+        
+        // Rate limiting after burst
+        if (!packet_burst.empty()) {
             last_packet_time = std::chrono::steady_clock::now();
+            std::this_thread::sleep_for(target_packet_interval);
+        }
             
             // Log progress periodically
             if (std::chrono::duration_cast<std::chrono::seconds>(last_packet_time - last_log_time).count() >= 30) {
@@ -803,6 +771,7 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
         }
     }
     
+cleanup_and_exit:
     // Cleanup
     if (player_stdin != INVALID_HANDLE_VALUE) {
         FlushFileBuffers(player_stdin); // Ensure all data is written
@@ -862,10 +831,10 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     
     // Configure player-specific arguments for transport stream input
     if (player_name.find(L"mpv") != std::wstring::npos) {
-        // MPV specific arguments for transport stream - simplified and more stable
-        cmd_line = config.player_path + L" --demuxer=mpegts --cache-secs=1 --demuxer-readahead-secs=2 --fps=30 --no-resume-playback --";
+        // MPV specific arguments for transport stream - optimized for live streaming
+        cmd_line = config.player_path + L" --demuxer=mpegts --no-cache --untimed --no-correct-pts --framedrop=vo --no-resume-playback --";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPV-specific TS arguments");
+            log_callback_(L"[TS_ROUTER] Using MPV-specific TS arguments for live streaming");
         }
     }
     else if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
