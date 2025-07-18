@@ -7,25 +7,25 @@
 // Minimal JSON parser for flat/nested objects and arrays (string/number/bool/null support)
 class JsonValue {
 public:
-    enum Type { Null, Bool, Number, String, Object, Array } type = Null;
+    enum class Type { Null, Bool, Number, String, Object, Array } type = Type::Null;
     std::string str;
     std::vector<JsonValue> arr;
     std::unordered_map<std::string, JsonValue> obj;
     bool boolean = false;
     double number = 0.0;
 
-    JsonValue() : type(Null) {}
-    JsonValue(bool b) : type(Bool), boolean(b) {}
-    JsonValue(double n) : type(Number), number(n) {}
-    JsonValue(const std::string& s) : type(String), str(s) {}
+    JsonValue() : type(Type::Null) {}
+    JsonValue(bool b) : type(Type::Bool), boolean(b) {}
+    JsonValue(double n) : type(Type::Number), number(n) {}
+    JsonValue(const std::string& s) : type(Type::String), str(s) {}
     static JsonValue parse(const char* &p);
     const JsonValue& operator[](const std::string& k) const { static JsonValue none; auto it = obj.find(k); return it != obj.end() ? it->second : none; }
     const JsonValue& operator[](size_t i) const { static JsonValue none; return i < arr.size() ? arr[i] : none; }
-    bool is_null() const { return type == Null; }
-    std::string as_str() const { return type == String ? str : ""; }
-    double as_num() const { return type == Number ? number : 0; }
-    bool as_bool() const { return type == Bool ? boolean : false; }
-    size_t size() const { return type == Array ? arr.size() : type == Object ? obj.size() : 0; }
+    bool is_null() const { return type == Type::Null; }
+    std::string as_str() const { return type == Type::String ? str : ""; }
+    double as_num() const { return type == Type::Number ? number : 0; }
+    bool as_bool() const { return type == Type::Bool ? boolean : false; }
+    size_t size() const { return type == Type::Array ? arr.size() : type == Type::Object ? obj.size() : 0; }
 };
 
 // Skip whitespace
@@ -72,7 +72,7 @@ inline JsonValue JsonValue::parse(const char* &p) {
     skip_ws(p);
     if (*p == '{') {
         ++p;
-        JsonValue v; v.type = Object;
+        JsonValue v; v.type = Type::Object;
         skip_ws(p);
         while (*p && *p != '}') {
             skip_ws(p);
@@ -89,7 +89,7 @@ inline JsonValue JsonValue::parse(const char* &p) {
         return v;
     } else if (*p == '[') {
         ++p;
-        JsonValue v; v.type = Array;
+        JsonValue v; v.type = Type::Array;
         skip_ws(p);
         while (*p && *p != ']') {
             v.arr.push_back(parse(p));

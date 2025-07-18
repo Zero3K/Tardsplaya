@@ -834,7 +834,6 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     }
     
     // Set process priority for better multi-stream performance
-    auto& resource_manager = StreamResourceManager::getInstance();
     DWORD recommended_priority = resource_manager.GetRecommendedProcessPriority();
     SetPriorityClass(pi.hProcess, recommended_priority);
     

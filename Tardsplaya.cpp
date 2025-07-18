@@ -47,7 +47,7 @@ struct StreamTab {
     std::atomic<int> chunkCount{0}; // Track actual chunk queue size
 
     // Make the struct movable but not copyable
-    StreamTab() = default;
+    StreamTab() : hChild(nullptr), hQualities(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr) {};
     StreamTab(const StreamTab&) = delete;
     StreamTab& operator=(const StreamTab&) = delete;
     StreamTab(StreamTab&& other) noexcept 
@@ -404,14 +404,16 @@ void UpdateStatusBar(const std::wstring& text) {
 
 std::string WideToUtf8(const std::wstring& w) {
     int sz = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string out(sz - 1, 0);
+    if (sz <= 1) return std::string();
+    std::string out(static_cast<size_t>(sz - 1), 0);
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &out[0], sz, nullptr, nullptr);
     return out;
 }
 
 std::wstring Utf8ToWide(const std::string& s) {
     int sz = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring out(sz - 1, 0);
+    if (sz <= 1) return std::wstring();
+    std::wstring out(static_cast<size_t>(sz - 1), 0);
     MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &out[0], sz);
     return out;
 }
@@ -873,6 +875,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     }
     wchar_t qual[64];
     SendMessage(tab.hQualities, LB_GETTEXT, sel, (LPARAM)qual);
+    qual[63] = L'\0'; // Ensure null termination
     
     // Find the original quality name from the standardized name
     std::wstring standardQuality = qual;
@@ -1519,7 +1522,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
-int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
+int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nCmdShow) {
     g_hInst = hInstance;
     
     // Load settings from INI file

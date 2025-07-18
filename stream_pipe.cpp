@@ -786,7 +786,6 @@ bool BufferAndPipeStreamToPlayer(
                L", PID=" + std::to_wstring(pi.dwProcessId) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
     
     // Set process priority for better multi-stream performance using resource manager recommendations
-    auto& resource_manager = StreamResourceManager::getInstance();
     DWORD recommended_priority = resource_manager.GetRecommendedProcessPriority();
     
     SetPriorityClass(pi.hProcess, recommended_priority);
@@ -1007,7 +1006,7 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 
                 bool urgent_bypass = urgent_download_needed.load();
-                if (current_buffer_size >= dynamic_max_buffer.load() && !urgent_bypass) {
+                if (current_buffer_size >= static_cast<size_t>(dynamic_max_buffer.load()) && !urgent_bypass) {
                     auto current_time = std::chrono::steady_clock::now();
                     
                     // Start timing if this is the first time buffer is full
@@ -1162,7 +1161,7 @@ bool BufferAndPipeStreamToPlayer(
             
             // Wait for initial buffer before starting - increased for stability
             if (!started) {
-                if (buffer_size >= dynamic_target_buffer.load()) {
+                if (buffer_size >= static_cast<size_t>(dynamic_target_buffer.load())) {
                     started = true;
                     AddDebugLog(L"[FEEDER] Initial buffer ready (" + 
                                std::to_wstring(buffer_size) + L" segments), starting IPC feed for " + channel_name);
