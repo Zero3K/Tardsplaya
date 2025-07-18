@@ -412,3 +412,9 @@ FodyWeavers.xsd
 test_freeze_fix
 test_freeze_fix.exe
 test_stream_fix.md
+test_exit_behavior
+test_exit_behavior.exe
+demo_exit_fix
+demo_exit_fix.exe
+test_exit_behavior.cpp
+demo_exit_fix.cpp
