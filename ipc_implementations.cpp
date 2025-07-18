@@ -446,7 +446,7 @@ bool BufferAndMailSlotStreamToPlayer(
     std::atomic<bool> stream_ended_normally(false);
     std::atomic<bool> urgent_download_needed(false);
     
-    const int target_buffer_segments = std::max(buffer_segments, 10);
+    const int target_buffer_segments = std::max(buffer_segments, 12); // Increased from 10 to 12 for MailSlot latency
     const int max_buffer_segments = target_buffer_segments * 2;
     
     AddDebugLog(L"BufferAndMailSlotStreamToPlayer: Starting real video streaming with MailSlots for " + channel_name);
@@ -555,22 +555,23 @@ bool BufferAndMailSlotStreamToPlayer(
                 }
             }
             
-            // Sleep before next playlist fetch
+            // Sleep before next playlist fetch - more responsive for MailSlot streaming
             if (urgent_download_needed.load()) {
                 urgent_download_needed.store(false);
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                // Reduced from 1500ms to 800ms for better responsiveness with MailSlot latency
+                std::this_thread::sleep_for(std::chrono::milliseconds(800));
             }
         }
         
         AddDebugLog(L"[DOWNLOAD-MAILSLOT] Download thread ending for " + channel_name);
     });
     
-    // Main feeder thread - sends real video segments via MailSlot
+    // Main feeder thread - sends real video segments via MailSlot at proper playback rate
     std::thread feeder_thread([&]() {
         bool started = false;
-        const size_t min_buffer_size = 3;
+        const size_t min_buffer_size = 6; // Increased from 3 to 6 for MailSlot latency
         
         AddDebugLog(L"[FEEDER-MAILSLOT] Starting feeder thread for " + channel_name);
         
@@ -583,61 +584,58 @@ bool BufferAndMailSlotStreamToPlayer(
                 buffer_size = buffer_queue.size();
             }
             
-            // Wait for initial buffer before starting
+            // Wait for larger initial buffer before starting to account for MailSlot latency
             if (!started) {
-                if (buffer_size >= target_buffer_segments) {
+                // Require more buffer segments for MailSlot due to bridge process overhead
+                size_t required_buffer = std::max((size_t)target_buffer_segments, min_buffer_size + 2);
+                if (buffer_size >= required_buffer) {
                     started = true;
                     AddDebugLog(L"[FEEDER-MAILSLOT] Initial buffer ready (" + 
                                std::to_wstring(buffer_size) + L" segments), starting MailSlot feed for " + channel_name);
                 } else {
                     AddDebugLog(L"[FEEDER-MAILSLOT] Waiting for initial buffer (" + std::to_wstring(buffer_size) + L"/" +
-                               std::to_wstring(target_buffer_segments) + L") for " + channel_name);
+                               std::to_wstring(required_buffer) + L") for " + channel_name);
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
                 }
             }
             
-            // Get segments to feed
-            std::vector<std::vector<char>> segments_to_feed;
+            // Get one segment to feed at natural playback rate
+            std::vector<char> segment_to_feed;
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
                 
-                int max_segments_to_feed = 1;
-                if (buffer_size < min_buffer_size) {
-                    max_segments_to_feed = std::min((int)buffer_queue.size(), 3);
-                    
-                    if (buffer_size == 0) {
-                        AddDebugLog(L"[FEEDER-MAILSLOT] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
-                        urgent_download_needed.store(true);
-                    }
+                if (buffer_size == 0) {
+                    AddDebugLog(L"[FEEDER-MAILSLOT] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
+                    urgent_download_needed.store(true);
+                } else if (buffer_size < min_buffer_size) {
+                    AddDebugLog(L"[FEEDER-MAILSLOT] *** WARNING: Low buffer (" + std::to_wstring(buffer_size) + 
+                               L") for " + channel_name + L" ***");
+                    urgent_download_needed.store(true);
                 }
                 
-                int segments_fed = 0;
-                while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
-                    segments_to_feed.push_back(std::move(buffer_queue.front()));
+                if (!buffer_queue.empty()) {
+                    segment_to_feed = std::move(buffer_queue.front());
                     buffer_queue.pop();
-                    segments_fed++;
                 }
             }
             
-            if (!segments_to_feed.empty()) {
-                // Send segments via MailSlot
-                for (const auto& segment_data : segments_to_feed) {
-                    if (segment_data.empty()) continue;
-                    
-                    if (!SendVideoSegmentViaMailSlot(mailslot_client, segment_data)) {
-                        AddDebugLog(L"[FEEDER-MAILSLOT] Failed to send segment via MailSlot for " + channel_name);
-                        break;
-                    } else {
-                        AddDebugLog(L"[FEEDER-MAILSLOT] Successfully sent " + std::to_wstring(segment_data.size()) + 
-                                   L" bytes via MailSlot for " + channel_name);
-                    }
+            if (!segment_to_feed.empty()) {
+                // Send single segment via MailSlot
+                if (!SendVideoSegmentViaMailSlot(mailslot_client, segment_to_feed)) {
+                    AddDebugLog(L"[FEEDER-MAILSLOT] Failed to send segment via MailSlot for " + channel_name);
+                    break;
+                } else {
+                    AddDebugLog(L"[FEEDER-MAILSLOT] Successfully sent " + std::to_wstring(segment_to_feed.size()) + 
+                               L" bytes via MailSlot for " + channel_name);
                 }
                 
-                // Delay between segment groups
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                // Wait for natural segment duration (HLS segments are typically ~2 seconds)
+                // This prevents buffer starvation by feeding at playback rate instead of maximum speed
+                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                // No segments available, check more frequently when buffer is empty
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         }
         
@@ -865,22 +863,23 @@ bool BufferAndNamedPipeStreamToPlayer(
                 }
             }
             
-            // Sleep before next playlist fetch
+            // Sleep before next playlist fetch - more responsive for Named Pipe streaming
             if (urgent_download_needed.load()) {
                 urgent_download_needed.store(false);
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                // Reduced from 1500ms to 1000ms for better responsiveness with Named Pipe latency
+                std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             }
         }
         
         AddDebugLog(L"[DOWNLOAD-NAMEDPIPE] Download thread ending for " + channel_name);
     });
     
-    // Main feeder thread - sends real video segments via Named Pipe
+    // Main feeder thread - sends real video segments via Named Pipe at proper playback rate
     std::thread feeder_thread([&]() {
         bool started = false;
-        const size_t min_buffer_size = 3;
+        const size_t min_buffer_size = 5; // Increased from 3 to 5 for Named Pipe latency
         
         AddDebugLog(L"[FEEDER-NAMEDPIPE] Starting feeder thread for " + channel_name);
         
@@ -893,66 +892,64 @@ bool BufferAndNamedPipeStreamToPlayer(
                 buffer_size = buffer_queue.size();
             }
             
-            // Wait for initial buffer before starting
+            // Wait for larger initial buffer before starting to account for Named Pipe latency
             if (!started) {
-                if (buffer_size >= target_buffer_segments) {
+                size_t required_buffer = std::max((size_t)target_buffer_segments, min_buffer_size + 1);
+                if (buffer_size >= required_buffer) {
                     started = true;
                     AddDebugLog(L"[FEEDER-NAMEDPIPE] Initial buffer ready (" + 
                                std::to_wstring(buffer_size) + L" segments), starting Named Pipe feed for " + channel_name);
                 } else {
                     AddDebugLog(L"[FEEDER-NAMEDPIPE] Waiting for initial buffer (" + std::to_wstring(buffer_size) + L"/" +
-                               std::to_wstring(target_buffer_segments) + L") for " + channel_name);
+                               std::to_wstring(required_buffer) + L") for " + channel_name);
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     continue;
                 }
             }
             
-            // Get segments to feed
-            std::vector<std::vector<char>> segments_to_feed;
+            // Get one segment to feed at natural playback rate
+            std::vector<char> segment_to_feed;
             {
                 std::lock_guard<std::mutex> lock(buffer_mutex);
                 
-                int max_segments_to_feed = 1;
-                if (buffer_size < min_buffer_size) {
-                    max_segments_to_feed = std::min((int)buffer_queue.size(), 3);
-                    
-                    if (buffer_size == 0) {
-                        AddDebugLog(L"[FEEDER-NAMEDPIPE] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
-                        urgent_download_needed.store(true);
-                    }
+                if (buffer_size == 0) {
+                    AddDebugLog(L"[FEEDER-NAMEDPIPE] *** WARNING: Buffer reached 0 for " + channel_name + L" ***");
+                    urgent_download_needed.store(true);
+                } else if (buffer_size < min_buffer_size) {
+                    AddDebugLog(L"[FEEDER-NAMEDPIPE] *** WARNING: Low buffer (" + std::to_wstring(buffer_size) + 
+                               L") for " + channel_name + L" ***");
+                    urgent_download_needed.store(true);
                 }
                 
-                int segments_fed = 0;
-                while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
-                    segments_to_feed.push_back(std::move(buffer_queue.front()));
+                if (!buffer_queue.empty()) {
+                    segment_to_feed = std::move(buffer_queue.front());
                     buffer_queue.pop();
-                    segments_fed++;
                 }
             }
             
-            if (!segments_to_feed.empty()) {
-                // Send segments via Named Pipe
-                for (const auto& segment_data : segments_to_feed) {
-                    if (segment_data.empty()) continue;
-                    
-                    DWORD bytes_written;
-                    if (!WriteFile(server_handle, segment_data.data(), (DWORD)segment_data.size(), &bytes_written, nullptr)) {
-                        DWORD error = GetLastError();
-                        AddDebugLog(L"[FEEDER-NAMEDPIPE] Failed to write segment via Named Pipe for " + channel_name + 
-                                   L", error=" + std::to_wstring(error));
-                        break;
-                    } else {
-                        AddDebugLog(L"[FEEDER-NAMEDPIPE] Successfully sent " + std::to_wstring(bytes_written) + 
-                                   L" bytes via Named Pipe for " + channel_name);
-                    }
+            if (!segment_to_feed.empty()) {
+                // Send single segment via Named Pipe
+                DWORD bytes_written;
+                if (!WriteFile(server_handle, segment_to_feed.data(), (DWORD)segment_to_feed.size(), &bytes_written, nullptr)) {
+                    DWORD error = GetLastError();
+                    AddDebugLog(L"[FEEDER-NAMEDPIPE] Failed to write segment via Named Pipe for " + channel_name + 
+                               L", error=" + std::to_wstring(error));
+                    break;
+                } else {
+                    AddDebugLog(L"[FEEDER-NAMEDPIPE] Successfully sent " + std::to_wstring(bytes_written) + 
+                               L" bytes via Named Pipe for " + channel_name);
                 }
                 
-                // Delay between segment groups
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                // Wait for natural segment duration (HLS segments are typically ~2 seconds)
+                // This prevents buffer starvation by feeding at playback rate instead of maximum speed
+                std::this_thread::sleep_for(std::chrono::milliseconds(2000));
             } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                // No segments available, check more frequently when buffer is empty
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
         
         AddDebugLog(L"[FEEDER-NAMEDPIPE] Feeder thread ending for " + channel_name);
     });
