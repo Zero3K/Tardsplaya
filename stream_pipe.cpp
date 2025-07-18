@@ -1448,6 +1448,7 @@ bool BufferAndPipeStreamToPlayer(
                 } else {
                     // Fallback to mutex-only approach
                     try {
+                        std::lock_guard<std::mutex> lock(buffer_mutex);
                         while (!buffer_queue.empty() && segments_fed < max_segments_to_feed) {
                             segments_to_feed.push_back(std::move(buffer_queue.front()));
                             buffer_queue.pop();
