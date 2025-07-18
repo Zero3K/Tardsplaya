@@ -1,7 +1,6 @@
 #pragma once
 // TSDuck-inspired Transport Stream Router for Tardsplaya
 // Implements transport stream re-routing functionality to buffer streams to media players
-// Can be used as built-in functionality or compiled as a DLL
 
 #include <string>
 #include <vector>
@@ -178,27 +177,6 @@ namespace tsduck_transport {
         void InsertPCR(TSPacket& packet, uint64_t pcr_value);
     };
     
-    // DLL interface for external use
-    extern "C" {
-        // Create router instance
-        __declspec(dllexport) void* CreateTransportRouter();
-        
-        // Destroy router instance
-        __declspec(dllexport) void DestroyTransportRouter(void* router);
-        
-        // Start routing (simplified interface)
-        __declspec(dllexport) bool StartTransportRouting(void* router, 
-                                                        const wchar_t* playlist_url,
-                                                        const wchar_t* player_path,
-                                                        size_t buffer_size);
-        
-        // Stop routing
-        __declspec(dllexport) void StopTransportRouting(void* router);
-        
-        // Get buffer status
-        __declspec(dllexport) bool GetTransportBufferStatus(void* router, 
-                                                           size_t* buffered_packets,
-                                                           double* utilization);
-    }
+
     
 } // namespace tsduck_transport

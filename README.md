@@ -26,7 +26,6 @@ This version includes **TSDuck-inspired HLS processing** for improved streaming 
 
 - **Stream Re-routing**: Routes HLS streams through transport stream format to media players
 - **Built-in Integration**: Available as checkbox option in the main interface
-- **DLL Support**: Also available as standalone DLL (`tsduck_transport.dll`) for external applications
 - **Smart Buffering**: Packet-level buffering (~5000 packets default, ~940KB) for smoother playback
 - **PAT/PMT Generation**: Proper MPEG-TS structure with Program Association and Program Map tables
 - **PCR Insertion**: Program Clock Reference timing for better synchronization
@@ -68,19 +67,6 @@ Enable "TSDuck TS Mode" in any stream tab to use transport stream re-routing:
 - **Enhanced Buffering**: Packet-level buffering instead of segment buffering  
 - **Better Compatibility**: Works with professional media players expecting TS format
 - **Reduced Latency**: Continuous stream instead of segment-based delivery
-
-### DLL Interface
-
-The transport stream router is also available as a standalone DLL:
-
-```cpp
-// External application usage
-void* router = CreateTransportRouter();
-StartTransportRouting(router, playlist_url, player_path, buffer_size);
-// ... streaming occurs ...
-StopTransportRouting(router);
-DestroyTransportRouter(router);
-```
 
 ## TLS Client Integration
 
