@@ -539,7 +539,7 @@ void TransportStreamRouter::StopRouting() {
     }
     
     // Clear stored process handle since routing has stopped
-    player_process_handle_ = INVALID_HANDLE_VALUE;
+    this->player_process_handle_ = INVALID_HANDLE_VALUE;
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Transport stream routing stopped");
@@ -707,7 +707,7 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
     }
     
     // Store player process handle for external monitoring
-    player_process_handle_ = player_process;
+    this->player_process_handle_ = player_process;
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Media player launched successfully");
@@ -791,7 +791,7 @@ cleanup_and_exit:
         }
         CloseHandle(player_process);
         // Clear stored handle
-        player_process_handle_ = INVALID_HANDLE_VALUE;
+        this->player_process_handle_ = INVALID_HANDLE_VALUE;
     }
     
     if (log_callback_) {
