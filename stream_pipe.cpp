@@ -448,6 +448,16 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
     std::vector<std::wstring> segs;
     bool should_clear_buffer = false;
     
+    // First run TSDuck analysis to get sophisticated ad detection results
+    tsduck_hls::PlaylistParser tsduck_parser;
+    bool tsduck_available = tsduck_parser.ParsePlaylist(playlist);
+    std::vector<tsduck_hls::MediaSegment> tsduck_segments;
+    if (tsduck_available) {
+        tsduck_segments = tsduck_parser.GetSegments();
+        AddDebugLog(L"[AD_SKIP] TSDuck analysis found " + std::to_wstring(tsduck_segments.size()) + 
+                   L" segments, " + std::to_wstring(tsduck_parser.HasAdMarkers() ? 1 : 0) + L" ad markers detected");
+    }
+    
     // Don't clear buffer when exiting ad blocks to maintain stream continuity
     if (ad_state.just_exited_ad_block) {
         ad_state.just_exited_ad_block = false; // Reset flag
@@ -456,6 +466,7 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
     
     std::istringstream ss(playlist);
     std::string line;
+    int current_segment_index = 0; // Track which segment we're processing for TSDuck correlation
     
     while (std::getline(ss, line)) {
         if (line.empty()) continue;
@@ -470,7 +481,7 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
                     AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, already in ad block");
                 }
                 ad_state.in_scte35_out = true;
-                ad_state.skip_next_segment = true;
+                // Remove the redundant skip_next_segment = true; SCTE-35 block logic will handle all segments
                 ad_state.consecutive_skipped_segments = 0;
                 ad_state.scte35_start_time = std::chrono::steady_clock::now();
                 continue;
@@ -520,31 +531,43 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
         // This is a segment URL
         bool should_skip_ad_segment = false;
         
-        // Check if we should skip this segment as an ad
-        if (ad_state.skip_next_segment) {
-            // Single ad segment (stitched ads, duration-based ads, etc.)
-            should_skip_ad_segment = true;
-            ad_state.skip_next_segment = false; // Reset after processing one segment
-        } else if (ad_state.in_scte35_out) {
-            // SCTE35 ad block - check safety limits to prevent infinite ad segment skipping
-            auto current_time = std::chrono::steady_clock::now();
-            auto ad_block_duration = current_time - ad_state.scte35_start_time;
-            
-            if (ad_state.consecutive_skipped_segments >= AdBlockState::MAX_CONSECUTIVE_SKIPPED_SEGMENTS) {
-                AddDebugLog(L"[AD_SKIP] Safety limit reached: " + std::to_wstring(ad_state.consecutive_skipped_segments) + 
-                           L" consecutive skipped segments, exiting ad block");
-                ad_state.in_scte35_out = false;
-                ad_state.consecutive_skipped_segments = 0;
-                ad_state.just_exited_ad_block = true;
-            } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
-                AddDebugLog(L"[AD_SKIP] Safety timeout reached: " + 
-                           std::to_wstring(std::chrono::duration_cast<std::chrono::seconds>(ad_block_duration).count()) + 
-                           L" seconds in ad block, exiting");
-                ad_state.in_scte35_out = false;
-                ad_state.consecutive_skipped_segments = 0;
-                ad_state.just_exited_ad_block = true;
-            } else {
+        // First check TSDuck ad detection results if available
+        if (tsduck_available && current_segment_index < static_cast<int>(tsduck_segments.size())) {
+            const auto& tsduck_segment = tsduck_segments[current_segment_index];
+            if (tsduck_segment.is_ad_segment) {
                 should_skip_ad_segment = true;
+                AddDebugLog(L"[AD_SKIP] TSDuck detected ad segment: " + std::wstring(line.begin(), line.end()));
+            }
+        }
+        
+        // Fallback to legacy ad detection logic if TSDuck didn't detect an ad
+        if (!should_skip_ad_segment) {
+            // Check if we should skip this segment as an ad using legacy detection
+            if (ad_state.skip_next_segment) {
+                // Single ad segment (stitched ads, duration-based ads, etc.)
+                should_skip_ad_segment = true;
+                ad_state.skip_next_segment = false; // Reset after processing one segment
+            } else if (ad_state.in_scte35_out) {
+                // SCTE35 ad block - check safety limits to prevent infinite ad segment skipping
+                auto current_time = std::chrono::steady_clock::now();
+                auto ad_block_duration = current_time - ad_state.scte35_start_time;
+                
+                if (ad_state.consecutive_skipped_segments >= AdBlockState::MAX_CONSECUTIVE_SKIPPED_SEGMENTS) {
+                    AddDebugLog(L"[AD_SKIP] Safety limit reached: " + std::to_wstring(ad_state.consecutive_skipped_segments) + 
+                               L" consecutive skipped segments, exiting ad block");
+                    ad_state.in_scte35_out = false;
+                    ad_state.consecutive_skipped_segments = 0;
+                    ad_state.just_exited_ad_block = true;
+                } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
+                    AddDebugLog(L"[AD_SKIP] Safety timeout reached: " + 
+                               std::to_wstring(std::chrono::duration_cast<std::chrono::seconds>(ad_block_duration).count()) + 
+                               L" seconds in ad block, exiting");
+                    ad_state.in_scte35_out = false;
+                    ad_state.consecutive_skipped_segments = 0;
+                    ad_state.just_exited_ad_block = true;
+                } else {
+                    should_skip_ad_segment = true;
+                }
             }
         }
         
@@ -556,19 +579,20 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
             // Use a placeholder marker that will generate minimal content
             segs.push_back(L"__AD_PLACEHOLDER__");
             ad_state.consecutive_skipped_segments++;
-            continue;
+        } else {
+            // Normal content segment - reset skip counter
+            if (ad_state.consecutive_skipped_segments > 0) {
+                AddDebugLog(L"[AD_SKIP] Returning to normal content after replacing " + 
+                           std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments with placeholders");
+                ad_state.consecutive_skipped_segments = 0;
+            }
+            
+            // Should be a .ts or .aac segment
+            std::wstring wline(line.begin(), line.end());
+            segs.push_back(wline);
         }
         
-        // Normal content segment - reset skip counter
-        if (ad_state.consecutive_skipped_segments > 0) {
-            AddDebugLog(L"[AD_SKIP] Returning to normal content after replacing " + 
-                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments with placeholders");
-            ad_state.consecutive_skipped_segments = 0;
-        }
-        
-        // Should be a .ts or .aac segment
-        std::wstring wline(line.begin(), line.end());
-        segs.push_back(wline);
+        current_segment_index++; // Increment for TSDuck correlation
     }
     return std::make_pair(segs, should_clear_buffer);
 }
