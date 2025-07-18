@@ -747,15 +747,6 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
         if (!packet_burst.empty()) {
             last_packet_time = std::chrono::steady_clock::now();
             std::this_thread::sleep_for(target_packet_interval);
-        }
-            
-            // Log progress periodically
-            if (std::chrono::duration_cast<std::chrono::seconds>(last_packet_time - last_log_time).count() >= 30) {
-                if (log_callback_) {
-                    log_callback_(L"[TS_ROUTER] Streaming progress: " + std::to_wstring(packets_sent) + L" packets sent");
-                }
-                last_log_time = last_packet_time;
-            }
         } else {
             // No packet available, check if we should continue waiting
             if (ts_buffer_->IsEmpty() && packets_sent == 0) {
@@ -768,6 +759,14 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                     empty_buffer_warnings++;
                 }
             }
+        }
+        
+        // Log progress periodically
+        if (std::chrono::duration_cast<std::chrono::seconds>(last_packet_time - last_log_time).count() >= 30) {
+            if (log_callback_) {
+                log_callback_(L"[TS_ROUTER] Streaming progress: " + std::to_wstring(packets_sent) + L" packets sent");
+            }
+            last_log_time = last_packet_time;
         }
     }
     
