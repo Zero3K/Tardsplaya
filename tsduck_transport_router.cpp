@@ -874,8 +874,8 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
         }
     }
     else if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
-        // MPC-HC specific arguments for transport stream - better buffering control
-        cmd_line = config.player_path + L" /play /close /buffer=512 \"pipe://stdin\"";
+        // MPC-HC specific arguments for transport stream - use standard input
+        cmd_line = config.player_path + L" /play /close \"-\"";
         if (log_callback_) {
             log_callback_(L"[TS_ROUTER] Using MPC-HC-specific optimized arguments");
         }
