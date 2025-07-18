@@ -183,7 +183,7 @@ void TSPacket::ParseHeader() {
 }
 
 // TSBuffer implementation
-TSBuffer::TSBuffer(size_t max_packets) : max_packets_(max_packets) {
+TSBuffer::TSBuffer(size_t max_packets) : max_packets_(max_packets), producer_active_(true) {
 }
 
 bool TSBuffer::AddPacket(const TSPacket& packet) {
@@ -241,6 +241,10 @@ void TSBuffer::Clear() {
     while (!packet_queue_.empty()) {
         packet_queue_.pop();
     }
+}
+
+void TSBuffer::SignalEndOfStream() {
+    producer_active_ = false;
 }
 
 // HLSToTSConverter implementation
@@ -533,6 +537,11 @@ void TransportStreamRouter::StopRouting() {
     
     routing_active_ = false;
     
+    // Signal end of stream to buffer to wake up any waiting threads
+    if (ts_buffer_) {
+        ts_buffer_->SignalEndOfStream();
+    }
+    
     // Wait for threads to finish
     if (hls_fetcher_thread_.joinable()) {
         hls_fetcher_thread_.join();
@@ -586,6 +595,15 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             }
             
             consecutive_failures = 0; // Reset failure counter on success
+            
+            // Check for stream end before processing segments
+            if (playlist_content.find("#EXT-X-ENDLIST") != std::string::npos) {
+                if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Found #EXT-X-ENDLIST - stream ended normally");
+                }
+                routing_active_ = false;
+                break;
+            }
             
             // Parse segment URLs
             auto segment_urls = ParseHLSPlaylist(playlist_content, playlist_url);
@@ -687,6 +705,11 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
         routing_active_ = false;
     }
     
+    // Signal end of stream to TS buffer and router thread
+    if (ts_buffer_) {
+        ts_buffer_->SignalEndOfStream();
+    }
+    
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] HLS fetcher thread stopped");
     }
@@ -760,7 +783,13 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             last_packet_time = std::chrono::steady_clock::now();
         } else {
             // No packet available, check if we should continue waiting
-            if (ts_buffer_->IsEmpty() && packets_sent == 0) {
+            if (!ts_buffer_->IsProducerActive() && ts_buffer_->IsEmpty()) {
+                // Stream ended normally and buffer is empty - clean exit
+                if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Stream ended normally - no more packets to send");
+                }
+                break;
+            } else if (ts_buffer_->IsEmpty() && packets_sent == 0) {
                 // No packets sent yet and buffer is empty - might be a problem
                 static int empty_buffer_warnings = 0;
                 if (empty_buffer_warnings < 3) {
