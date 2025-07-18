@@ -21,8 +21,8 @@ struct StreamResourceQuota {
     DWORD max_memory_mb = 512;          // Memory limit for video rendering
     DWORD max_handles = 100;            // Handles for graphics resources
     DWORD max_threads = 8;              // Threads for media processing
-    DWORD pipe_buffer_size = 65536;     // 64KB pipe buffer per stream
-    DWORD process_priority = NORMAL_PRIORITY_CLASS;
+    DWORD pipe_buffer_size = 262144;    // 256KB pipe buffer per stream for reduced frame drops
+    DWORD process_priority = ABOVE_NORMAL_PRIORITY_CLASS; // Higher priority for smoother playback
     bool use_job_object = true;         // Enable job objects for proper resource isolation
 };
 

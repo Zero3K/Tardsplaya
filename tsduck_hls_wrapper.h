@@ -15,7 +15,6 @@ namespace tsduck_hls {
         std::chrono::milliseconds duration{0};
         std::chrono::milliseconds precise_duration{0}; // More precise timing calculation
         double sequence_number = 0;
-        bool is_ad_segment = false;
         bool has_scte35_out = false;
         bool has_scte35_in = false;
         bool has_discontinuity = false;
@@ -51,7 +50,7 @@ namespace tsduck_hls {
         int64_t GetMediaSequence() const { return media_sequence_; }
         
         // Enhanced ad detection using TSDuck-style SCTE-35 analysis
-        bool HasAdMarkers() const { return has_ad_markers_; }
+
         
         // Calculate optimal buffer size based on segment analysis
         int GetOptimalBufferSegments() const;
@@ -67,7 +66,7 @@ namespace tsduck_hls {
         std::chrono::milliseconds target_duration_{0};
         bool is_live_ = false;
         int64_t media_sequence_ = 0;
-        bool has_ad_markers_ = false;
+
         bool has_discontinuities_ = false;
         
         // TSDuck-inspired parsing methods
@@ -78,11 +77,11 @@ namespace tsduck_hls {
         
         // Enhanced timing calculations
         void CalculatePreciseTiming();
-        void AnalyzeAdPatterns();
+
         
         // Utility methods
         double ExtractFloatFromTag(const std::string& line, const std::string& tag);
-        bool ContainsAdMarkers(const std::string& line);
+
     };
     
     // Enhanced buffering calculator using TSDuck timing principles

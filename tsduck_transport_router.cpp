@@ -1,6 +1,8 @@
 #include "tsduck_transport_router.h"
 #include "twitch_api.h"
 #include "playlist_parser.h"
+#include "tsduck_hls_wrapper.h"
+#include "stream_resource_manager.h"
 #define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
@@ -160,6 +162,8 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     if (pos == std::wstring::npos) return rel;
     return base.substr(0, pos + 1) + rel;
 }
+
+
 
 // TSPacket implementation
 void TSPacket::ParseHeader() {
@@ -465,7 +469,20 @@ uint32_t HLSToTSConverter::CalculateCRC32(const uint8_t* data, size_t length) {
 
 // TransportStreamRouter implementation
 TransportStreamRouter::TransportStreamRouter() {
-    ts_buffer_ = std::make_unique<TSBuffer>(5000);
+    // Use dynamic buffer sizing based on system load
+    auto& resource_manager = StreamResourceManager::getInstance();
+    int active_streams = resource_manager.GetActiveStreamCount();
+    
+    // Scale buffer size based on active streams to prevent frame drops
+    size_t buffer_size = 15000; // Base size ~2.8MB
+    if (active_streams > 1) {
+        buffer_size = 25000; // ~4.7MB for multiple streams
+    }
+    if (active_streams > 3) {
+        buffer_size = 35000; // ~6.6MB for many streams
+    }
+    
+    ts_buffer_ = std::make_unique<TSBuffer>(buffer_size);
     hls_converter_ = std::make_unique<HLSToTSConverter>();
 }
 
@@ -606,16 +623,16 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Add to buffer with gentler flow control
-                    size_t buffer_high_watermark = current_config_.buffer_size_packets * 4 / 5; // 80% full
-                    size_t buffer_low_watermark = current_config_.buffer_size_packets / 5;      // 20% full
+                    // Add to buffer with improved flow control for multiple streams
+                    size_t buffer_high_watermark = current_config_.buffer_size_packets * 9 / 10; // 90% full for better buffering
+                    size_t buffer_low_watermark = current_config_.buffer_size_packets / 4;       // 25% full for faster recovery
                     
                     for (const auto& packet : ts_packets) {
                         if (!routing_active_ || cancel_token) break;
                         
-                        // Implement gentler flow control to prevent buffer overflow
+                        // Implement more aggressive flow control to maintain larger buffers and prevent frame drops
                         while (ts_buffer_->GetBufferedPackets() >= buffer_high_watermark && routing_active_ && !cancel_token) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(5)); // Less aggressive waiting
+                            std::this_thread::sleep_for(std::chrono::milliseconds(2)); // Faster response to buffer pressure
                         }
                         
                         ts_buffer_->AddPacket(packet);
@@ -714,9 +731,9 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             }
         }
         
-        // Get and send packets as they become available
+        // Get and send packets with reduced timeout for better responsiveness in multiple streams
         TSPacket packet;
-        if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(100))) {
+        if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(50))) { // Faster timeout for more responsive streaming
             if (!SendTSPacketToPlayer(player_stdin, packet)) {
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
@@ -772,9 +789,12 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
     
-    // Create pipe for stdin with moderate buffer for TS data
+    // Create pipe for stdin with larger buffer for TS data to prevent frame drops
     HANDLE stdin_read, stdin_write;
-    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 65536)) { // 64KB buffer for good balance
+    auto& resource_manager = StreamResourceManager::getInstance();
+    DWORD pipe_buffer_size = resource_manager.GetRecommendedPipeBuffer();
+    
+    if (!CreatePipe(&stdin_read, &stdin_write, &sa, pipe_buffer_size)) {
         if (log_callback_) {
             log_callback_(L"[TS_ROUTER] Failed to create pipe for media player");
         }
@@ -787,54 +807,15 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     // Setup process info
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE; // Hide console window for cleaner experience
+    si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = stdin_read;
     si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     
     PROCESS_INFORMATION pi = {};
     
-    // Build command line with appropriate arguments for transport stream
-    std::wstring cmd_line;
-    std::wstring player_name = config.player_path;
-    
-    // Extract just the executable name for player-specific handling
-    size_t last_slash = player_name.find_last_of(L"\\/");
-    if (last_slash != std::wstring::npos) {
-        player_name = player_name.substr(last_slash + 1);
-    }
-    std::transform(player_name.begin(), player_name.end(), player_name.begin(), ::towlower);
-    
-    // Configure player-specific arguments for transport stream input
-    if (player_name.find(L"mpv") != std::wstring::npos) {
-        // MPV specific arguments for transport stream - respect natural timing
-        cmd_line = config.player_path + L" --demuxer=mpegts --cache-secs=1 --no-resume-playback --";
-        if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPV-specific TS arguments with natural timing");
-        }
-    }
-    else if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
-        // MPC-HC specific arguments for transport stream - simplified
-        cmd_line = config.player_path + L" /play /close \"-\"";
-        if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPC-HC arguments");
-        }
-    }
-    else if (player_name.find(L"vlc") != std::wstring::npos) {
-        // VLC specific arguments for transport stream - simplified
-        cmd_line = config.player_path + L" --demux=ts --intf=dummy --play-and-exit --network-caching=500 -";
-        if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using VLC TS arguments");
-        }
-    }
-    else {
-        // Generic player arguments (fallback)
-        cmd_line = config.player_path + L" " + config.player_args;
-        if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using generic player arguments");
-        }
-    }
+    // Build command line using the configured player arguments (simple approach like HLS mode)
+    std::wstring cmd_line = L"\"" + config.player_path + L"\" " + config.player_args;
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Launching player: " + cmd_line);
@@ -842,7 +823,7 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     
     // Launch process
     if (!CreateProcessW(nullptr, &cmd_line[0], nullptr, nullptr, TRUE, 
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                        CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB, nullptr, nullptr, &si, &pi)) {
         DWORD error = GetLastError();
         if (log_callback_) {
             log_callback_(L"[TS_ROUTER] Failed to launch player process, error: " + std::to_wstring(error));
@@ -850,6 +831,22 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
         CloseHandle(stdin_read);
         CloseHandle(stdin_write);
         return false;
+    }
+    
+    // Set process priority for better multi-stream performance
+    DWORD recommended_priority = resource_manager.GetRecommendedProcessPriority();
+    SetPriorityClass(pi.hProcess, recommended_priority);
+    
+    if (log_callback_) {
+        std::wstring priority_name;
+        switch (recommended_priority) {
+            case HIGH_PRIORITY_CLASS: priority_name = L"HIGH"; break;
+            case ABOVE_NORMAL_PRIORITY_CLASS: priority_name = L"ABOVE_NORMAL"; break;
+            case NORMAL_PRIORITY_CLASS: priority_name = L"NORMAL"; break;
+            default: priority_name = L"UNKNOWN"; break;
+        }
+        log_callback_(L"[TS_ROUTER] Set " + priority_name + L" priority for media player, active streams: " + 
+                     std::to_wstring(resource_manager.GetActiveStreamCount()));
     }
     
     // Cleanup
@@ -897,20 +894,91 @@ bool TransportStreamRouter::FetchHLSSegment(const std::wstring& segment_url, std
     return HttpGetBinary(segment_url, data, cancel_token);
 }
 
+// Validate m3u8 playlist has required metadata tags for proper processing
+static bool ValidatePlaylistMetadata(const std::string& playlist, std::function<void(const std::wstring&)> log_callback = nullptr) {
+    // Required tags for high-quality Twitch playlists
+    std::vector<std::string> required_tags = {
+        "#EXTM3U",
+        "#EXT-X-VERSION", 
+        "#EXT-X-TARGETDURATION",
+        "#EXT-X-MEDIA-SEQUENCE",
+        "#EXT-X-TWITCH-LIVE-SEQUENCE",
+        "#EXT-X-TWITCH-ELAPSED-SECS",
+        "#EXT-X-TWITCH-TOTAL-SECS:",
+        "#EXT-X-DATERANGE",
+        "#EXT-X-PROGRAM-DATE-TIME",
+        "#EXTINF"
+    };
+    
+    // First check that all required tags are present
+    for (const auto& tag : required_tags) {
+        if (playlist.find(tag) == std::string::npos) {
+            if (log_callback) {
+                log_callback(L"[TS_VALIDATION] Missing required tag: " + Utf8ToWide(tag));
+            }
+            return false;
+        }
+    }
+    
+    // Then check that no extra tags are present
+    std::istringstream ss(playlist);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.empty()) continue;
+        
+        // Skip non-tag lines
+        if (line[0] != '#') continue;
+        
+        // Extract tag name (everything before : or end of line)
+        std::string tag_name = line;
+        size_t colon_pos = line.find(':');
+        if (colon_pos != std::string::npos) {
+            tag_name = line.substr(0, colon_pos + 1);
+        }
+        
+        // Check if this tag is in the required list
+        bool tag_allowed = false;
+        for (const auto& required_tag : required_tags) {
+            if (tag_name.find(required_tag) == 0) {
+                tag_allowed = true;
+                break;
+            }
+        }
+        
+        if (!tag_allowed) {
+            if (log_callback) {
+                log_callback(L"[TS_VALIDATION] Found extra tag not allowed: " + Utf8ToWide(tag_name));
+            }
+            return false;
+        }
+    }
+    
+    if (log_callback) {
+        log_callback(L"[TS_VALIDATION] Playlist validation passed - only required metadata present");
+    }
+    return true;
+}
+
 std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::string& playlist_content, const std::wstring& base_url) {
     std::vector<std::wstring> segment_urls;
+    
+    // Validate playlist has required metadata before processing
+    if (!ValidatePlaylistMetadata(playlist_content, log_callback_)) {
+        if (log_callback_) {
+            log_callback_(L"[TS_VALIDATION] Playlist validation failed - skipping this playlist");
+        }
+        return segment_urls; // Return empty vector
+    }
     
     std::istringstream stream(playlist_content);
     std::string line;
     
     while (std::getline(stream, line)) {
-        // Remove trailing whitespace
-        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
-            line.pop_back();
-        }
+        if (line.empty()) continue;
         
-        if (line.empty() || line[0] == '#') {
-            continue; // Skip empty lines and comments
+        if (line[0] == '#') {
+            // Skip all header/tag lines
+            continue;
         }
         
         // This is a segment URL - convert to wide string and join with base URL
@@ -920,6 +988,7 @@ std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::str
     }
     
     return segment_urls;
+
 }
 
 void TransportStreamRouter::InsertPCR(TSPacket& packet, uint64_t pcr_value) {

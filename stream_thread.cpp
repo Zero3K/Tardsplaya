@@ -1,6 +1,7 @@
 #include "stream_thread.h"
 #include "stream_pipe.h"
 #include "tsduck_transport_router.h"
+#include "stream_resource_manager.h"
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
@@ -18,9 +19,23 @@ std::thread StartStreamThread(
 ) {
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
+        // Calculate adaptive buffer size for multiple streams to prevent frame drops
+        auto& resource_manager = StreamResourceManager::getInstance();
+        int active_streams = resource_manager.GetActiveStreamCount();
+        
+        // Base calculation: segments * 1000 packets per segment
+        size_t base_buffer_packets = static_cast<size_t>(buffer_segments * 1000);
+        
+        // Scale buffer up for multiple streams to maintain quality
+        if (active_streams > 1) {
+            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 1.5); // 50% larger for multiple streams
+        }
+        if (active_streams > 3) {
+            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 2.0); // Double for many streams
+        }
+        
         return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
-                                         static_cast<size_t>(buffer_segments * 1000), // Convert segments to packets
-                                         channel_name, main_window, tab_index);
+                                         base_buffer_packets, channel_name, main_window, tab_index);
     }
     
     // Use traditional HLS streaming

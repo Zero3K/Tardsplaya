@@ -3,6 +3,7 @@
 #include "twitch_api.h"
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
+#include "stream_resource_manager.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -50,9 +51,9 @@ std::wstring ExtractPath(const std::wstring& url) {
 // Global stream tracking for multi-stream debugging
 static std::atomic<int> g_active_streams(0);
 
-// Generate a simple text message for ad skip events
-static std::string GenerateAdSkipMessage() {
-    return "[AD REPLACED] Commercial break - displaying placeholder content with proper sequencing";
+// Generate a simple text message for events
+static std::string GenerateMessage() {
+    return "[STREAM] Stream content with proper sequencing";
 }
 
 static std::mutex g_stream_mutex;
@@ -395,17 +396,7 @@ static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
     return base.substr(0, pos + 1) + rel;
 }
 
-// Ad block state tracking for preventing infinite ad segment skipping
-struct AdBlockState {
-    bool in_scte35_out = false;
-    bool skip_next_segment = false; 
-    int consecutive_skipped_segments = 0;
-    std::chrono::steady_clock::time_point scte35_start_time;
-    bool just_started_ad_block = false; // Flag to indicate we just started an ad block
-    bool just_exited_ad_block = false; // Flag to indicate we just exited an ad block
-    static const int MAX_CONSECUTIVE_SKIPPED_SEGMENTS = 15; // ~30 seconds for 2-second segments
-    static constexpr std::chrono::seconds MAX_AD_BLOCK_DURATION{60}; // 60 seconds max ad block
-};
+
 
 // TSDuck-enhanced segment analyzer for improved buffering and timing
 static std::pair<int, std::chrono::milliseconds> AnalyzePlaylistWithTSDuck(const std::string& playlist) {
@@ -418,41 +409,78 @@ static std::pair<int, std::chrono::milliseconds> AnalyzePlaylistWithTSDuck(const
     // Get TSDuck's recommendations for optimal buffering
     int optimal_buffer_segments = tsduck_parser.GetOptimalBufferSegments();
     std::chrono::milliseconds playlist_duration = tsduck_parser.GetPlaylistDuration();
-    bool has_ads = tsduck_parser.HasAdMarkers();
-    
-    // When ads are detected, increase buffer size to account for placeholder segments
-    // Placeholder segments provide minimal content but consume buffer slots
-    if (has_ads) {
-        // Increase buffer by 50% when ads are present to compensate for timing disruption
-        optimal_buffer_segments = static_cast<int>(optimal_buffer_segments * 1.5);
-        
-        // Ensure minimum buffer size for ad-heavy content
-        optimal_buffer_segments = std::max(optimal_buffer_segments, 10);
-        
-        AddDebugLog(L"[TSDUCK] Ad content detected - increased buffer recommendation to " + 
-                   std::to_wstring(optimal_buffer_segments) + L" segments for better ad handling");
-    }
     
     AddDebugLog(L"[TSDUCK] Analysis: optimal_buffer=" + std::to_wstring(optimal_buffer_segments) + 
                L", playlist_duration=" + std::to_wstring(playlist_duration.count()) + L"ms" +
-               L", has_ads=" + std::to_wstring(has_ads) +
                L", live=" + std::to_wstring(tsduck_parser.IsLiveStream()));
     
     return std::make_pair(optimal_buffer_segments, playlist_duration);
 }
 
-// Parse media segment URLs from m3u8 playlist, skipping ad segments entirely
+// Validate m3u8 playlist has required metadata tags for proper processing
+static bool ValidatePlaylistMetadata(const std::string& playlist) {
+    // Required tags for high-quality Twitch playlists
+    std::vector<std::string> required_tags = {
+        "#EXTM3U",
+        "#EXT-X-VERSION",
+        "#EXT-X-TARGETDURATION",
+        "#EXT-X-MEDIA-SEQUENCE",
+        "#EXT-X-TWITCH-LIVE-SEQUENCE",
+        "#EXT-X-TWITCH-ELAPSED-SECS",
+        "#EXT-X-TWITCH-TOTAL-SECS:",
+        "#EXT-X-DATERANGE",
+        "#EXT-X-PROGRAM-DATE-TIME",
+        "#EXTINF"
+    };
+    
+    // First check that all required tags are present
+    for (const auto& tag : required_tags) {
+        if (playlist.find(tag) == std::string::npos) {
+            AddDebugLog(L"[VALIDATION] Missing required tag: " + Utf8ToWide(tag));
+            return false;
+        }
+    }
+    
+    // Then check that no extra tags are present
+    std::istringstream ss(playlist);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.empty()) continue;
+        
+        // Skip non-tag lines
+        if (line[0] != '#') continue;
+        
+        // Extract tag name (everything before : or end of line)
+        std::string tag_name = line;
+        size_t colon_pos = line.find(':');
+        if (colon_pos != std::string::npos) {
+            tag_name = line.substr(0, colon_pos + 1);
+        }
+        
+        // Check if this tag is in the required list
+        bool tag_allowed = false;
+        for (const auto& required_tag : required_tags) {
+            if (tag_name.find(required_tag) == 0) {
+                tag_allowed = true;
+                break;
+            }
+        }
+        
+        if (!tag_allowed) {
+            AddDebugLog(L"[VALIDATION] Found extra tag not allowed: " + Utf8ToWide(tag_name));
+            return false;
+        }
+    }
+    
+    AddDebugLog(L"[VALIDATION] Playlist validation passed - only required metadata present");
+    return true;
+}
+
+// Parse media segment URLs from m3u8 playlist
 // Returns pair of (segments, should_clear_buffer)
 static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist) {
-    static AdBlockState ad_state; // Persistent state across playlist refreshes
     std::vector<std::wstring> segs;
     bool should_clear_buffer = false;
-    
-    // Don't clear buffer when exiting ad blocks to maintain stream continuity
-    if (ad_state.just_exited_ad_block) {
-        ad_state.just_exited_ad_block = false; // Reset flag
-        AddDebugLog(L"[AD_SKIP] Just exited ad block, continuing with existing buffer to maintain continuity");
-    }
     
     std::istringstream ss(playlist);
     std::string line;
@@ -461,117 +489,18 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
         if (line.empty()) continue;
         
         if (line[0] == '#') {
-            // SCTE-35 ad marker detection (start of ad block)
-            if (line.find("#EXT-X-SCTE35-OUT") == 0) {
-                if (!ad_state.in_scte35_out) {
-                    // Just entering ad block - don't clear buffer to maintain continuity
-                    AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, entering ad block - maintaining buffer continuity");
-                } else {
-                    AddDebugLog(L"[AD_SKIP] Found SCTE35-OUT marker, already in ad block");
-                }
-                ad_state.in_scte35_out = true;
-                ad_state.skip_next_segment = true;
-                ad_state.consecutive_skipped_segments = 0;
-                ad_state.scte35_start_time = std::chrono::steady_clock::now();
-                continue;
-            }
-            // SCTE-35 ad marker detection (end of ad block)
-            else if (line.find("#EXT-X-SCTE35-IN") == 0) {
-                ad_state.in_scte35_out = false;
-                ad_state.consecutive_skipped_segments = 0;
-                ad_state.just_exited_ad_block = true;
-                // Don't clear buffer to maintain stream continuity
-                AddDebugLog(L"[AD_SKIP] Found SCTE35-IN marker, exiting ad block - maintaining buffer continuity");
-                continue;
-            }
-            // Stitched ad segments (single segment ads)
-            else if (line.find("stitched-ad") != std::string::npos) {
-                ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_SKIP] Found stitched-ad marker");
-            }
-            // EXTINF tags with specific durations that indicate ads (2.001, 2.002 seconds)
-            else if (line.find("#EXTINF:2.00") == 0 && 
-                     (line.find("2.001") != std::string::npos || 
-                      line.find("2.002") != std::string::npos)) {
-                ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_SKIP] Found ad-duration EXTINF marker");
-            }
-            // DATERANGE markers for stitched ads
-            else if (line.find("#EXT-X-DATERANGE:ID=\"stitched-ad") == 0) {
-                ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_SKIP] Found stitched-ad DATERANGE marker");
-            }
-            // General stitched content detection
-            else if (line.find("stitched") != std::string::npos ||
-                     line.find("STITCHED") != std::string::npos) {
-                ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_SKIP] Found general stitched content marker");
-            }
-            // MIDROLL ad markers
-            else if (line.find("EXT-X-DATERANGE") != std::string::npos && 
-                     (line.find("MIDROLL") != std::string::npos ||
-                      line.find("midroll") != std::string::npos)) {
-                ad_state.skip_next_segment = true;
-                AddDebugLog(L"[AD_SKIP] Found MIDROLL ad marker");
-            }
+            // Skip all header/tag lines
             continue;
         }
         
-        // This is a segment URL
-        bool should_skip_ad_segment = false;
-        
-        // Check if we should skip this segment as an ad
-        if (ad_state.skip_next_segment) {
-            // Single ad segment (stitched ads, duration-based ads, etc.)
-            should_skip_ad_segment = true;
-            ad_state.skip_next_segment = false; // Reset after processing one segment
-        } else if (ad_state.in_scte35_out) {
-            // SCTE35 ad block - check safety limits to prevent infinite ad segment skipping
-            auto current_time = std::chrono::steady_clock::now();
-            auto ad_block_duration = current_time - ad_state.scte35_start_time;
-            
-            if (ad_state.consecutive_skipped_segments >= AdBlockState::MAX_CONSECUTIVE_SKIPPED_SEGMENTS) {
-                AddDebugLog(L"[AD_SKIP] Safety limit reached: " + std::to_wstring(ad_state.consecutive_skipped_segments) + 
-                           L" consecutive skipped segments, exiting ad block");
-                ad_state.in_scte35_out = false;
-                ad_state.consecutive_skipped_segments = 0;
-                ad_state.just_exited_ad_block = true;
-            } else if (ad_block_duration >= AdBlockState::MAX_AD_BLOCK_DURATION) {
-                AddDebugLog(L"[AD_SKIP] Safety timeout reached: " + 
-                           std::to_wstring(std::chrono::duration_cast<std::chrono::seconds>(ad_block_duration).count()) + 
-                           L" seconds in ad block, exiting");
-                ad_state.in_scte35_out = false;
-                ad_state.consecutive_skipped_segments = 0;
-                ad_state.just_exited_ad_block = true;
-            } else {
-                should_skip_ad_segment = true;
-            }
-        }
-        
-        if (should_skip_ad_segment) {
-            // Ad segment detected - replace with minimal placeholder to maintain stream timing
-            AddDebugLog(L"[AD_SKIP] Replacing ad segment with placeholder (replaced #" + 
-                       std::to_wstring(ad_state.consecutive_skipped_segments + 1) + L")");
-            
-            // Use a placeholder marker that will generate minimal content
-            segs.push_back(L"__AD_PLACEHOLDER__");
-            ad_state.consecutive_skipped_segments++;
-            continue;
-        }
-        
-        // Normal content segment - reset skip counter
-        if (ad_state.consecutive_skipped_segments > 0) {
-            AddDebugLog(L"[AD_SKIP] Returning to normal content after replacing " + 
-                       std::to_wstring(ad_state.consecutive_skipped_segments) + L" ad segments with placeholders");
-            ad_state.consecutive_skipped_segments = 0;
-        }
-        
-        // Should be a .ts or .aac segment
+        // This is a segment URL - add it directly
         std::wstring wline(line.begin(), line.end());
         segs.push_back(wline);
     }
+    
     return std::make_pair(segs, should_clear_buffer);
 }
+
 
 // Returns true if process handle is still alive
 static bool ProcessStillRunning(HANDLE hProcess, const std::wstring& debug_context = L"", DWORD pid = 0) {
@@ -786,9 +715,11 @@ bool BufferAndPipeStreamToPlayer(
     saAttr.bInheritHandle = TRUE;
     saAttr.lpSecurityDescriptor = NULL;
     
-    // Create pipe with larger buffer size to help prevent slow writes
-    const DWORD PIPE_BUFFER_SIZE = 1024 * 1024; // 1MB buffer to handle slow writes
-    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, PIPE_BUFFER_SIZE)) {
+    // Create pipe with dynamic buffer size based on active streams to prevent frame drops
+    auto& resource_manager = StreamResourceManager::getInstance();
+    DWORD pipe_buffer_size = resource_manager.GetRecommendedPipeBuffer();
+    
+    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, pipe_buffer_size)) {
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create pipe for " + channel_name);
         std::lock_guard<std::mutex> lock(g_stream_mutex);
         --g_active_streams;
@@ -854,17 +785,21 @@ bool BufferAndPipeStreamToPlayer(
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Process created successfully for " + channel_name + 
                L", PID=" + std::to_wstring(pi.dwProcessId) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
     
-    // Set process priority for better multi-stream performance
-    int stream_count = g_active_streams.load(); // Update count before setting priority
-    if (stream_count > 1) {
-        // Lower priority for additional streams to reduce conflicts
-        SetPriorityClass(pi.hProcess, BELOW_NORMAL_PRIORITY_CLASS);
-        AddDebugLog(L"[IPC] Set BELOW_NORMAL priority for stream #" + std::to_wstring(stream_count) + L" (" + channel_name + L")");
-    } else {
-        // Normal priority for first stream
-        SetPriorityClass(pi.hProcess, NORMAL_PRIORITY_CLASS);
-        AddDebugLog(L"[IPC] Set NORMAL priority for first stream (" + channel_name + L")");
+    // Set process priority for better multi-stream performance using resource manager recommendations
+    DWORD recommended_priority = resource_manager.GetRecommendedProcessPriority();
+    
+    SetPriorityClass(pi.hProcess, recommended_priority);
+    
+    std::wstring priority_name;
+    switch (recommended_priority) {
+        case HIGH_PRIORITY_CLASS: priority_name = L"HIGH"; break;
+        case ABOVE_NORMAL_PRIORITY_CLASS: priority_name = L"ABOVE_NORMAL"; break;
+        case NORMAL_PRIORITY_CLASS: priority_name = L"NORMAL"; break;
+        default: priority_name = L"UNKNOWN"; break;
     }
+    
+    AddDebugLog(L"[IPC] Set " + priority_name + L" priority for stream (" + channel_name + L"), active streams: " + 
+               std::to_wstring(resource_manager.GetActiveStreamCount()));
     
     // Verify process is actually running immediately after creation
     std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Brief delay for process startup
@@ -974,6 +909,13 @@ bool BufferAndPipeStreamToPlayer(
                 break;
             }
 
+            // Validate playlist has required metadata before processing
+            if (!ValidatePlaylistMetadata(playlist)) {
+                AddDebugLog(L"[VALIDATION] Playlist validation failed - skipping this playlist update for " + channel_name);
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
+
             auto parse_result = ParseSegments(playlist);
             auto segments = parse_result.first;
             bool should_clear_buffer = parse_result.second;
@@ -982,7 +924,7 @@ bool BufferAndPipeStreamToPlayer(
             static int tsduck_recommended_buffer = buffer_segments;
             static bool first_analysis_done = false;
             
-            // Run TSDuck analysis on every playlist fetch for optimal responsiveness, especially during ad events
+            // Run TSDuck analysis on every playlist fetch for optimal responsiveness
             auto tsduck_analysis = AnalyzePlaylistWithTSDuck(playlist);
             int new_tsduck_recommendation = tsduck_analysis.first;
             
@@ -1045,38 +987,7 @@ bool BufferAndPipeStreamToPlayer(
                 //     AddDebugLog(L"[DOWNLOAD] Breaking segment loop - media player process died for " + channel_name);
                 //     break;
                 
-                // Handle ad placeholder markers by generating minimal content
-                if (seg == L"__AD_PLACEHOLDER__") {
-                    AddDebugLog(L"[AD_SKIP] Generating minimal placeholder content for ad segment");
-                    
-                    // Generate larger placeholder content to better match segment timing
-                    // Use ~50KB to slow down consumption and maintain buffer stability
-                    std::vector<char> placeholder_data(50 * 1024, 0); // 50KB of null data
-                    
-                    // Temporarily boost buffer target when processing ad placeholders, but keep it reasonable
-                    // Don't override TSDuck recommendations with excessive buffering
-                    int current_target = dynamic_target_buffer.load();
-                    int tsduck_target = effective_buffer_size > 0 ? effective_buffer_size : current_target;
-                    int moderate_boost = std::min(tsduck_target + 5, 25); // Only add 5 segments, max 25 total
-                    
-                    if (moderate_boost > current_target) {
-                        dynamic_target_buffer.store(moderate_boost);
-                        dynamic_max_buffer.store(std::min(moderate_boost * 2, 35)); // Cap max buffer at 35
-                        AddDebugLog(L"[AD_SKIP] Moderate buffer boost: target=" + std::to_wstring(moderate_boost) + 
-                                   L" (was " + std::to_wstring(current_target) + L"), max=" + 
-                                   std::to_wstring(dynamic_max_buffer.load()) + L" for " + channel_name);
-                    }
-                    
-                    // Add to buffer
-                    {
-                        std::lock_guard<std::mutex> lock(buffer_mutex);
-                        buffer_queue.push(std::move(placeholder_data));
-                    }
-                    
-                    new_segments_downloaded++;
-                    AddDebugLog(L"[AD_SKIP] Placeholder content added to buffer for " + channel_name);
-                    continue;
-                }
+
                 
                 // Skip segments that aren't regular .ts/.aac files
                 if (seg.find(L"http") != 0) {
@@ -1095,7 +1006,7 @@ bool BufferAndPipeStreamToPlayer(
                 }
                 
                 bool urgent_bypass = urgent_download_needed.load();
-                if (current_buffer_size >= dynamic_max_buffer.load() && !urgent_bypass) {
+                if (current_buffer_size >= static_cast<size_t>(dynamic_max_buffer.load()) && !urgent_bypass) {
                     auto current_time = std::chrono::steady_clock::now();
                     
                     // Start timing if this is the first time buffer is full
@@ -1177,20 +1088,7 @@ bool BufferAndPipeStreamToPlayer(
             
             AddDebugLog(L"[DOWNLOAD] Segment batch complete - downloaded " + std::to_wstring(new_segments_downloaded) + 
                        L" new segments for " + channel_name);
-            
-            // After processing segments, restore buffer to TSDuck recommendations if overridden by ad handling
-            if (effective_buffer_size > 0) {
-                int current_target = dynamic_target_buffer.load();
-                int tsduck_target = std::max(effective_buffer_size, 10);
-                int tsduck_max = std::min(tsduck_target * 2, 30);
-                
-                if (current_target > tsduck_target + 2) { // Only restore if significantly inflated
-                    dynamic_target_buffer.store(tsduck_target);
-                    dynamic_max_buffer.store(tsduck_max);
-                    AddDebugLog(L"[TSDUCK] Restored buffer to recommended size: target=" + std::to_wstring(tsduck_target) + 
-                               L" (was " + std::to_wstring(current_target) + L"), max=" + std::to_wstring(tsduck_max) + L" for " + channel_name);
-                }
-            }
+
             
             // Poll playlist more frequently for live streams or when urgent download is needed
             urgent_needed = urgent_download_needed.load();
@@ -1263,7 +1161,7 @@ bool BufferAndPipeStreamToPlayer(
             
             // Wait for initial buffer before starting - increased for stability
             if (!started) {
-                if (buffer_size >= dynamic_target_buffer.load()) {
+                if (buffer_size >= static_cast<size_t>(dynamic_target_buffer.load())) {
                     started = true;
                     AddDebugLog(L"[FEEDER] Initial buffer ready (" + 
                                std::to_wstring(buffer_size) + L" segments), starting IPC feed for " + channel_name);

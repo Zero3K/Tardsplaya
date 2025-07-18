@@ -44,7 +44,7 @@ namespace tsduck_transport {
     // Transport Stream buffer for smooth re-routing
     class TSBuffer {
     public:
-        TSBuffer(size_t max_packets = 10000); // ~1.8MB buffer for smooth streaming
+        TSBuffer(size_t max_packets = 25000); // ~4.7MB buffer for smooth multi-stream streaming
         
         // Add TS packet to buffer
         bool AddPacket(const TSPacket& packet);
@@ -114,7 +114,7 @@ namespace tsduck_transport {
         struct RouterConfig {
             std::wstring player_path = L"mpv.exe";
             std::wstring player_args = L"-";  // Read from stdin
-            size_t buffer_size_packets = 5000;  // ~940KB buffer
+            size_t buffer_size_packets = 15000;  // ~2.8MB buffer for reduced frame drops
             bool enable_adaptation_field = true;
             bool enable_pcr_insertion = true;
             std::chrono::milliseconds pcr_interval{40}; // PCR every 40ms

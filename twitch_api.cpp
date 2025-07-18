@@ -181,18 +181,18 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
     // Try to parse the JSON response
     try {
         JsonValue root = parse_json(body);
-        if (root.type == JsonValue::Object) {
+        if (root.type == JsonValue::Type::Object) {
             // Check for errors first
             JsonValue errors = root["errors"];
-            if (errors.type == JsonValue::Array) {
+            if (errors.type == JsonValue::Type::Array) {
                 AddLog(L"GraphQL response contains errors");
                 return L""; // GraphQL errors present
             }
             
             JsonValue data = root["data"];
-            if (data.type == JsonValue::Object) {
+            if (data.type == JsonValue::Type::Object) {
                 JsonValue token_obj = data["streamPlaybackAccessToken"];
-                if (token_obj.type == JsonValue::Object) {
+                if (token_obj.type == JsonValue::Type::Object) {
                     std::string sig = token_obj["signature"].as_str();
                     std::string token = token_obj["value"].as_str();
                     
@@ -205,13 +205,13 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
                     } else {
                         AddLog(L"GraphQL response missing signature or token value");
                     }
-                } else if (token_obj.type == JsonValue::Null) {
+                } else if (token_obj.type == JsonValue::Type::Null) {
                     AddLog(L"Channel '" + channel + L"' is offline or does not exist");
                     return L"OFFLINE"; // Special return value to indicate channel is offline
                 } else {
                     AddLog(L"GraphQL response missing streamPlaybackAccessToken object");
                 }
-            } else if (data.type == JsonValue::Null) {
+            } else if (data.type == JsonValue::Type::Null) {
                 AddLog(L"GraphQL response data is null");
             } else {
                 AddLog(L"GraphQL response missing data object");
