@@ -921,16 +921,10 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
-    // Check if TSDuck transport stream mode is enabled
-    HWND hTSDuckModeCheck = GetDlgItem(tab.hChild, IDC_TSDUCK_MODE);
-    bool tsduckMode = (SendMessage(hTSDuckModeCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    StreamingMode mode = tsduckMode ? StreamingMode::TRANSPORT_STREAM : StreamingMode::HLS_SEGMENTS;
+    // TSDuck TS Mode is now the default streaming mode
+    StreamingMode mode = StreamingMode::TRANSPORT_STREAM;
     
-    if (tsduckMode) {
-        AddLog(L"[TS_MODE] Starting TSDuck transport stream routing for " + tab.channel + L" (" + standardQuality + L")");
-    } else {
-        AddLog(L"[HLS_MODE] Starting traditional HLS segment streaming for " + tab.channel + L" (" + standardQuality + L")");
-    }
+    AddLog(L"[TS_MODE] Starting TSDuck transport stream routing for " + tab.channel + L" (" + standardQuality + L")");
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -1061,10 +1055,7 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
     
-    // TSDuck transport stream mode checkbox
-    HWND hTSDuckMode = CreateWindowEx(0, L"BUTTON", L"TSDuck TS Mode", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 280, 130, 120, 18, hwnd, (HMENU)IDC_TSDUCK_MODE, g_hInst, nullptr);
-    SendMessage(hTSDuckMode, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-    SendMessage(hTSDuckMode, BM_SETCHECK, BST_UNCHECKED, 0); // Default to HLS mode
+
 
     tab.hChild = hwnd;
     tab.hQualities = hQualList;

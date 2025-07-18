@@ -25,7 +25,7 @@ This version includes **TSDuck-inspired HLS processing** for improved streaming 
 **Transport Stream Router** - Complete HLS to MPEG Transport Stream conversion:
 
 - **Stream Re-routing**: Routes HLS streams through transport stream format to media players
-- **Built-in Integration**: Available as checkbox option in the main interface
+- **Built-in by Default**: TSDuck TS Mode is now the standard streaming method
 - **Smart Buffering**: Packet-level buffering (~5000 packets default, ~940KB) for smoother playback
 - **PAT/PMT Generation**: Proper MPEG-TS structure with Program Association and Program Map tables
 - **PCR Insertion**: Program Clock Reference timing for better synchronization
@@ -58,15 +58,17 @@ The integration works transparently:
 3. **Dynamic**: Buffer sizes adjust automatically based on content
 4. **NEW**: Optional transport stream re-routing for professional media players
 
-### TSDuck Transport Stream Mode
+### TSDuck Transport Stream Mode (Default)
 
-Enable "TSDuck TS Mode" in any stream tab to use transport stream re-routing:
+**Default Streaming Mode**: TSDuck TS Mode is now the standard streaming method:
 
 - **Automatic Conversion**: HLS segments → MPEG Transport Stream packets
 - **Professional Format**: Standard broadcast-quality TS format
 - **Enhanced Buffering**: Packet-level buffering instead of segment buffering  
 - **Better Compatibility**: Works with professional media players expecting TS format
 - **Reduced Latency**: Continuous stream instead of segment-based delivery
+
+TSDuck TS Mode provides superior performance and compatibility compared to traditional HLS segment streaming.
 
 ## TLS Client Integration
 

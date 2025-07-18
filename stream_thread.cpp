@@ -41,7 +41,7 @@ std::thread StartStreamThread(
     // Use traditional HLS streaming
     return std::thread([=, &cancel_token]() mutable {
         if (log_callback)
-            log_callback(L"Streaming thread started (HLS mode).");
+            log_callback(L"Streaming thread started (HLS fallback mode).");
         
         AddDebugLog(L"StartStreamThread: Channel=" + channel_name + 
                    L", Tab=" + std::to_wstring(tab_index) + 
