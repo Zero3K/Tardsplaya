@@ -225,18 +225,29 @@ DWORD StreamResourceManager::GetRecommendedStartDelay() const {
 DWORD StreamResourceManager::GetRecommendedPipeBuffer() const {
     int active = active_streams_.load();
     
-    // For multi-stream scenarios, use larger buffers to reduce pipe congestion
-    DWORD base_size = 65536;  // 64KB
-    if (active > 2) {
-        base_size = 131072;   // 128KB when multiple streams are active
+    // For multi-stream scenarios, use larger buffers to reduce pipe congestion and frame drops
+    DWORD base_size = 262144;  // 256KB baseline for smooth single stream
+    if (active > 1) {
+        base_size = 524288;    // 512KB when multiple streams are active to prevent frame drops
+    }
+    if (active > 3) {
+        base_size = 1048576;   // 1MB when many streams are active for optimal buffering
     }
     
     return base_size;
 }
 
 DWORD StreamResourceManager::GetRecommendedProcessPriority() const {
-    // Always use normal priority to avoid graphics rendering issues
-    return NORMAL_PRIORITY_CLASS;
+    int active = active_streams_.load();
+    
+    // Use higher priority for media processes to reduce frame drops
+    if (active == 1) {
+        return HIGH_PRIORITY_CLASS;        // Single stream gets high priority for best quality
+    } else if (active <= 3) {
+        return ABOVE_NORMAL_PRIORITY_CLASS; // Multiple streams get above normal priority
+    } else {
+        return NORMAL_PRIORITY_CLASS;      // Many streams use normal priority to avoid system issues
+    }
 }
 
 StreamResourceManager::~StreamResourceManager() {

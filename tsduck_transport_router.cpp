@@ -2,6 +2,7 @@
 #include "twitch_api.h"
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
+#include "stream_resource_manager.h"
 #define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
@@ -468,7 +469,20 @@ uint32_t HLSToTSConverter::CalculateCRC32(const uint8_t* data, size_t length) {
 
 // TransportStreamRouter implementation
 TransportStreamRouter::TransportStreamRouter() {
-    ts_buffer_ = std::make_unique<TSBuffer>(5000);
+    // Use dynamic buffer sizing based on system load
+    auto& resource_manager = StreamResourceManager::getInstance();
+    int active_streams = resource_manager.GetActiveStreamCount();
+    
+    // Scale buffer size based on active streams to prevent frame drops
+    size_t buffer_size = 15000; // Base size ~2.8MB
+    if (active_streams > 1) {
+        buffer_size = 25000; // ~4.7MB for multiple streams
+    }
+    if (active_streams > 3) {
+        buffer_size = 35000; // ~6.6MB for many streams
+    }
+    
+    ts_buffer_ = std::make_unique<TSBuffer>(buffer_size);
     hls_converter_ = std::make_unique<HLSToTSConverter>();
 }
 
@@ -609,16 +623,16 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Add to buffer with gentler flow control
-                    size_t buffer_high_watermark = current_config_.buffer_size_packets * 4 / 5; // 80% full
-                    size_t buffer_low_watermark = current_config_.buffer_size_packets / 5;      // 20% full
+                    // Add to buffer with improved flow control for multiple streams
+                    size_t buffer_high_watermark = current_config_.buffer_size_packets * 9 / 10; // 90% full for better buffering
+                    size_t buffer_low_watermark = current_config_.buffer_size_packets / 4;       // 25% full for faster recovery
                     
                     for (const auto& packet : ts_packets) {
                         if (!routing_active_ || cancel_token) break;
                         
-                        // Implement gentler flow control to prevent buffer overflow
+                        // Implement more aggressive flow control to maintain larger buffers and prevent frame drops
                         while (ts_buffer_->GetBufferedPackets() >= buffer_high_watermark && routing_active_ && !cancel_token) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(5)); // Less aggressive waiting
+                            std::this_thread::sleep_for(std::chrono::milliseconds(2)); // Faster response to buffer pressure
                         }
                         
                         ts_buffer_->AddPacket(packet);
@@ -717,9 +731,9 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             }
         }
         
-        // Get and send packets as they become available
+        // Get and send packets with reduced timeout for better responsiveness in multiple streams
         TSPacket packet;
-        if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(100))) {
+        if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(50))) { // Faster timeout for more responsive streaming
             if (!SendTSPacketToPlayer(player_stdin, packet)) {
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
@@ -775,9 +789,12 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
     
-    // Create pipe for stdin with moderate buffer for TS data
+    // Create pipe for stdin with larger buffer for TS data to prevent frame drops
     HANDLE stdin_read, stdin_write;
-    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 65536)) { // 64KB buffer for good balance
+    auto& resource_manager = StreamResourceManager::getInstance();
+    DWORD pipe_buffer_size = resource_manager.GetRecommendedPipeBuffer();
+    
+    if (!CreatePipe(&stdin_read, &stdin_write, &sa, pipe_buffer_size)) {
         if (log_callback_) {
             log_callback_(L"[TS_ROUTER] Failed to create pipe for media player");
         }
@@ -814,6 +831,23 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
         CloseHandle(stdin_read);
         CloseHandle(stdin_write);
         return false;
+    }
+    
+    // Set process priority for better multi-stream performance
+    auto& resource_manager = StreamResourceManager::getInstance();
+    DWORD recommended_priority = resource_manager.GetRecommendedProcessPriority();
+    SetPriorityClass(pi.hProcess, recommended_priority);
+    
+    if (log_callback_) {
+        std::wstring priority_name;
+        switch (recommended_priority) {
+            case HIGH_PRIORITY_CLASS: priority_name = L"HIGH"; break;
+            case ABOVE_NORMAL_PRIORITY_CLASS: priority_name = L"ABOVE_NORMAL"; break;
+            case NORMAL_PRIORITY_CLASS: priority_name = L"NORMAL"; break;
+            default: priority_name = L"UNKNOWN"; break;
+        }
+        log_callback_(L"[TS_ROUTER] Set " + priority_name + L" priority for media player, active streams: " + 
+                     std::to_wstring(resource_manager.GetActiveStreamCount()));
     }
     
     // Cleanup

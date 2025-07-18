@@ -3,6 +3,7 @@
 #include "twitch_api.h"
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
+#include "stream_resource_manager.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -714,9 +715,11 @@ bool BufferAndPipeStreamToPlayer(
     saAttr.bInheritHandle = TRUE;
     saAttr.lpSecurityDescriptor = NULL;
     
-    // Create pipe with larger buffer size to help prevent slow writes
-    const DWORD PIPE_BUFFER_SIZE = 1024 * 1024; // 1MB buffer to handle slow writes
-    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, PIPE_BUFFER_SIZE)) {
+    // Create pipe with dynamic buffer size based on active streams to prevent frame drops
+    auto& resource_manager = StreamResourceManager::getInstance();
+    DWORD pipe_buffer_size = resource_manager.GetRecommendedPipeBuffer();
+    
+    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, pipe_buffer_size)) {
         AddDebugLog(L"BufferAndPipeStreamToPlayer: Failed to create pipe for " + channel_name);
         std::lock_guard<std::mutex> lock(g_stream_mutex);
         --g_active_streams;
@@ -782,17 +785,22 @@ bool BufferAndPipeStreamToPlayer(
     AddDebugLog(L"BufferAndPipeStreamToPlayer: Process created successfully for " + channel_name + 
                L", PID=" + std::to_wstring(pi.dwProcessId) + L", Duration=" + std::to_wstring(duration.count()) + L"ms");
     
-    // Set process priority for better multi-stream performance
-    int stream_count = g_active_streams.load(); // Update count before setting priority
-    if (stream_count > 1) {
-        // Lower priority for additional streams to reduce conflicts
-        SetPriorityClass(pi.hProcess, BELOW_NORMAL_PRIORITY_CLASS);
-        AddDebugLog(L"[IPC] Set BELOW_NORMAL priority for stream #" + std::to_wstring(stream_count) + L" (" + channel_name + L")");
-    } else {
-        // Normal priority for first stream
-        SetPriorityClass(pi.hProcess, NORMAL_PRIORITY_CLASS);
-        AddDebugLog(L"[IPC] Set NORMAL priority for first stream (" + channel_name + L")");
+    // Set process priority for better multi-stream performance using resource manager recommendations
+    auto& resource_manager = StreamResourceManager::getInstance();
+    DWORD recommended_priority = resource_manager.GetRecommendedProcessPriority();
+    
+    SetPriorityClass(pi.hProcess, recommended_priority);
+    
+    std::wstring priority_name;
+    switch (recommended_priority) {
+        case HIGH_PRIORITY_CLASS: priority_name = L"HIGH"; break;
+        case ABOVE_NORMAL_PRIORITY_CLASS: priority_name = L"ABOVE_NORMAL"; break;
+        case NORMAL_PRIORITY_CLASS: priority_name = L"NORMAL"; break;
+        default: priority_name = L"UNKNOWN"; break;
     }
+    
+    AddDebugLog(L"[IPC] Set " + priority_name + L" priority for stream (" + channel_name + L"), active streams: " + 
+               std::to_wstring(resource_manager.GetActiveStreamCount()));
     
     // Verify process is actually running immediately after creation
     std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Brief delay for process startup
