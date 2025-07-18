@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <algorithm>
+#include <future>
 #include "resource.h"
 #include "json_minimal.h"
 #include "stream_thread.h"
@@ -1189,21 +1190,42 @@ void CloseAllTabs() {
     for (auto& s : g_streams) {
         if (s.isStreaming) {
             s.cancelToken = true;
+            s.userRequestedStop = true; // Ensure user stop is flagged for cleanup
         }
     }
     
-    // Give threads more time to clean up gracefully
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    // Give threads time to respond to cancellation, but don't block indefinitely
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     
-    // Force join all threads and close media players
+    // Use aggressive cleanup to prevent hanging indefinitely
     for (auto& s : g_streams) {
         if (s.streamThread.joinable()) {
-            // Try to join with a timeout, then force join
+            // Set a deadline for thread cleanup
+            auto cleanup_start = std::chrono::steady_clock::now();
+            const auto max_cleanup_time = std::chrono::seconds(3);
+            
+            // Try to join but don't wait forever
             try {
-                s.streamThread.join();
+                // Use a future to make the join operation timeout-able
+                auto join_future = std::async(std::launch::async, [&s]() {
+                    if (s.streamThread.joinable()) {
+                        s.streamThread.join();
+                    }
+                });
+                
+                // Wait for the join to complete or timeout
+                auto status = join_future.wait_for(max_cleanup_time);
+                if (status == std::future_status::timeout) {
+                    // Thread didn't finish in time, detach it
+                    if (s.streamThread.joinable()) {
+                        s.streamThread.detach();
+                    }
+                }
             } catch (...) {
-                // If join fails, detach the thread
-                s.streamThread.detach();
+                // If anything goes wrong, detach the thread
+                if (s.streamThread.joinable()) {
+                    s.streamThread.detach();
+                }
             }
         }
         

@@ -595,7 +595,10 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to fetch playlist (attempt " + std::to_wstring(consecutive_failures) + L"/" + std::to_wstring(max_consecutive_failures) + L")");
                 }
-                std::this_thread::sleep_for(std::chrono::seconds(2));
+                // Wait before retry, but check cancellation more frequently
+                for (int i = 0; i < 20 && routing_active_ && !cancel_token; ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 2 seconds, but check every 100ms
+                }
                 continue;
             }
             
@@ -617,7 +620,10 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] No segments found in playlist");
                 }
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                // Wait before retry, but check cancellation more frequently
+                for (int i = 0; i < 10 && routing_active_ && !cancel_token; ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 1 second, but check every 100ms
+                }
                 continue;
             }
             
@@ -690,8 +696,10 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 log_callback_(L"[TS_ROUTER] Batch complete: " + std::to_wstring(segments_processed) + L" new segments processed");
             }
             
-            // Wait before next playlist refresh
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            // Wait before next playlist refresh, but check cancellation more frequently
+            for (int i = 0; i < 20 && routing_active_ && !cancel_token; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 2 seconds, but check every 100ms
+            }
             
         } catch (const std::exception& e) {
             consecutive_failures++;
@@ -699,7 +707,10 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 std::string error_msg = e.what();
                 log_callback_(L"[TS_ROUTER] HLS fetcher error: " + std::wstring(error_msg.begin(), error_msg.end()));
             }
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            // Wait before retry, but check cancellation more frequently  
+            for (int i = 0; i < 10 && routing_active_ && !cancel_token; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 1 second, but check every 100ms
+            }
         }
     }
     
