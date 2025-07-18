@@ -60,6 +60,15 @@ namespace tsduck_transport {
         // Clear buffer (for discontinuities)
         void Clear();
         
+        // Reset buffer state for new stream
+        void Reset();
+        
+        // Signal end of stream (no more packets will be added)
+        void SignalEndOfStream();
+        
+        // Check if producer is still active
+        bool IsProducerActive() const { return producer_active_.load(); }
+        
     private:
         mutable std::mutex mutex_;
         std::queue<TSPacket> packet_queue_;
