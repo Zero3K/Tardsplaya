@@ -948,8 +948,6 @@ bool BufferAndNamedPipeStreamToPlayer(
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
         }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
         
         AddDebugLog(L"[FEEDER-NAMEDPIPE] Feeder thread ending for " + channel_name);
     });
