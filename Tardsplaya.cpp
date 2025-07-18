@@ -1498,7 +1498,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                 AddLog(L"Media player closed for " + tab.channel + L" - stopping stream");
                                 
                                 // Simulate Stop button click to follow exact same code path as manual click
-                                PostMessage(tab.hStopBtn, BM_CLICK, 0, 0);
+                                PostMessage(tab.hChild, WM_COMMAND, MAKEWPARAM(IDC_STOP, BN_CLICKED), (LPARAM)tab.hStopBtn);
                             }
                         } else {
                             // Failed to get exit code - might be dead process
@@ -1509,7 +1509,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                 AddLog(L"Media player connection lost for " + tab.channel + L" - stopping stream");
                                 
                                 // Simulate Stop button click to follow exact same code path as manual click
-                                PostMessage(tab.hStopBtn, BM_CLICK, 0, 0);
+                                PostMessage(tab.hChild, WM_COMMAND, MAKEWPARAM(IDC_STOP, BN_CLICKED), (LPARAM)tab.hStopBtn);
                             }
                         }
                     }
