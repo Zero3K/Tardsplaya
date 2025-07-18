@@ -809,33 +809,26 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     }
     std::transform(player_name.begin(), player_name.end(), player_name.begin(), ::towlower);
     
-    // Configure player-specific arguments for transport stream input
-    if (player_name.find(L"mpv") != std::wstring::npos) {
-        // MPV specific arguments for transport stream - respect natural timing
-        cmd_line = config.player_path + L" --demuxer=mpegts --cache-secs=1 --no-resume-playback --";
+    // Use simple stdin reading approach for all players, similar to regular HLS mode
+    if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
+        // MPC-HC: read from stdin
+        cmd_line = L"\"" + config.player_path + L"\" - /new /nofocus";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPV-specific TS arguments with natural timing");
-        }
-    }
-    else if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
-        // MPC-HC specific arguments for transport stream - simplified
-        cmd_line = config.player_path + L" /play /close \"-\"";
-        if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using MPC-HC arguments");
+            log_callback_(L"[TS_ROUTER] Using MPC-HC stdin arguments");
         }
     }
     else if (player_name.find(L"vlc") != std::wstring::npos) {
-        // VLC specific arguments for transport stream - simplified
-        cmd_line = config.player_path + L" --demux=ts --intf=dummy --play-and-exit --network-caching=500 -";
+        // VLC: read from stdin
+        cmd_line = L"\"" + config.player_path + L"\" - --intf dummy --no-one-instance";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using VLC TS arguments");
+            log_callback_(L"[TS_ROUTER] Using VLC stdin arguments");
         }
     }
     else {
-        // Generic player arguments (fallback)
-        cmd_line = config.player_path + L" " + config.player_args;
+        // Generic player (including MPV): read from stdin
+        cmd_line = L"\"" + config.player_path + L"\" -";
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Using generic player arguments");
+            log_callback_(L"[TS_ROUTER] Using generic stdin arguments");
         }
     }
     
