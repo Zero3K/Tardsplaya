@@ -846,6 +846,7 @@ bool TransportStreamRouter::SendTSPacketToPlayer(HANDLE stdin_handle, const TSPa
 bool TransportStreamRouter::FetchHLSSegment(const std::wstring& segment_url, std::vector<uint8_t>& data) {
     // Use binary HTTP download for proper segment data handling
     return HttpGetBinary(segment_url, data, &routing_active_);
+}
 
 std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::string& playlist_content) {
     std::vector<std::wstring> segment_urls;
