@@ -144,7 +144,7 @@ namespace tsduck_transport {
         BufferStats GetBufferStats() const;
         
         // Get player process handle for external monitoring
-        HANDLE GetPlayerProcessHandle() const { return this->player_process_handle_; }
+        HANDLE GetPlayerProcessHandle() const { return player_process_handle_; }
         
     private:
         std::unique_ptr<TSBuffer> ts_buffer_;
