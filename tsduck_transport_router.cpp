@@ -1,6 +1,7 @@
 #include "tsduck_transport_router.h"
 #include "twitch_api.h"
 #include "playlist_parser.h"
+#define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
 #include <iostream>
