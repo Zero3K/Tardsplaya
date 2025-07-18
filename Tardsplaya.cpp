@@ -1475,8 +1475,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             auto& tab = g_streams[tabIndex];
             AddDebugLog(L"WM_USER + 3: Stopping stream for dead player, channel=" + tab.channel);
             
-            // Stop the stream as if user clicked Stop button
-            StopStream(tab, true);
+            // Programmatically "click" the Stop button to trigger the same behavior
+            SendMessage(tab.hStopBtn, BM_CLICK, 0, 0);
             
             AddLog(L"Stream stopped (media player closed): " + tab.channel);
         } else {
