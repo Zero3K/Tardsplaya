@@ -790,8 +790,7 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     // Setup process info
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE; // Hide console window for cleaner experience
+    si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = stdin_read;
     si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
@@ -807,7 +806,7 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     
     // Launch process
     if (!CreateProcessW(nullptr, &cmd_line[0], nullptr, nullptr, TRUE, 
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                        CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB, nullptr, nullptr, &si, &pi)) {
         DWORD error = GetLastError();
         if (log_callback_) {
             log_callback_(L"[TS_ROUTER] Failed to launch player process, error: " + std::to_wstring(error));
