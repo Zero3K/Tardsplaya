@@ -469,6 +469,9 @@ uint32_t HLSToTSConverter::CalculateCRC32(const uint8_t* data, size_t length) {
 
 // TransportStreamRouter implementation
 TransportStreamRouter::TransportStreamRouter() {
+    // Initialize member variables
+    player_process_handle_ = INVALID_HANDLE_VALUE;
+    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();

@@ -157,7 +157,7 @@ namespace tsduck_transport {
         
         RouterConfig current_config_;
         std::function<void(const std::wstring&)> log_callback_;
-        HANDLE player_process_handle_{INVALID_HANDLE_VALUE};
+        HANDLE player_process_handle_;
         
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
