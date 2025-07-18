@@ -1,5 +1,6 @@
 #include "stream_thread.h"
 #include "stream_pipe.h"
+#include "tsduck_transport_router.h"
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
@@ -12,11 +13,20 @@ std::thread StartStreamThread(
     std::atomic<bool>* user_requested_stop,
     HWND main_window,
     size_t tab_index,
-    const std::wstring& selected_quality
+    const std::wstring& selected_quality,
+    StreamingMode mode
 ) {
+    // Check if transport stream mode is requested
+    if (mode == StreamingMode::TRANSPORT_STREAM) {
+        return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
+                                         static_cast<size_t>(buffer_segments * 1000), // Convert segments to packets
+                                         channel_name, main_window, tab_index);
+    }
+    
+    // Use traditional HLS streaming
     return std::thread([=, &cancel_token]() mutable {
         if (log_callback)
-            log_callback(L"Streaming thread started.");
+            log_callback(L"Streaming thread started (HLS mode).");
         
         AddDebugLog(L"StartStreamThread: Channel=" + channel_name + 
                    L", Tab=" + std::to_wstring(tab_index) + 
@@ -44,6 +54,104 @@ std::thread StartStreamThread(
                 }
             } else {
                 log_callback(L"Streaming failed or was interrupted.");
+            }
+        }
+    });
+}
+
+std::thread StartTransportStreamThread(
+    const std::wstring& player_path,
+    const std::wstring& playlist_url,
+    std::atomic<bool>& cancel_token,
+    std::function<void(const std::wstring&)> log_callback,
+    size_t buffer_packets,
+    const std::wstring& channel_name,
+    HWND main_window,
+    size_t tab_index
+) {
+    return std::thread([=, &cancel_token]() mutable {
+        if (log_callback)
+            log_callback(L"TSDuck transport stream thread started.");
+        
+        AddDebugLog(L"StartTransportStreamThread: Channel=" + channel_name + 
+                   L", Tab=" + std::to_wstring(tab_index) + 
+                   L", BufferPackets=" + std::to_wstring(buffer_packets));
+        
+        try {
+            // Create transport stream router
+            tsduck_transport::TransportStreamRouter router;
+            
+            // Configure router
+            tsduck_transport::TransportStreamRouter::RouterConfig config;
+            config.player_path = player_path;
+            config.player_args = L"-";  // Read from stdin
+            config.buffer_size_packets = buffer_packets;
+            config.enable_adaptation_field = true;
+            config.enable_pcr_insertion = true;
+            config.pcr_interval = std::chrono::milliseconds(40);
+            config.enable_pat_pmt_repetition = true;
+            config.pat_pmt_interval = std::chrono::milliseconds(100);
+            
+            if (log_callback) {
+                log_callback(L"[TS_MODE] Starting TSDuck transport stream routing");
+                log_callback(L"[TS_MODE] Buffer: " + std::to_wstring(buffer_packets) + L" packets (~" + 
+                            std::to_wstring((buffer_packets * 188) / 1024) + L"KB)");
+            }
+            
+            // Start routing
+            bool routing_started = router.StartRouting(playlist_url, config, cancel_token, log_callback);
+            
+            if (routing_started) {
+                if (log_callback) {
+                    log_callback(L"[TS_MODE] Transport stream routing active");
+                }
+                
+                // Monitor routing while active
+                while (router.IsRouting() && !cancel_token) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    
+                    // Optionally report buffer status
+                    auto stats = router.GetBufferStats();
+                    if (log_callback && stats.total_packets_processed % 1000 == 0) {
+                        log_callback(L"[TS_MODE] Buffer: " + std::to_wstring(stats.buffered_packets) + 
+                                   L" packets, Utilization: " + std::to_wstring(int(stats.buffer_utilization * 100)) + L"%");
+                    }
+                }
+                
+                if (log_callback) {
+                    log_callback(L"[TS_MODE] Transport stream routing completed");
+                }
+            } else {
+                if (log_callback) {
+                    log_callback(L"[TS_MODE] Failed to start transport stream routing");
+                }
+            }
+            
+        } catch (const std::exception& e) {
+            std::string error_msg = e.what();
+            if (log_callback) {
+                log_callback(L"[TS_MODE] Transport stream error: " + 
+                           std::wstring(error_msg.begin(), error_msg.end()));
+            }
+            AddDebugLog(L"StartTransportStreamThread: Exception: " + 
+                       std::wstring(error_msg.begin(), error_msg.end()));
+        }
+        
+        AddDebugLog(L"StartTransportStreamThread: Stream finished, Channel=" + channel_name + 
+                   L", Tab=" + std::to_wstring(tab_index));
+        
+        if (log_callback) {
+            bool user_stopped = cancel_token.load();
+            
+            if (user_stopped) {
+                log_callback(L"[TS_MODE] Transport stream stopped by user.");
+            } else {
+                log_callback(L"[TS_MODE] Transport stream ended normally.");
+                // Post auto-stop message for this specific tab
+                if (main_window && tab_index != SIZE_MAX) {
+                    AddDebugLog(L"StartTransportStreamThread: Posting auto-stop for tab " + std::to_wstring(tab_index));
+                    PostMessage(main_window, WM_USER + 2, (WPARAM)tab_index, 0);
+                }
             }
         }
     });

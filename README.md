@@ -20,11 +20,22 @@ This version includes **TSDuck-inspired HLS processing** for improved streaming 
 - **Enhanced Ad Detection**: Sophisticated SCTE-35 and pattern-based ad detection
 - **Optimized Timing**: Better segment timing for smoother playback
 
+### NEW: TSDuck Transport Stream Re-routing
+
+**Transport Stream Router** - Complete HLS to MPEG Transport Stream conversion:
+
+- **Stream Re-routing**: Routes HLS streams through transport stream format to media players
+- **Built-in Integration**: Available as checkbox option in the main interface
+- **Smart Buffering**: Packet-level buffering (~5000 packets default, ~940KB) for smoother playback
+- **PAT/PMT Generation**: Proper MPEG-TS structure with Program Association and Program Map tables
+- **PCR Insertion**: Program Clock Reference timing for better synchronization
+
 ### Technical Details
 
 The TSDuck integration includes:
 
 - `tsduck_hls_wrapper.h/cpp` - Lightweight TSDuck-inspired HLS parser
+- `tsduck_transport_router.h/cpp` - **NEW** Transport stream re-routing engine
 - Enhanced playlist analysis with precise duration calculations  
 - Dynamic buffer optimization based on stream characteristics
 - Advanced ad detection using multiple detection patterns
@@ -38,11 +49,24 @@ The TSDuck integration includes:
 | Ad Detection | Basic pattern matching | TSDuck-style multi-pattern analysis |
 | Timing Precision | Basic duration parsing | Millisecond-precise calculations |
 | Lag Reduction | Manual tuning | Automatic optimization |
+| **Stream Format** | **HLS segments only** | **HLS segments + Transport Stream routing** |
+| **Player Compatibility** | **Basic stdin piping** | **Professional TS format support** |
 
 The integration works transparently:
 1. **Primary**: TSDuck-enhanced parsing for optimal performance
 2. **Fallback**: Original parsing if TSDuck analysis fails
 3. **Dynamic**: Buffer sizes adjust automatically based on content
+4. **NEW**: Optional transport stream re-routing for professional media players
+
+### TSDuck Transport Stream Mode
+
+Enable "TSDuck TS Mode" in any stream tab to use transport stream re-routing:
+
+- **Automatic Conversion**: HLS segments → MPEG Transport Stream packets
+- **Professional Format**: Standard broadcast-quality TS format
+- **Enhanced Buffering**: Packet-level buffering instead of segment buffering  
+- **Better Compatibility**: Works with professional media players expecting TS format
+- **Reduced Latency**: Continuous stream instead of segment-based delivery
 
 ## TLS Client Integration
 
