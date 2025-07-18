@@ -30,9 +30,6 @@
     <ClCompile Include="stream_thread.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="stream_semaphore.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="Tardsplaya.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -69,9 +66,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="stream_thread.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="stream_semaphore.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="twitch_api.h">
