@@ -900,11 +900,11 @@ bool BufferAndPipeStreamToPlayer(
     if (use_semaphore_ipc) {
         // Create semaphores with stream ID based on channel name and current time for uniqueness
         std::wstring stream_id = channel_name + L"_" + std::to_wstring(GetTickCount64());
-        buffer_semaphores = StreamSemaphoreUtils::CreateStreamSemaphores(stream_id, dynamic_max_buffer.load());
+        buffer_semaphores = StreamSemaphoreUtils::CreateStreamSemaphores(stream_id, max_buffer_segments);
         
         if (buffer_semaphores && buffer_semaphores->IsValid()) {
             AddDebugLog(L"[SEMAPHORE] Created producer-consumer semaphores for " + channel_name + 
-                       L" with buffer_size=" + std::to_wstring(dynamic_max_buffer.load()));
+                       L" with buffer_size=" + std::to_wstring(max_buffer_segments));
         } else {
             AddDebugLog(L"[SEMAPHORE] Warning: Failed to create semaphores for " + channel_name + 
                        L", falling back to mutex-only synchronization");
