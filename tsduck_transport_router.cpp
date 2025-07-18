@@ -243,6 +243,11 @@ void TSBuffer::Clear() {
     }
 }
 
+void TSBuffer::Reset() {
+    Clear();
+    producer_active_ = true;
+}
+
 void TSBuffer::SignalEndOfStream() {
     producer_active_ = false;
 }
@@ -511,7 +516,7 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     
     // Reset converter and buffer
     hls_converter_->Reset();
-    ts_buffer_->Clear();
+    ts_buffer_->Reset(); // This will clear packets and reset producer_active
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Starting TSDuck-inspired transport stream routing");
