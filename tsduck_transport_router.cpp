@@ -727,12 +727,19 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                     if (log_callback_) {
                         log_callback_(L"[TS_ROUTER] Media player process exited (code: " + std::to_wstring(exit_code) + L")");
                     }
+                    // Set cancel token to signal this was due to player death, not normal completion
+                    cancel_token = true;
                     break;
                 }
             } else {
                 DWORD error = GetLastError();
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to check player process status (error: " + std::to_wstring(error) + L")");
+                }
+                // If we can't check the process status, it's likely dead - set cancel token
+                if (error == ERROR_INVALID_HANDLE) {
+                    cancel_token = true;
+                    break;
                 }
             }
         }
