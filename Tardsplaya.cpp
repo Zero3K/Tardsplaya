@@ -1466,24 +1466,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         break;
     }
-    case WM_USER + 3: {
-        // Handle player process death
-        size_t tabIndex = (size_t)wParam;
-        AddDebugLog(L"WM_USER + 3: Player died for tab " + std::to_wstring(tabIndex));
-        
-        if (tabIndex < g_streams.size() && g_streams[tabIndex].isStreaming) {
-            auto& tab = g_streams[tabIndex];
-            AddDebugLog(L"WM_USER + 3: Stopping stream for dead player, channel=" + tab.channel);
-            
-            // Directly call StopStream to ensure proper UI updates
-            StopStream(tab, true); // Set userInitiated=true to behave like Stop button click
-            
-            AddLog(L"Stream stopped (media player closed): " + tab.channel);
-        } else {
-            AddDebugLog(L"WM_USER + 3: Invalid tab index or not streaming: " + std::to_wstring(tabIndex));
-        }
-        break;
-    }
     case WM_TIMER:
         if (wParam == TIMER_PLAYER_CHECK) {
             // Update all streaming tabs that are still in "Starting..." state
@@ -1515,8 +1497,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                            L", exit code=" + std::to_wstring(exitCode));
                                 AddLog(L"Media player closed for " + tab.channel + L" - stopping stream");
                                 
-                                // Post message to update UI and stop stream properly
-                                PostMessage(hwnd, WM_USER + 3, (WPARAM)(&tab - &g_streams[0]), 0);
+                                // Simulate Stop button click to follow exact same code path as manual click
+                                PostMessage(tab.hStopBtn, BM_CLICK, 0, 0);
                             }
                         } else {
                             // Failed to get exit code - might be dead process
@@ -1526,8 +1508,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                            L" - stopping stream");
                                 AddLog(L"Media player connection lost for " + tab.channel + L" - stopping stream");
                                 
-                                // Post message to update UI and stop stream properly
-                                PostMessage(hwnd, WM_USER + 3, (WPARAM)(&tab - &g_streams[0]), 0);
+                                // Simulate Stop button click to follow exact same code path as manual click
+                                PostMessage(tab.hStopBtn, BM_CLICK, 0, 0);
                             }
                         }
                     }
