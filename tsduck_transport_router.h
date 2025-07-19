@@ -290,6 +290,7 @@ namespace tsduck_transport {
         void SetDiscontinuityIndicator(TSPacket& packet);
         void InjectPATWithDiscontinuity();
         void InjectPMTWithDiscontinuity();
+        void ResetPacketContinuityCounters();
         
         // Ad transition detection and handling
         bool IsAdTransition(const std::string& segment_url) const;
@@ -308,6 +309,11 @@ namespace tsduck_transport {
         bool inject_pat_with_discontinuity_ = false;
         bool inject_pmt_with_discontinuity_ = false;
         std::chrono::steady_clock::time_point last_discontinuity_injection_;
+        
+        // Aggressive program structure manipulation for MPC-HC buffer flush
+        bool force_program_structure_reset_ = false;
+        uint32_t program_reset_counter_ = 0;
+        int reset_packet_count_ = 0;
     };
     
 
