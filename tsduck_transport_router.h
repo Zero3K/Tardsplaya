@@ -283,7 +283,7 @@ namespace tsduck_transport {
         bool DetectMediaPlayerType(const std::wstring& player_path);
         void ApplyMPCWorkaround(TSPacket& packet, bool is_discontinuity = false);
         void ForceVideoSyncRecovery();
-        void InsertSyntheticKeyFrameMarker(TSPacket& packet);
+        void CreateStreamFormatChange(TSPacket& packet);
         
         // MPEG-TS discontinuity signaling for MPC-HC buffer flush
         void ForceDiscontinuityOnNextPackets();
@@ -318,6 +318,10 @@ namespace tsduck_transport {
         
         // Timing controls to prevent excessive triggering
         std::chrono::steady_clock::time_point last_format_change_time_;
+        
+        // Error state management for format change recovery
+        bool clear_transport_error_on_next_packet_ = false;
+        int format_change_packets_remaining_ = 0;
         std::chrono::steady_clock::time_point last_program_reset_time_;
     };
     

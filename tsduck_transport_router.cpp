@@ -1217,11 +1217,29 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                 }
             }
             
-            if (!SendTSPacketToPlayer(player_stdin, packet)) {
-                if (log_callback_) {
-                    log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
+            // Clear transport error indicator if it was temporarily set for format change
+            if (clear_transport_error_on_next_packet_) {
+                TSPacket modifiedPacket = packet;
+                modifiedPacket.transport_error = false;
+                clear_transport_error_on_next_packet_ = false;
+                
+                if (!SendTSPacketToPlayer(player_stdin, modifiedPacket)) {
+                    if (log_callback_) {
+                        log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
+                    }
+                    goto cleanup_and_exit;
                 }
-                goto cleanup_and_exit;
+                
+                if (log_callback_) {
+                    log_callback_(L"[MPC-WORKAROUND] Cleared temporary transport error indicator");
+                }
+            } else {
+                if (!SendTSPacketToPlayer(player_stdin, packet)) {
+                    if (log_callback_) {
+                        log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
+                    }
+                    goto cleanup_and_exit;
+                }
             }
             packets_sent++;
             last_packet_time = std::chrono::steady_clock::now();
@@ -1598,20 +1616,27 @@ bool TransportStreamRouter::DetectMediaPlayerType(const std::wstring& player_pat
 void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discontinuity) {
     if (!is_mpc_player_ || !current_config_.enable_mpc_workaround) return;
     
-    // Only apply minimal discontinuity signaling to video packets when scheduled
-    // This avoids audio sync issues while still triggering DirectShow buffer flush
-    if (packet.is_video_packet && force_discontinuity_on_next_video_) {
-        // Apply minimal discontinuity indicator to trigger MPC-HC buffer flush
-        SetDiscontinuityIndicator(packet);
+    // Apply stream format change during ad transitions to trigger DirectShow events
+    // that activate MPC-HC's buffer stall detection and automatic flush logic
+    if (packet.is_video_packet && (force_discontinuity_on_next_video_ || format_change_packets_remaining_ > 0)) {
+        // Rate limit format changes to prevent overwhelming the stream
+        auto now = std::chrono::steady_clock::now();
+        auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_format_change_time_);
         
-        // Mark as key frame to help with recovery
-        packet.payload_unit_start = true;
-        packet.is_key_frame = true;
-        
-        force_discontinuity_on_next_video_ = false;
-        
-        if (log_callback_) {
-            log_callback_(L"[MPC-WORKAROUND] Applied minimal video discontinuity for buffer recovery");
+        if (time_since_last.count() >= 100) {  // Min 100ms between format changes
+            CreateStreamFormatChange(packet);
+            last_format_change_time_ = now;
+            
+            if (format_change_packets_remaining_ > 0) {
+                format_change_packets_remaining_--;
+            }
+            
+            force_discontinuity_on_next_video_ = false;
+            
+            if (log_callback_) {
+                log_callback_(L"[MPC-WORKAROUND] Applied stream format change to trigger DirectShow buffer flush (remaining: " + 
+                             std::to_wstring(format_change_packets_remaining_) + L")");
+            }
         }
     }
 }
@@ -1627,18 +1652,37 @@ void TransportStreamRouter::ForceVideoSyncRecovery() {
     }
 }
 
-void TransportStreamRouter::InsertSyntheticKeyFrameMarker(TSPacket& packet) {
-    if (!packet.is_video_packet) return;
+void TransportStreamRouter::CreateStreamFormatChange(TSPacket& packet) {
+    // Create a dramatic stream format change that will trigger DirectShow events
+    // like EC_SEGMENT_STARTED, which activates MPC-HC's buffer stall detection
     
-    // Mark this packet as a key frame to help players recover
-    packet.is_key_frame = true;
+    // Force a program association table (PAT) change to signal new program structure
+    if (packet.pid == 0x00) {  // PAT packet
+        // Increment version number in PAT to signal format change
+        if (packet.data[5] & 0x01) {  // Check if current_next_indicator is set
+            packet.data[10] = (packet.data[10] & 0xC1) | ((packet.data[10] + 0x02) & 0x3E);  // Increment version
+        }
+    }
+    
+    // Force a program map table (PMT) change to signal stream format change
+    if (packet.pid == 0x100 || packet.pid == 0x101) {  // Common PMT PIDs
+        if (packet.data[5] & 0x01) {  // Check if current_next_indicator is set
+            packet.data[10] = (packet.data[10] & 0xC1) | ((packet.data[10] + 0x02) & 0x3E);  // Increment version
+        }
+    }
+    
+    // Set discontinuity indicator and payload unit start to maximize format change signal
+    SetDiscontinuityIndicator(packet);
     packet.payload_unit_start = true;
+    packet.is_key_frame = true;
     
-    // Set discontinuity indicator to signal a fresh start
-    packet.discontinuity = true;
+    // Add transport error indicator temporarily to force filter graph reconstruction
+    // (will be cleared on next packet to avoid permanent errors)
+    packet.transport_error = true;
+    clear_transport_error_on_next_packet_ = true;
     
     if (log_callback_) {
-        AddDebugLog(L"[MPC-WORKAROUND] Inserted synthetic key frame marker");
+        log_callback_(L"[MPC-WORKAROUND] Created stream format change (PAT/PMT version bump + discontinuity)");
     }
 }
 
@@ -1661,14 +1705,20 @@ void TransportStreamRouter::HandleAdTransition(bool entering_ad) {
     in_ad_segment_ = entering_ad;
     
     if (is_mpc_player_ && current_config_.enable_mpc_workaround) {
-        // Only apply workaround when exiting ads (main content resuming)
-        // This is when the freeze typically occurs
+        // Apply enhanced workaround when exiting ads (main content resuming)
+        // This is when the video buffer freeze typically occurs
         if (!entering_ad && was_in_ad) {
             if (log_callback_) {
-                log_callback_(L"[MPC-WORKAROUND] Exiting ad segment - scheduling gentle video buffer recovery");
+                log_callback_(L"[MPC-WORKAROUND] Exiting ad segment - triggering stream format change to flush video buffers");
             }
-            // Schedule a single, minimal recovery for the next video packet
-            ForceVideoSyncRecovery();
+            
+            // Schedule multiple format changes over several video packets for reliability
+            // The MPC-HC patch shows that buffer stalls require more aggressive intervention
+            force_discontinuity_on_next_video_ = true;
+            format_change_packets_remaining_ = 3;  // Apply to next 3 video packets
+            
+            // Reset timing to allow immediate action
+            last_format_change_time_ = std::chrono::steady_clock::time_point{};
         }
         // Don't do anything when entering ads to avoid unnecessary disruption
     }
