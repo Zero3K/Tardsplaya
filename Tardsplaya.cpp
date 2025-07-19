@@ -27,6 +27,7 @@
 #include "favorites.h"
 #include "playlist_parser.h"
 #include "tsduck_transport_router.h"
+#include "gpac_player.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
@@ -46,9 +47,12 @@ struct StreamTab {
     bool playerStarted = false; // Track if player has started successfully
     HANDLE playerProcess = nullptr; // Store player process handle for cleanup
     std::atomic<int> chunkCount{0}; // Track actual chunk queue size
+    
+    // GPAC player for built-in video rendering
+    std::unique_ptr<GpacPlayer> gpacPlayer;
 
     // Make the struct movable but not copyable
-    StreamTab() : hChild(nullptr), hQualities(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr) {};
+    StreamTab() : hChild(nullptr), hQualities(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr), gpacPlayer(nullptr) {};
     StreamTab(const StreamTab&) = delete;
     StreamTab& operator=(const StreamTab&) = delete;
     StreamTab(StreamTab&& other) noexcept 
@@ -67,6 +71,7 @@ struct StreamTab {
         , playerStarted(other.playerStarted)
         , playerProcess(other.playerProcess)
         , chunkCount(other.chunkCount.load())
+        , gpacPlayer(std::move(other.gpacPlayer))
     {
         // Note: With vector capacity reservation, moves should not happen during normal operation
         // This move constructor exists for completeness but should not be called for active streams
@@ -105,6 +110,7 @@ struct StreamTab {
             playerStarted = other.playerStarted;
             playerProcess = other.playerProcess;
             chunkCount = other.chunkCount.load();
+            gpacPlayer = std::move(other.gpacPlayer);
             
             other.hChild = nullptr;
             other.hQualities = nullptr;
@@ -132,6 +138,7 @@ bool g_enableLogging = true;
 bool g_verboseDebug = false; // Enable verbose debug output for troubleshooting
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
+bool g_useGpacPlayer = true; // Use built-in GPAC player instead of external media players
 bool g_logToFile = false; // Enable logging to debug.log file
 
 
@@ -817,6 +824,13 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
             tab.userRequestedStop = true;
             AddDebugLog(L"StopStream: User requested stop set for " + tab.channel);
         }
+        
+        // Stop GPAC player if using built-in player
+        if (g_useGpacPlayer && tab.gpacPlayer) {
+            tab.gpacPlayer->Stop();
+            AddLog(L"GPAC playback stopped for " + tab.channel);
+        }
+        
         if (tab.streamThread.joinable()) {
             AddDebugLog(L"StopStream: Joining stream thread for " + tab.channel);
             tab.streamThread.join();
@@ -850,6 +864,72 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
     }
 }
 
+void WatchStreamWithGpac(StreamTab& tab, size_t tabIndex) {
+    AddDebugLog(L"WatchStreamWithGpac: Starting GPAC playback for tab " + std::to_wstring(tabIndex) + 
+               L", channel=" + tab.channel);
+
+    int sel = (int)SendMessage(tab.hQualities, LB_GETCURSEL, 0, 0);
+    if (sel == LB_ERR) {
+        MessageBoxW(tab.hChild, L"Select a quality.", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+    wchar_t qual[64];
+    SendMessage(tab.hQualities, LB_GETTEXT, sel, (LPARAM)qual);
+    qual[63] = L'\0'; // Ensure null termination
+    
+    // Find the original quality name from the standardized name
+    std::wstring standardQuality = qual;
+    std::wstring originalQuality;
+    auto mappingIt = tab.standardToOriginalQuality.find(standardQuality);
+    if (mappingIt != tab.standardToOriginalQuality.end()) {
+        originalQuality = mappingIt->second;
+    } else {
+        originalQuality = standardQuality; // fallback
+    }
+    
+    auto it = tab.qualityToUrl.find(originalQuality);
+    if (it == tab.qualityToUrl.end()) {
+        MessageBoxW(tab.hChild, L"Failed to resolve quality URL.", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+    
+    std::wstring url = it->second;
+    AddLog(L"Starting GPAC built-in playback for " + tab.channel + L" (" + standardQuality + L")");
+    
+    // Start GPAC playback
+    if (!tab.gpacPlayer->Play(url)) {
+        MessageBoxW(tab.hChild, L"Failed to start GPAC playback.", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+    
+    // Set up ad detection callback
+    tab.gpacPlayer->SetAdDetectionCallback([&tab](bool adDetected) {
+        if (adDetected) {
+            tab.gpacPlayer->ShowAdSkippingMessage(true);
+            PostMessage(g_hMainWnd, WM_USER + 1, 0, 
+                       (LPARAM)new std::wstring(L"[AD-SKIP] Advertisement detected - skipping for " + tab.channel));
+        } else {
+            tab.gpacPlayer->ShowAdSkippingMessage(false);
+        }
+    });
+    
+    // Update UI state
+    tab.isStreaming = true;
+    tab.playerStarted = true;
+    
+    EnableWindow(tab.hWatchBtn, FALSE);
+    EnableWindow(tab.hStopBtn, TRUE);
+    EnableWindow(GetDlgItem(tab.hChild, IDC_CHANNEL), FALSE);
+    EnableWindow(tab.hQualities, FALSE);
+    EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), FALSE);
+    SetWindowTextW(tab.hWatchBtn, L"Playing");
+    
+    AddLog(L"GPAC playback started successfully for " + tab.channel);
+    
+    // Start a timer to check for discontinuities and update status
+    SetTimer(g_hMainWnd, TIMER_CHUNK_UPDATE, 1000, nullptr);
+}
+
 void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Starting for tab " + std::to_wstring(tabIndex) + 
                L", channel=" + tab.channel + L", isStreaming=" + std::to_wstring(tab.isStreaming));
@@ -860,8 +940,18 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         return;
     }
 
+    // Check if using GPAC player or external player
+    if (g_useGpacPlayer) {
+        if (!tab.gpacPlayer) {
+            MessageBoxW(tab.hChild, L"GPAC player not initialized. Falling back to external player.", L"Warning", MB_OK | MB_ICONWARNING);
+            // Fall through to external player logic
+        } else {
+            // Use GPAC player for built-in streaming
+            return WatchStreamWithGpac(tab, tabIndex);
+        }
+    }
 
-
+    // External player mode (original behavior)
     // Check if player path exists
     DWORD dwAttrib = GetFileAttributesW(g_playerPath.c_str());
     if (dwAttrib == INVALID_FILE_ATTRIBUTES || (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
@@ -1028,7 +1118,11 @@ ATOM RegisterStreamChildClass() {
 }
 
 HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"") {
-    RECT rc = { 0, 0, 480, 180 };
+    // Increased window size to accommodate video area when using GPAC
+    int windowWidth = g_useGpacPlayer ? 800 : 480;
+    int windowHeight = g_useGpacPlayer ? 400 : 180;
+    
+    RECT rc = { 0, 0, windowWidth, windowHeight };
     HWND hwnd = CreateWindowEx(0, L"StreamChildWin", NULL,
         WS_CHILD | WS_VISIBLE,
         rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
@@ -1043,7 +1137,9 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     HWND hQualityLabel = CreateWindowEx(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
     SendMessage(hQualityLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
-    HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, 120, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
+    // Adjust quality list size based on GPAC mode
+    int qualityListHeight = g_useGpacPlayer ? 100 : 120;
+    HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, qualityListHeight, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
     SendMessage(hQualList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
     HWND hLoad = CreateWindowEx(0, L"BUTTON", L"1. Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 40, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
@@ -1056,6 +1152,25 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     SendMessage(hStop, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
+    
+    // Create video area for GPAC player when enabled
+    if (g_useGpacPlayer) {
+        HWND hVideoArea = CreateWindowEx(
+            WS_EX_CLIENTEDGE,
+            L"STATIC",
+            L"Video Area",
+            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+            360, 10, 420, 300,  // Video area to the right of controls
+            hwnd,
+            (HMENU)IDC_VIDEO_AREA,
+            g_hInst,
+            nullptr
+        );
+        SendMessage(hVideoArea, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+        
+        // Set background to black for video
+        SetClassLongPtr(hVideoArea, GCLP_HBRBACKGROUND, (LONG_PTR)GetStockObject(BLACK_BRUSH));
+    }
     
 
 
@@ -1149,6 +1264,24 @@ void AddStreamTab(const std::wstring& channel = L"") {
     }
     StreamTab& tab = g_streams.back();
     HWND hChild = CreateStreamChild(g_hTab, tab, channel.c_str());
+    
+    // Initialize GPAC player if enabled
+    if (g_useGpacPlayer) {
+        tab.gpacPlayer = CreateGpacPlayer();
+        if (tab.gpacPlayer) {
+            HWND videoArea = GetDlgItem(hChild, IDC_VIDEO_AREA);
+            if (videoArea && !tab.gpacPlayer->Initialize(videoArea, tabName)) {
+                AddLog(L"Failed to initialize GPAC player for " + tabName);
+                tab.gpacPlayer.reset(); // Fall back to external player
+            } else {
+                AddLog(L"GPAC player initialized for " + tabName);
+                // Set log callback for GPAC player
+                tab.gpacPlayer->SetLogCallback([](const std::wstring& msg) {
+                    PostMessage(g_hMainWnd, WM_USER + 1, 0, (LPARAM)new std::wstring(msg));
+                });
+            }
+        }
+    }
     
     // Store the index instead of pointer to avoid vector reallocation issues
     SetWindowLongPtr(hChild, GWLP_USERDATA, (LONG_PTR)idx);

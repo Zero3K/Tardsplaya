@@ -106,6 +106,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="favorites.cpp" />
+    <ClCompile Include="gpac_player.cpp" />
     <ClCompile Include="playlist_parser.cpp" />
     <ClCompile Include="stream_memory_map.cpp" />
     <ClCompile Include="stream_pipe.cpp" />
@@ -122,6 +123,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="favorites.h" />
+    <ClInclude Include="gpac_player.h" />
     <ClInclude Include="json_minimal.h" />
     <ClInclude Include="tlsclient\lock.h" />
     <ClInclude Include="playlist_parser.h" />
