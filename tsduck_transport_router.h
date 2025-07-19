@@ -178,7 +178,7 @@ namespace tsduck_transport {
             bool enable_mpc_workaround = false;  // Enable MPC-HC/MPC-BE compatibility workaround
             bool force_video_sync_on_discontinuity = false;  // Force video sync signals during ad transitions
             bool insert_key_frame_markers = false;  // Insert synthetic key frame markers for better seeking
-            std::chrono::milliseconds video_sync_recovery_interval{200}; // Force sync recovery every N ms during ads
+            std::chrono::milliseconds video_sync_recovery_interval{1000}; // Force sync recovery every N ms during ads
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -315,6 +315,10 @@ namespace tsduck_transport {
         bool force_program_structure_reset_ = false;
         uint32_t program_reset_counter_ = 0;
         int reset_packet_count_ = 0;
+        
+        // Timing controls to prevent excessive triggering
+        std::chrono::steady_clock::time_point last_format_change_time_;
+        std::chrono::steady_clock::time_point last_program_reset_time_;
     };
     
 

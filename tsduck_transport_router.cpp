@@ -683,6 +683,10 @@ TransportStreamRouter::TransportStreamRouter() {
     program_reset_counter_ = 0;
     reset_packet_count_ = 0;
     
+    // Initialize timing controls
+    last_format_change_time_ = std::chrono::steady_clock::now();
+    last_program_reset_time_ = std::chrono::steady_clock::now();
+    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();
@@ -1621,9 +1625,9 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
             }
         }
         
-        // Clear the flag after a few packets to avoid excessive modifications
+        // Clear the flag after fewer packets to reduce disruption
         reset_packet_count_++;
-        if (reset_packet_count_ >= 10) {
+        if (reset_packet_count_ >= 5) {  // Reduced from 10 to 5 packets
             force_program_structure_reset_ = false;
             reset_packet_count_ = 0;
             if (log_callback_) {
@@ -1653,7 +1657,7 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
         }
     }
     
-    // Force video sync recovery on discontinuities or at regular intervals during ads
+    // Force video sync recovery on discontinuities or at gentle intervals during ads
     if (is_discontinuity || 
         (in_ad_segment_ && std::chrono::duration_cast<std::chrono::milliseconds>(now - last_video_sync_time_) >= current_config_.video_sync_recovery_interval)) {
         
@@ -1661,7 +1665,7 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
         last_video_sync_time_ = now;
         
         if (log_callback_) {
-            std::wstring message = L"[MPC-WORKAROUND] Applied video sync recovery";
+            std::wstring message = L"[MPC-WORKAROUND] Applied gentle video sync recovery";
             message += (is_discontinuity ? L" (discontinuity)" : L" (periodic)");
             log_callback_(message);
         }
@@ -1670,7 +1674,7 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
     // Insert synthetic key frame markers for video packets (legacy fallback)
     if (packet.is_video_packet && current_config_.insert_key_frame_markers) {
         auto key_frame_interval = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_key_frame_time_);
-        if (key_frame_interval.count() > 1000) { // Force key frame every second during problematic segments
+        if (key_frame_interval.count() > 2000) { // Force key frame every 2 seconds (reduced frequency)
             InsertSyntheticKeyFrameMarker(packet);
             last_key_frame_time_ = now;
         }
@@ -1678,22 +1682,18 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
 }
 
 void TransportStreamRouter::ForceVideoSyncRecovery() {
-    // Implement aggressive MPEG-TS program structure manipulation to trigger MPC-HC's
-    // automatic buffer flush logic (equivalent to the MPC-HC patch)
+    // Implement gentler MPEG-TS program changes to trigger MPC-HC's
+    // automatic buffer flush logic
     
     if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Initiating comprehensive buffer flush sequence");
+        log_callback_(L"[MPC-WORKAROUND] Initiating gentle buffer recovery sequence");
     }
     
-    // Use the comprehensive stream format change approach
+    // Use the gradual stream format change approach
     TriggerStreamFormatChange();
     
     // Reset frame statistics to prevent confusion
     ResetFrameStatistics();
-    
-    if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Buffer flush sequence #" + std::to_wstring(program_reset_counter_) + L" initiated");
-    }
 }
 
 void TransportStreamRouter::InsertSyntheticKeyFrameMarker(TSPacket& packet) {
@@ -1732,21 +1732,19 @@ void TransportStreamRouter::HandleAdTransition(bool entering_ad) {
     if (is_mpc_player_ && current_config_.enable_mpc_workaround) {
         if (entering_ad && !was_in_ad) {
             if (log_callback_) {
-                log_callback_(L"[MPC-WORKAROUND] Entering ad segment - preparing for aggressive buffer flush");
+                log_callback_(L"[MPC-WORKAROUND] Entering ad segment - preparing for gentle buffer recovery");
             }
-            // Pre-emptively start the aggressive workaround
+            // Apply a single, gentle sync recovery when entering ads
             ForceVideoSyncRecovery();
         } else if (!entering_ad && was_in_ad) {
             if (log_callback_) {
-                log_callback_(L"[MPC-WORKAROUND] Exiting ad segment - forcing intensive video buffer recovery");
+                log_callback_(L"[MPC-WORKAROUND] Exiting ad segment - applying targeted video buffer recovery");
             }
-            // Force multiple rounds of sync recovery when exiting ads (most critical time)
+            // Apply only one recovery when exiting ads to avoid stuttering
             ForceVideoSyncRecovery();
             
-            // Schedule another recovery slightly later to catch any remaining stalls
-            force_program_structure_reset_ = true;
-            program_reset_counter_++;
-            reset_packet_count_ = 0;
+            // Don't schedule additional resets immediately - let the first one work
+            // The periodic recovery mechanism will handle any remaining issues
         }
     }
 }
@@ -1803,11 +1801,13 @@ void TransportStreamRouter::SetDiscontinuityIndicator(TSPacket& packet) {
     // Also set discontinuity flag for packet processing
     packet.discontinuity = true;
     
-    // For MPC-HC buffer flush: also reset continuity counter to force graph rebuild
-    // This creates a more dramatic change that DirectShow is more likely to detect
+    // For MPC-HC buffer flush: gently adjust continuity counter to signal change
+    // Instead of resetting to 0, just increment it to signal a change
     if (is_mpc_player_ && current_config_.enable_mpc_workaround) {
-        // Reset continuity counter to 0 to force DirectShow to notice the change
-        packet.data[3] = (packet.data[3] & 0xF0) | 0x00;
+        // Increment the continuity counter by 2 to signal a change without being too dramatic
+        uint8_t current_cc = packet.data[3] & 0x0F;
+        uint8_t new_cc = (current_cc + 2) & 0x0F;
+        packet.data[3] = (packet.data[3] & 0xF0) | new_cc;
     }
 }
 
@@ -1855,26 +1855,43 @@ void TransportStreamRouter::ResetPacketContinuityCounters() {
 }
 
 void TransportStreamRouter::TriggerStreamFormatChange() {
-    // Create a temporary stream format change to trigger DirectShow format negotiation
-    // This should cause DirectShow to flush buffers and rebuild connections
+    // Create a more gradual stream format change to trigger DirectShow format negotiation
+    // This should cause DirectShow to flush buffers without being too disruptive
     
     if (!is_mpc_player_ || !current_config_.enable_mpc_workaround) return;
     
+    auto now = std::chrono::steady_clock::now();
+    
+    // Prevent triggering too frequently to avoid stuttering
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_format_change_time_).count() < 500) {
+        return; // Don't trigger more than once every 500ms
+    }
+    last_format_change_time_ = now;
+    
     if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Triggering stream format change to force DirectShow buffer flush");
+        log_callback_(L"[MPC-WORKAROUND] Triggering gradual stream format change for buffer recovery");
     }
     
-    // Force all the dramatic changes at once for maximum impact
-    force_program_structure_reset_ = true;
+    // Apply changes more gradually - not all at once
+    // Start with discontinuity indicators which are less disruptive
     force_discontinuity_on_next_video_ = true;
     force_discontinuity_on_next_audio_ = true;
+    
+    // Only use program structure reset if we haven't done it recently
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_program_reset_time_).count() > 2000) {
+        force_program_structure_reset_ = true;
+        reset_packet_count_ = 0;
+        program_reset_counter_++;
+        last_program_reset_time_ = now;
+        
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Applied program structure reset #" + std::to_wstring(program_reset_counter_));
+        }
+    }
+    
+    // Schedule PAT/PMT changes but don't force them immediately
     inject_pat_with_discontinuity_ = true;
     inject_pmt_with_discontinuity_ = true;
-    reset_packet_count_ = 0;
-    program_reset_counter_++;
-    
-    // This comprehensive approach should trigger the DirectShow events that
-    // MPC-HC is listening for (EC_SEGMENT_STARTED, EC_STREAM_CONTROL_*, etc.)
 }
 
 

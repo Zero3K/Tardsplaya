@@ -122,7 +122,7 @@ std::thread StartTransportStreamThread(
                 config.enable_mpc_workaround = true;
                 config.force_video_sync_on_discontinuity = true;
                 config.insert_key_frame_markers = true;
-                config.video_sync_recovery_interval = std::chrono::milliseconds(200);
+                config.video_sync_recovery_interval = std::chrono::milliseconds(1000);
                 
                 if (log_callback) {
                     log_callback(L"[MPC-WORKAROUND] Enabled video synchronization workaround for MPC-compatible player");
