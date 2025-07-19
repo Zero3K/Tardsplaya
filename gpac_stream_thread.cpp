@@ -6,6 +6,7 @@
 #include <regex>
 #include <chrono>
 #include <thread>
+#include <memory>
 
 // External functions from other files
 extern bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token);
@@ -149,7 +150,7 @@ bool GpacStreamThread::UpdatePlaylist(std::vector<std::wstring>& segments) {
     segments.clear();
     
     std::string playlistData;
-    if (!HttpGetText(m_playlistUrl, playlistData, &m_cancelToken)) {
+    if (!HttpGetText(m_playlistUrl, playlistData, std::addressof(m_cancelToken))) {
         return false;
     }
     
@@ -165,7 +166,7 @@ bool GpacStreamThread::UpdatePlaylist(std::vector<std::wstring>& segments) {
         segments.push_back(segmentUrl);
     }
     
-    LogMessage(L"Updated playlist: " + std::to_wstring(segments.size()) + L" segments for " + m_channelName);
+    LogMessage(std::wstring(L"Updated playlist: ") + std::to_wstring(segments.size()) + L" segments for " + m_channelName);
     return !segments.empty();
 }
 
@@ -262,7 +263,7 @@ bool GpacStreamThread::FeedDataToGpac(const std::vector<uint8_t>& data) {
     // gf_term_feed_data(m_gpacPlayer->GetTerminal(), data.data(), data.size());
     
     // For stub implementation, just simulate successful data feeding
-    LogMessage(L"Fed " + std::to_wstring(data.size()) + L" bytes to GPAC player for " + m_channelName);
+    LogMessage(std::wstring(L"Fed ") + std::to_wstring(data.size()) + L" bytes to GPAC player for " + m_channelName);
     
     return true;
 }
