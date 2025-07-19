@@ -1614,8 +1614,10 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
             packet.data[3] = (packet.data[3] & 0xF0) | (program_reset_counter_ & 0x0F);
             
             if (log_callback_) {
-                log_callback_(L"[MPC-WORKAROUND] Applied program structure reset to " + 
-                             (packet.is_video_packet ? L"video" : L"audio") + L" packet");
+                std::wstring message = L"[MPC-WORKAROUND] Applied program structure reset to ";
+                message += (packet.is_video_packet ? L"video" : L"audio");
+                message += L" packet";
+                log_callback_(message);
             }
         }
         
