@@ -131,6 +131,10 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_frame_time_;
         std::chrono::milliseconds estimated_frame_duration_{33}; // Default ~30fps
         
+        // Stream type detection state
+        uint16_t detected_video_pid_ = 0;
+        uint16_t detected_audio_pid_ = 0;
+        
         // Generate PAT (Program Association Table)
         TSPacket GeneratePAT();
         
@@ -142,6 +146,9 @@ namespace tsduck_transport {
         
         // Calculate CRC32 for PSI tables
         uint32_t CalculateCRC32(const uint8_t* data, size_t length);
+        
+        // Detect and classify stream types (video/audio)
+        void DetectStreamTypes(TSPacket& packet);
     };
     
     // Transport Stream Router - main component for re-routing streams to media players
@@ -237,10 +244,6 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_video_packet_time_;
         std::chrono::steady_clock::time_point last_audio_packet_time_;
         
-        // Detected PIDs for stream types
-        std::atomic<uint16_t> detected_video_pid_{0};
-        std::atomic<uint16_t> detected_audio_pid_{0};
-        
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
         
@@ -249,9 +252,6 @@ namespace tsduck_transport {
         
         // Reset frame statistics (for discontinuities)
         void ResetFrameStatistics();
-        
-        // Detect and classify stream types
-        void DetectStreamTypes(TSPacket& packet);
         
         // Video stream health monitoring
         bool IsVideoStreamHealthy() const;

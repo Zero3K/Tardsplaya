@@ -323,6 +323,10 @@ void HLSToTSConverter::Reset() {
     segment_frame_counter_ = 0;
     last_frame_time_ = std::chrono::steady_clock::now();
     estimated_frame_duration_ = std::chrono::milliseconds(33); // Reset to default ~30fps
+    
+    // Reset stream type detection
+    detected_video_pid_ = 0;
+    detected_audio_pid_ = 0;
 }
 
 std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
@@ -597,6 +601,47 @@ uint32_t HLSToTSConverter::CalculateCRC32(const uint8_t* data, size_t length) {
     return crc;
 }
 
+void HLSToTSConverter::DetectStreamTypes(TSPacket& packet) {
+    // Detect video and audio PIDs by analyzing packet content
+    if (packet.payload_unit_start && packet.pid > 0x20) {
+        // Look for video/audio stream indicators
+        const uint8_t* payload = packet.data + 4;
+        size_t payload_size = TS_PACKET_SIZE - 4;
+        
+        // Check adaptation field
+        if ((packet.data[3] & 0x20) != 0 && payload_size > 0) {
+            uint8_t adaptation_length = payload[0];
+            if (adaptation_length < payload_size) {
+                payload += adaptation_length + 1;
+                payload_size -= adaptation_length + 1;
+            }
+        }
+        
+        // Look for PES header patterns
+        if (payload_size >= 6 && payload[0] == 0x00 && payload[1] == 0x00 && payload[2] == 0x01) {
+            uint8_t stream_id = payload[3];
+            
+            // Video stream IDs (typically 0xE0-0xEF for MPEG video)
+            if ((stream_id >= 0xE0 && stream_id <= 0xEF) || stream_id == 0xBD) {
+                packet.is_video_packet = true;
+                detected_video_pid_ = packet.pid;
+            }
+            // Audio stream IDs (typically 0xC0-0xDF for audio)
+            else if ((stream_id >= 0xC0 && stream_id <= 0xDF) || stream_id == 0xBD) {
+                packet.is_audio_packet = true;
+                detected_audio_pid_ = packet.pid;
+            }
+        }
+    } else {
+        // Use previously detected PIDs
+        if (packet.pid == detected_video_pid_) {
+            packet.is_video_packet = true;
+        } else if (packet.pid == detected_audio_pid_) {
+            packet.is_audio_packet = true;
+        }
+    }
+}
+
 // TransportStreamRouter implementation
 TransportStreamRouter::TransportStreamRouter() {
     // Initialize member variables
@@ -618,8 +663,6 @@ TransportStreamRouter::TransportStreamRouter() {
     video_sync_loss_count_ = 0;
     last_video_packet_time_ = std::chrono::steady_clock::now();
     last_audio_packet_time_ = std::chrono::steady_clock::now();
-    detected_video_pid_ = 0;
-    detected_audio_pid_ = 0;
     
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
@@ -1438,47 +1481,6 @@ void TransportStreamRouter::ResetFrameStatistics() {
     video_sync_loss_count_ = 0;
     last_video_packet_time_ = std::chrono::steady_clock::now();
     last_audio_packet_time_ = std::chrono::steady_clock::now();
-}
-
-void TransportStreamRouter::DetectStreamTypes(TSPacket& packet) {
-    // Detect video and audio PIDs by analyzing packet content
-    if (packet.payload_unit_start && packet.pid > 0x20) {
-        // Look for video/audio stream indicators
-        const uint8_t* payload = packet.data + 4;
-        size_t payload_size = TS_PACKET_SIZE - 4;
-        
-        // Check adaptation field
-        if ((packet.data[3] & 0x20) != 0 && payload_size > 0) {
-            uint8_t adaptation_length = payload[0];
-            if (adaptation_length < payload_size) {
-                payload += adaptation_length + 1;
-                payload_size -= adaptation_length + 1;
-            }
-        }
-        
-        // Look for PES header patterns
-        if (payload_size >= 6 && payload[0] == 0x00 && payload[1] == 0x00 && payload[2] == 0x01) {
-            uint8_t stream_id = payload[3];
-            
-            // Video stream IDs (typically 0xE0-0xEF for MPEG video)
-            if ((stream_id >= 0xE0 && stream_id <= 0xEF) || stream_id == 0xBD) {
-                packet.is_video_packet = true;
-                detected_video_pid_ = packet.pid;
-            }
-            // Audio stream IDs (typically 0xC0-0xDF for audio)
-            else if ((stream_id >= 0xC0 && stream_id <= 0xDF) || stream_id == 0xBD) {
-                packet.is_audio_packet = true;
-                detected_audio_pid_ = packet.pid;
-            }
-        }
-    } else {
-        // Use previously detected PIDs
-        if (packet.pid == detected_video_pid_.load()) {
-            packet.is_video_packet = true;
-        } else if (packet.pid == detected_audio_pid_.load()) {
-            packet.is_audio_packet = true;
-        }
-    }
 }
 
 bool TransportStreamRouter::IsVideoStreamHealthy() const {
