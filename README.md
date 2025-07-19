@@ -1,15 +1,47 @@
 # Tardsplaya
 
-A Twitch stream player for Windows with enhanced TLS support.
+A Twitch stream player for Windows with enhanced TLS support and **built-in GPAC video rendering**.
 
 ## Features
 
+- **Built-in Video Player**: GPAC-based embedded video rendering with ad-skipping capabilities
 - Multi-tab stream viewing
 - Quality selection
 - Windows 7+ compatibility
 - **Enhanced TLS Client Support** - Custom TLS implementation for better compatibility with older Windows versions
+- **Ad-Skipping with Visual Feedback** - Shows "Skipping ads" overlay when discontinuities are detected
 
-## TSDuck Integration for Enhanced Performance
+## GPAC Built-in Video Player
+
+**NEW**: Integrated GPAC player for built-in video rendering without external media players.
+
+### Key Advantages over External Players
+
+- **No External Dependencies**: Video plays directly within the application window
+- **Better Discontinuity Handling**: GPAC handles stream discontinuities more robustly than external players
+- **Integrated Ad Detection**: Automatic detection and skipping of advertisement segments
+- **Visual Ad-Skipping Feedback**: Shows "Skipping ads" message in upper-right corner when ads are detected
+- **Seamless Multi-Stream**: Each tab has its own embedded video player
+- **Improved Performance**: Direct stream feeding without stdin piping overhead
+
+### Technical Implementation
+
+- `gpac_player.h/cpp` - GPAC wrapper for video rendering and ad detection
+- `gpac_stream_thread.h/cpp` - Dedicated streaming thread for GPAC data feeding
+- Built-in playlist parsing with sophisticated ad detection algorithms
+- Real-time discontinuity handling for smoother playback
+- Embedded video windows within each stream tab
+
+### GPAC vs External Players
+
+| Feature | GPAC (Built-in) | External Players |
+|---------|-----------------|------------------|
+| **Installation** | ✅ No external apps needed | ❌ Requires MPV/VLC/MPC-HC |
+| **Discontinuity Handling** | ✅ Robust GPAC algorithms | ❌ Often causes buffering |
+| **Ad Detection** | ✅ Real-time with visual feedback | ❌ No ad awareness |
+| **Multi-Stream** | ✅ Embedded in each tab | ❌ Separate windows |
+| **Performance** | ✅ Direct API calls | ❌ Process spawning overhead |
+| **User Experience** | ✅ Integrated interface | ❌ Multiple windows |
 
 This version includes **TSDuck-inspired HLS processing** for improved streaming performance and reduced lag.
 

@@ -28,6 +28,7 @@
 #include "playlist_parser.h"
 #include "tsduck_transport_router.h"
 #include "gpac_player.h"
+#include "gpac_stream_thread.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
@@ -50,9 +51,10 @@ struct StreamTab {
     
     // GPAC player for built-in video rendering
     std::unique_ptr<GpacPlayer> gpacPlayer;
+    std::unique_ptr<GpacStreamThread> gpacStreamThread;
 
     // Make the struct movable but not copyable
-    StreamTab() : hChild(nullptr), hQualities(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr), gpacPlayer(nullptr) {};
+    StreamTab() : hChild(nullptr), hQualities(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr), gpacPlayer(nullptr), gpacStreamThread(nullptr) {};
     StreamTab(const StreamTab&) = delete;
     StreamTab& operator=(const StreamTab&) = delete;
     StreamTab(StreamTab&& other) noexcept 
@@ -72,6 +74,7 @@ struct StreamTab {
         , playerProcess(other.playerProcess)
         , chunkCount(other.chunkCount.load())
         , gpacPlayer(std::move(other.gpacPlayer))
+        , gpacStreamThread(std::move(other.gpacStreamThread))
     {
         // Note: With vector capacity reservation, moves should not happen during normal operation
         // This move constructor exists for completeness but should not be called for active streams
@@ -111,6 +114,7 @@ struct StreamTab {
             playerProcess = other.playerProcess;
             chunkCount = other.chunkCount.load();
             gpacPlayer = std::move(other.gpacPlayer);
+            gpacStreamThread = std::move(other.gpacStreamThread);
             
             other.hChild = nullptr;
             other.hQualities = nullptr;
@@ -831,6 +835,12 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
             AddLog(L"GPAC playback stopped for " + tab.channel);
         }
         
+        // Stop GPAC stream thread
+        if (tab.gpacStreamThread) {
+            tab.gpacStreamThread->Stop();
+            tab.gpacStreamThread.reset();
+        }
+        
         if (tab.streamThread.joinable()) {
             AddDebugLog(L"StopStream: Joining stream thread for " + tab.channel);
             tab.streamThread.join();
@@ -896,9 +906,32 @@ void WatchStreamWithGpac(StreamTab& tab, size_t tabIndex) {
     std::wstring url = it->second;
     AddLog(L"Starting GPAC built-in playback for " + tab.channel + L" (" + standardQuality + L")");
     
-    // Start GPAC playback
+    // Reset cancel token and user requested stop flag
+    tab.cancelToken = false;
+    tab.userRequestedStop = false;
+    
+    // Start GPAC playback first
     if (!tab.gpacPlayer->Play(url)) {
         MessageBoxW(tab.hChild, L"Failed to start GPAC playback.", L"Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+    
+    // Create and start GPAC stream thread for data feeding
+    tab.gpacStreamThread = CreateGpacStreamThread(
+        std::shared_ptr<GpacPlayer>(tab.gpacPlayer.get(), [](GpacPlayer*) {}), // Non-owning shared_ptr
+        url,
+        tab.cancelToken,
+        [](const std::wstring& msg) {
+            // Log callback - post message to main thread for thread-safe logging
+            PostMessage(g_hMainWnd, WM_USER + 1, 0, (LPARAM)new std::wstring(msg));
+        },
+        tab.channel,
+        &tab.chunkCount
+    );
+    
+    if (!tab.gpacStreamThread->Start()) {
+        MessageBoxW(tab.hChild, L"Failed to start GPAC streaming thread.", L"Error", MB_OK | MB_ICONERROR);
+        tab.gpacPlayer->Stop();
         return;
     }
     
@@ -1227,6 +1260,25 @@ void ResizeTabAndChildren(HWND hwnd) {
             TabCtrl_AdjustRect(g_hTab, FALSE, &rcTab);
             SetWindowPos(g_streams[i].hChild, nullptr, rcTab.left, rcTab.top, 
                         rcTab.right - rcTab.left, rcTab.bottom - rcTab.top, SWP_NOZORDER | SWP_SHOWWINDOW);
+            
+            // Resize GPAC video area if present
+            if (g_useGpacPlayer) {
+                HWND hVideoArea = GetDlgItem(g_streams[i].hChild, IDC_VIDEO_AREA);
+                if (hVideoArea) {
+                    int childWidth = rcTab.right - rcTab.left;
+                    int childHeight = rcTab.bottom - rcTab.top;
+                    int videoWidth = childWidth - 370;  // Leave space for controls
+                    int videoHeight = childHeight - 20;  // Leave some margin
+                    if (videoWidth > 100 && videoHeight > 100) {
+                        SetWindowPos(hVideoArea, nullptr, 360, 10, videoWidth, videoHeight, SWP_NOZORDER);
+                        
+                        // Resize GPAC player window if available
+                        if (g_streams[i].gpacPlayer) {
+                            g_streams[i].gpacPlayer->Resize(videoWidth, videoHeight);
+                        }
+                    }
+                }
+            }
         }
     }
 }
