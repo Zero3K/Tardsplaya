@@ -1321,8 +1321,12 @@ void AddStreamTab(const std::wstring& channel = L"") {
     if (g_useGpacPlayer) {
         tab.gpacPlayer = CreateGpacPlayer();
         if (tab.gpacPlayer) {
+            // Find the video area control that was created in CreateStreamChild
             HWND videoArea = GetDlgItem(hChild, IDC_VIDEO_AREA);
-            if (videoArea && !tab.gpacPlayer->Initialize(videoArea, tabName)) {
+            if (!videoArea) {
+                AddLog(L"Video area control not found for " + tabName);
+                tab.gpacPlayer.reset(); // Fall back to external player
+            } else if (!tab.gpacPlayer->Initialize(videoArea, tabName)) {
                 AddLog(L"Failed to initialize GPAC player for " + tabName);
                 tab.gpacPlayer.reset(); // Fall back to external player
             } else {
