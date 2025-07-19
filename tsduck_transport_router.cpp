@@ -1592,8 +1592,9 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
         last_video_sync_time_ = now;
         
         if (log_callback_) {
-            log_callback_(L"[MPC-WORKAROUND] Applied video sync recovery" + 
-                         (is_discontinuity ? L" (discontinuity)" : L" (periodic)"));
+            std::wstring message = L"[MPC-WORKAROUND] Applied video sync recovery";
+            message += (is_discontinuity ? L" (discontinuity)" : L" (periodic)");
+            log_callback_(message);
         }
     }
     
