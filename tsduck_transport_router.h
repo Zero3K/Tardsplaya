@@ -279,17 +279,15 @@ namespace tsduck_transport {
         // Insert PCR (Program Clock Reference) for timing
         void InsertPCR(TSPacket& packet, uint64_t pcr_value);
         
-        // Media player compatibility workarounds
+        // Media player compatibility workarounds  
         bool DetectMediaPlayerType(const std::wstring& player_path);
-        void ApplyMPCWorkaround(TSPacket& packet, bool is_discontinuity = false);
+        bool ApplyMPCWorkaround(TSPacket& packet, bool is_discontinuity = false);
         void ForceVideoSyncRecovery();
         void CreateStreamFormatChange(TSPacket& packet);
         
-        // DirectShow segment event generation for MPC-HC buffer flush
-        void ForceDiscontinuityOnNextPackets();
-        void ApplyProgramRestart(TSPacket& packet);
-        void RecalculatePacketCRC(TSPacket& packet);
-        uint32_t CalculateCRC32(const uint8_t* data, int length);
+        // MPC-HC buffer stall detection workaround using selective stream starvation
+        void TriggerVideoStarvationWorkaround();
+        bool ShouldDropVideoPacket(const TSPacket& packet);
         
         // Ad transition detection and handling
         bool IsAdTransition(const std::string& segment_url) const;
@@ -302,15 +300,13 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_video_sync_time_;
         std::chrono::steady_clock::time_point last_key_frame_time_;
         
-        // DirectShow segment event generation for MPC-HC buffer flush
-        bool schedule_program_restart_ = false;
-        int program_restart_countdown_ = 0;
-        uint32_t current_pat_version_ = 0;
-        uint32_t current_pmt_version_ = 0;
-        uint16_t pmt_pid_ = 0x1000; // Default PMT PID
+        // MPC-HC buffer stall detection workaround using selective stream starvation
+        bool schedule_video_starvation_ = false;
+        std::chrono::steady_clock::time_point video_starvation_start_time_;
+        std::chrono::milliseconds video_starvation_duration_{300}; // Brief 300ms starvation period
         
         // Timing controls to prevent excessive triggering
-        std::chrono::steady_clock::time_point last_format_change_time_;
+        std::chrono::steady_clock::time_point last_workaround_trigger_time_;
     };
     
 
