@@ -954,7 +954,10 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     // Detect if we need to enable MPC-HC workaround
     bool enableMPCWorkaround = IsMPCCompatiblePlayer(g_playerPath);
     if (enableMPCWorkaround) {
-        AddLog(L"[MPC-WORKAROUND] Detected MPC-compatible player - enabling video sync workaround");
+        AddLog(L"[MPC-WORKAROUND] Detected MPC-compatible player: " + g_playerPath);
+        AddLog(L"[MPC-WORKAROUND] Enabling video sync workaround for ad transitions");
+    } else {
+        AddLog(L"[PLAYER] Using " + g_playerPath + L" (no workaround needed)");
     }
     
     AddLog(L"[TS_MODE] Starting TSDuck transport stream routing for " + tab.channel + L" (" + standardQuality + L")");

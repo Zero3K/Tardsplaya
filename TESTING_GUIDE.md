@@ -174,3 +174,69 @@ netsh trace stop
 3. Windows 8.1 (edge case)
 
 The executable is ready for immediate testing on any Windows system!
+
+---
+
+# MPC-HC Workaround Testing
+
+## 🎯 **NEW: Media Player Compatibility Testing**
+
+### **The MPC-HC Issue**
+- **Problem**: MPC-HC and MPC-BE get stuck on black frames after skipping Twitch advertisements
+- **Symptom**: Video freezes but audio continues playing normally
+- **Affected Players**: MPC-HC, MPC-BE, VLC, PotPlayer
+- **Unaffected**: MPV (reference player that works correctly)
+
+### **Automatic Workaround Detection**
+The application automatically detects problematic players and enables the workaround:
+
+**Detection Patterns**:
+- `mpc-hc.exe`, `mpc-hc64.exe` → MPC-HC
+- `mpc-be.exe`, `mpcbe.exe` → MPC-BE  
+- `vlc.exe` → VLC Media Player
+- `potplayer.exe` → PotPlayer
+- `mpv.exe` → No workaround needed (reference)
+
+### **Testing Procedure**
+
+**Phase 1: Reference Test (MPV)**
+```
+1. Set player to mpv.exe in settings
+2. Watch a Twitch stream with frequent ads
+3. Verify smooth ad transitions (no freezing)
+4. Note: Should see "No workaround needed" in logs
+```
+
+**Phase 2: MPC-HC Test (With Workaround)**
+```
+1. Set player to mpc-hc.exe in settings  
+2. Watch the same Twitch stream
+3. Look for "[MPC-WORKAROUND] Detected MPC-compatible player" in logs
+4. Verify video doesn't freeze during ad transitions
+5. Check for sync recovery messages during ads
+```
+
+**Phase 3: Comparison Test**
+```
+1. Compare ad transition behavior between MPV and MPC-HC
+2. Both should now work smoothly without video freezing
+3. Audio and video should stay synchronized
+4. No black frames after ad skipping
+```
+
+### **Expected Log Messages**
+When the workaround is active, you should see:
+```
+[MPC-WORKAROUND] Detected MPC-compatible player: mpc-hc.exe
+[MPC-WORKAROUND] Enabled video synchronization workaround
+[MPC-WORKAROUND] Entering ad segment - preparing for sync recovery
+[MPC-WORKAROUND] Applied video sync recovery (discontinuity)
+[MPC-WORKAROUND] Exiting ad segment - forcing video sync recovery
+```
+
+### **Success Criteria**
+- ✅ MPC-HC works as smoothly as MPV during ad transitions
+- ✅ No video freezing on black frames after ads
+- ✅ Audio and video remain synchronized
+- ✅ Automatic detection works for all supported players
+- ✅ No performance degradation during normal playback
