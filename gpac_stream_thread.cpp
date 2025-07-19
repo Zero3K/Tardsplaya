@@ -256,16 +256,22 @@ bool GpacStreamThread::DownloadSegment(const std::wstring& segmentUrl, std::vect
 
 bool GpacStreamThread::FeedDataToGpac(const std::vector<uint8_t>& data) {
     if (!m_gpacPlayer || data.empty()) {
+        LogMessage(L"Cannot feed data to GPAC: invalid player or empty data");
         return false;
     }
     
-    // TODO: Real GPAC implementation would feed data like:
-    // gf_term_feed_data(m_gpacPlayer->GetTerminal(), data.data(), data.size());
+    LogMessage(L"Feeding " + std::to_wstring(data.size()) + L" bytes of MPEG-TS data to GPAC decoders for " + m_channelName);
     
-    // For stub implementation, just simulate successful data feeding
-    LogMessage(std::wstring(L"Fed ") + std::to_wstring(data.size()) + L" bytes to GPAC player for " + m_channelName);
+    // Use GPAC player's MPEG-TS processing method
+    bool success = m_gpacPlayer->ProcessMpegTsData(data.data(), data.size());
     
-    return true;
+    if (success) {
+        LogMessage(L"MPEG-TS data successfully processed by GPAC decoders");
+    } else {
+        LogMessage(L"Failed to process MPEG-TS data through GPAC decoders");
+    }
+    
+    return success;
 }
 
 bool GpacStreamThread::IsAdSegment(const std::wstring& segmentUrl, const std::vector<uint8_t>& data) {

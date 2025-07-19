@@ -49,6 +49,12 @@ public:
     // Handle discontinuities (GPAC handles this better than external players)
     void HandleDiscontinuity();
     
+    // Process MPEG-TS data packets
+    bool ProcessMpegTsData(const uint8_t* data, size_t dataSize);
+    
+    // Get GPAC terminal for direct data feeding
+    void* GetTerminal() const { return m_terminal; }
+    
     // Set log callback for debugging
     void SetLogCallback(std::function<void(const std::wstring&)> callback);
 
