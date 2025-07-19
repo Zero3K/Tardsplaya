@@ -29,11 +29,19 @@ namespace tsduck_transport {
         bool payload_unit_start = false;
         bool discontinuity = false;
         
+        // Stream type identification
+        bool is_video_packet = false;     // True if this packet contains video data
+        bool is_audio_packet = false;     // True if this packet contains audio data
+        
         // Frame Number Tagging for lag reduction
         uint64_t frame_number = 0;        // Global frame sequence number
         uint32_t segment_frame_number = 0; // Frame number within current segment
         bool is_key_frame = false;        // Indicates if this is a key/I-frame
         std::chrono::milliseconds frame_duration{0}; // Expected frame duration for timing
+        
+        // Video synchronization data
+        uint64_t video_frame_number = 0;  // Video-specific frame counter
+        bool video_sync_lost = false;     // True if video synchronization is lost
         
         TSPacket() {
             memset(data, 0, TS_PACKET_SIZE);
@@ -48,8 +56,10 @@ namespace tsduck_transport {
         
         // Frame Number Tagging methods
         void SetFrameInfo(uint64_t global_frame, uint32_t segment_frame, bool key_frame = false, std::chrono::milliseconds duration = std::chrono::milliseconds(0));
+        void SetVideoInfo(uint64_t video_frame, bool is_video, bool is_audio = false);
         std::wstring GetFrameDebugInfo() const;
         bool IsFrameDropDetected(const TSPacket& previous_packet) const;
+        bool IsVideoSyncValid() const;
     };
     
     // Transport Stream buffer for smooth re-routing
@@ -183,6 +193,14 @@ namespace tsduck_transport {
             uint32_t frames_duplicated = 0;
             double current_fps = 0.0;
             std::chrono::milliseconds avg_frame_interval{0};
+            
+            // Video/Audio stream health statistics
+            uint64_t video_packets_processed = 0;
+            uint64_t audio_packets_processed = 0;
+            uint64_t video_frames_processed = 0;
+            uint32_t video_sync_loss_count = 0;
+            bool video_stream_healthy = true;
+            bool audio_stream_healthy = true;
         };
         BufferStats GetBufferStats() const;
         
@@ -210,6 +228,19 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_frame_time_;
         std::chrono::steady_clock::time_point stream_start_time_;
         
+        // Video/Audio stream health tracking
+        std::atomic<uint64_t> video_packets_processed_{0};
+        std::atomic<uint64_t> audio_packets_processed_{0};
+        std::atomic<uint64_t> video_frames_processed_{0};
+        std::atomic<uint64_t> last_video_frame_number_{0};
+        std::atomic<uint32_t> video_sync_loss_count_{0};
+        std::chrono::steady_clock::time_point last_video_packet_time_;
+        std::chrono::steady_clock::time_point last_audio_packet_time_;
+        
+        // Detected PIDs for stream types
+        std::atomic<uint16_t> detected_video_pid_{0};
+        std::atomic<uint16_t> detected_audio_pid_{0};
+        
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
         
@@ -218,6 +249,14 @@ namespace tsduck_transport {
         
         // Reset frame statistics (for discontinuities)
         void ResetFrameStatistics();
+        
+        // Detect and classify stream types
+        void DetectStreamTypes(TSPacket& packet);
+        
+        // Video stream health monitoring
+        bool IsVideoStreamHealthy() const;
+        bool IsAudioStreamHealthy() const;
+        void CheckStreamHealth(const TSPacket& packet);
         
         // Launch media player process with transport stream input
         bool LaunchMediaPlayer(const RouterConfig& config, HANDLE& process_handle, HANDLE& stdin_handle);

@@ -162,6 +162,22 @@ std::thread StartTransportStreamThread(
                             }
                         }
                         
+                        // Add video/audio health information
+                        if (stats.video_packets_processed > 0 || stats.audio_packets_processed > 0) {
+                            status_msg += L", Video: " + std::to_wstring(stats.video_packets_processed) + 
+                                         L", Audio: " + std::to_wstring(stats.audio_packets_processed);
+                            
+                            if (!stats.video_stream_healthy) {
+                                status_msg += L" [VIDEO_UNHEALTHY]";
+                            }
+                            if (!stats.audio_stream_healthy) {
+                                status_msg += L" [AUDIO_UNHEALTHY]";
+                            }
+                            if (stats.video_sync_loss_count > 0) {
+                                status_msg += L" [SYNC_LOSS:" + std::to_wstring(stats.video_sync_loss_count) + L"]";
+                            }
+                        }
+                        
                         log_callback(status_msg);
                     }
                 }

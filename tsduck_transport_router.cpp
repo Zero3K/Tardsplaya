@@ -190,14 +190,24 @@ void TSPacket::SetFrameInfo(uint64_t global_frame, uint32_t segment_frame, bool 
     frame_duration = duration;
 }
 
+void TSPacket::SetVideoInfo(uint64_t video_frame, bool is_video, bool is_audio) {
+    video_frame_number = video_frame;
+    is_video_packet = is_video;
+    is_audio_packet = is_audio;
+    video_sync_lost = false; // Reset sync status when setting video info
+}
+
 std::wstring TSPacket::GetFrameDebugInfo() const {
     std::wstring info = L"Frame#" + std::to_wstring(frame_number) + 
                        L" Seg#" + std::to_wstring(segment_frame_number) +
                        L" PID:" + std::to_wstring(pid);
     
+    if (is_video_packet) info += L" [VIDEO]";
+    if (is_audio_packet) info += L" [AUDIO]";
     if (is_key_frame) info += L" [KEY]";
     if (payload_unit_start) info += L" [START]";
     if (discontinuity) info += L" [DISC]";
+    if (video_sync_lost) info += L" [SYNC_LOST]";
     
     if (frame_duration.count() > 0) {
         info += L" (" + std::to_wstring(frame_duration.count()) + L"ms)";
@@ -215,6 +225,10 @@ bool TSPacket::IsFrameDropDetected(const TSPacket& previous_packet) const {
     // Check if we skipped frame numbers (indicating dropped frames)
     uint64_t expected_frame = previous_packet.frame_number + 1;
     return frame_number > expected_frame;
+}
+
+bool TSPacket::IsVideoSyncValid() const {
+    return is_video_packet && !video_sync_lost;
 }
 
 // TSBuffer implementation
@@ -365,8 +379,11 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         // Parse packet header
         packet.ParseHeader();
         
+        // Detect and classify stream types (video/audio)
+        DetectStreamTypes(packet);
+        
         // Frame Number Tagging: Assign frame numbers for video packets
-        if (packet.pid == video_pid_ || packet.payload_unit_start) {
+        if (packet.is_video_packet || packet.payload_unit_start) {
             // Increment frame counters for video packets or new payload units
             global_frame_counter_++;
             segment_frame_counter_++;
@@ -381,16 +398,21 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
             
             // Check for key frame indicators in the payload
             bool is_key_frame = false;
-            if (packet.payload_unit_start && packet.data[4] == 0x00) {
+            if (packet.payload_unit_start && packet.is_video_packet && packet.data[4] == 0x00) {
                 // Look for MPEG start codes that might indicate I-frames
                 if (offset + TS_PACKET_SIZE + 8 < data_size) {
                     const uint8_t* payload = data_ptr + offset + 4;
-                    // Simple heuristic: look for I-frame patterns
-                    for (int i = 0; i < 16 && i < TS_PACKET_SIZE - 8; i++) {
+                    // Enhanced I-frame detection
+                    for (int i = 0; i < 32 && i < TS_PACKET_SIZE - 8; i++) {
                         if (payload[i] == 0x00 && payload[i+1] == 0x00 && payload[i+2] == 0x01) {
                             uint8_t frame_type = payload[i+3];
-                            // MPEG-2 I-frame detection (simplified)
-                            if ((frame_type & 0x38) == 0x08) {
+                            // MPEG-2 I-frame detection (enhanced)
+                            if ((frame_type & 0x38) == 0x08 || frame_type == 0x00) {
+                                is_key_frame = true;
+                                break;
+                            }
+                            // H.264 IDR frame detection
+                            if ((frame_type & 0x1F) == 0x05) {
                                 is_key_frame = true;
                                 break;
                             }
@@ -401,6 +423,13 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
             
             // Set frame information
             packet.SetFrameInfo(global_frame_counter_, segment_frame_counter_, is_key_frame, estimated_frame_duration_);
+            
+            // Set video-specific information for video packets
+            if (packet.is_video_packet) {
+                packet.SetVideoInfo(global_frame_counter_, true, false);
+            } else if (packet.is_audio_packet) {
+                packet.SetVideoInfo(0, false, true);
+            }
         }
         
         // Don't modify continuity counters - preserve original TS packet timing and sequencing
@@ -581,6 +610,17 @@ TransportStreamRouter::TransportStreamRouter() {
     last_frame_time_ = std::chrono::steady_clock::now();
     stream_start_time_ = std::chrono::steady_clock::now();
     
+    // Initialize video/audio stream tracking
+    video_packets_processed_ = 0;
+    audio_packets_processed_ = 0;
+    video_frames_processed_ = 0;
+    last_video_frame_number_ = 0;
+    video_sync_loss_count_ = 0;
+    last_video_packet_time_ = std::chrono::steady_clock::now();
+    last_audio_packet_time_ = std::chrono::steady_clock::now();
+    detected_video_pid_ = 0;
+    detected_audio_pid_ = 0;
+    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();
@@ -684,6 +724,14 @@ TransportStreamRouter::BufferStats TransportStreamRouter::GetBufferStats() const
     stats.total_frames_processed = total_frames_processed_.load();
     stats.frames_dropped = frames_dropped_.load();
     stats.frames_duplicated = frames_duplicated_.load();
+    
+    // Video/Audio stream statistics
+    stats.video_packets_processed = video_packets_processed_.load();
+    stats.audio_packets_processed = audio_packets_processed_.load();
+    stats.video_frames_processed = video_frames_processed_.load();
+    stats.video_sync_loss_count = video_sync_loss_count_.load();
+    stats.video_stream_healthy = IsVideoStreamHealthy();
+    stats.audio_stream_healthy = IsAudioStreamHealthy();
     
     // Calculate current FPS
     auto now = std::chrono::steady_clock::now();
@@ -873,6 +921,9 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     for (const auto& packet : ts_packets) {
                         if (!routing_active_ || cancel_token) break;
                         
+                        // Check stream health before adding packets
+                        CheckStreamHealth(packet);
+                        
                         // Implement flow control with latency-optimized timing
                         while (ts_buffer_->GetBufferedPackets() >= buffer_high_watermark && routing_active_ && !cancel_token) {
                             auto sleep_duration = current_config_.low_latency_mode ? 
@@ -1045,11 +1096,40 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                 last_frame_number_ = current_frame;
                 total_frames_processed_++;
                 
+                // Video-specific frame tracking
+                if (packet.is_video_packet) {
+                    video_frames_processed_++;
+                    last_video_frame_number_ = packet.video_frame_number;
+                    
+                    // Check for video synchronization issues
+                    if (packet.video_sync_lost) {
+                        video_sync_loss_count_++;
+                        if (log_callback_) {
+                            log_callback_(L"[VIDEO_SYNC] Video synchronization lost at frame #" + std::to_wstring(current_frame));
+                        }
+                    }
+                }
+                
                 // Log frame info for key frames or periodically
                 if (packet.is_key_frame || (current_frame % 300 == 0)) { // Every 300 frames or key frames
                     if (log_callback_) {
                         log_callback_(L"[FRAME_TAG] " + packet.GetFrameDebugInfo());
                     }
+                }
+                
+                // Special handling for video stream health
+                if (packet.is_video_packet) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto video_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_video_packet_time_);
+                    
+                    // If we haven't seen video packets for more than 5 seconds, log warning
+                    if (video_gap.count() > 5000) {
+                        if (log_callback_) {
+                            log_callback_(L"[VIDEO_HEALTH] Warning: No video packets for " + std::to_wstring(video_gap.count()) + L"ms");
+                        }
+                    }
+                    
+                    last_video_packet_time_ = now;
                 }
             }
             
@@ -1349,6 +1429,103 @@ void TransportStreamRouter::ResetFrameStatistics() {
     last_frame_number_ = 0;
     last_frame_time_ = std::chrono::steady_clock::now();
     stream_start_time_ = std::chrono::steady_clock::now();
+    
+    // Reset video/audio stream health tracking
+    video_packets_processed_ = 0;
+    audio_packets_processed_ = 0;
+    video_frames_processed_ = 0;
+    last_video_frame_number_ = 0;
+    video_sync_loss_count_ = 0;
+    last_video_packet_time_ = std::chrono::steady_clock::now();
+    last_audio_packet_time_ = std::chrono::steady_clock::now();
+}
+
+void TransportStreamRouter::DetectStreamTypes(TSPacket& packet) {
+    // Detect video and audio PIDs by analyzing packet content
+    if (packet.payload_unit_start && packet.pid > 0x20) {
+        // Look for video/audio stream indicators
+        const uint8_t* payload = packet.data + 4;
+        size_t payload_size = TS_PACKET_SIZE - 4;
+        
+        // Check adaptation field
+        if ((packet.data[3] & 0x20) != 0 && payload_size > 0) {
+            uint8_t adaptation_length = payload[0];
+            if (adaptation_length < payload_size) {
+                payload += adaptation_length + 1;
+                payload_size -= adaptation_length + 1;
+            }
+        }
+        
+        // Look for PES header patterns
+        if (payload_size >= 6 && payload[0] == 0x00 && payload[1] == 0x00 && payload[2] == 0x01) {
+            uint8_t stream_id = payload[3];
+            
+            // Video stream IDs (typically 0xE0-0xEF for MPEG video)
+            if ((stream_id >= 0xE0 && stream_id <= 0xEF) || stream_id == 0xBD) {
+                packet.is_video_packet = true;
+                detected_video_pid_ = packet.pid;
+            }
+            // Audio stream IDs (typically 0xC0-0xDF for audio)
+            else if ((stream_id >= 0xC0 && stream_id <= 0xDF) || stream_id == 0xBD) {
+                packet.is_audio_packet = true;
+                detected_audio_pid_ = packet.pid;
+            }
+        }
+    } else {
+        // Use previously detected PIDs
+        if (packet.pid == detected_video_pid_.load()) {
+            packet.is_video_packet = true;
+        } else if (packet.pid == detected_audio_pid_.load()) {
+            packet.is_audio_packet = true;
+        }
+    }
+}
+
+bool TransportStreamRouter::IsVideoStreamHealthy() const {
+    auto now = std::chrono::steady_clock::now();
+    auto video_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_video_packet_time_);
+    
+    // Consider video healthy if we've seen packets within the last 3 seconds
+    return video_gap.count() < 3000 && video_packets_processed_.load() > 0;
+}
+
+bool TransportStreamRouter::IsAudioStreamHealthy() const {
+    auto now = std::chrono::steady_clock::now();
+    auto audio_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_audio_packet_time_);
+    
+    // Consider audio healthy if we've seen packets within the last 3 seconds
+    return audio_gap.count() < 3000 && audio_packets_processed_.load() > 0;
+}
+
+void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
+    auto now = std::chrono::steady_clock::now();
+    
+    if (packet.is_video_packet) {
+        video_packets_processed_++;
+        last_video_packet_time_ = now;
+        
+        // Check for video sync issues
+        if (!packet.IsVideoSyncValid()) {
+            video_sync_loss_count_++;
+        }
+    } else if (packet.is_audio_packet) {
+        audio_packets_processed_++;
+        last_audio_packet_time_ = now;
+    }
+    
+    // Log warnings if stream health is degraded
+    static auto last_health_check = std::chrono::steady_clock::now();
+    auto health_check_interval = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_health_check);
+    
+    if (health_check_interval.count() > 10000) { // Check every 10 seconds
+        if (!IsVideoStreamHealthy() && log_callback_) {
+            log_callback_(L"[STREAM_HEALTH] WARNING: Video stream appears unhealthy - possible black frame issue");
+        }
+        if (!IsAudioStreamHealthy() && log_callback_) {
+            log_callback_(L"[STREAM_HEALTH] WARNING: Audio stream appears unhealthy");
+        }
+        last_health_check = now;
+    }
 }
 
 
