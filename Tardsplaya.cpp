@@ -1151,9 +1151,9 @@ ATOM RegisterStreamChildClass() {
 }
 
 HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"") {
-    // Increased window size to accommodate video area when using GPAC
-    int windowWidth = g_useGpacPlayer ? 800 : 480;
-    int windowHeight = g_useGpacPlayer ? 400 : 180;
+    // Use smaller window size since we don't need embedded video area
+    int windowWidth = 480;
+    int windowHeight = 180;
     
     RECT rc = { 0, 0, windowWidth, windowHeight };
     HWND hwnd = CreateWindowEx(0, L"StreamChildWin", NULL,
@@ -1170,8 +1170,8 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     HWND hQualityLabel = CreateWindowEx(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
     SendMessage(hQualityLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
-    // Adjust quality list size based on GPAC mode
-    int qualityListHeight = g_useGpacPlayer ? 100 : 120;
+    // Use standard quality list size since no video area needed
+    int qualityListHeight = 120;
     HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, qualityListHeight, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
     SendMessage(hQualList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
@@ -1185,25 +1185,6 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     SendMessage(hStop, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
-    
-    // Create video area for GPAC player when enabled
-    if (g_useGpacPlayer) {
-        HWND hVideoArea = CreateWindowEx(
-            WS_EX_CLIENTEDGE,
-            L"STATIC",
-            L"Video Area",
-            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
-            360, 10, 420, 300,  // Video area to the right of controls
-            hwnd,
-            (HMENU)IDC_VIDEO_AREA,
-            g_hInst,
-            nullptr
-        );
-        SendMessage(hVideoArea, WM_SETFONT, (WPARAM)g_hFont, TRUE);
-        
-        // Set background to black for video
-        SetClassLongPtr(hVideoArea, GCLP_HBRBACKGROUND, (LONG_PTR)GetStockObject(BLACK_BRUSH));
-    }
     
 
 
@@ -1260,25 +1241,6 @@ void ResizeTabAndChildren(HWND hwnd) {
             TabCtrl_AdjustRect(g_hTab, FALSE, &rcTab);
             SetWindowPos(g_streams[i].hChild, nullptr, rcTab.left, rcTab.top, 
                         rcTab.right - rcTab.left, rcTab.bottom - rcTab.top, SWP_NOZORDER | SWP_SHOWWINDOW);
-            
-            // Resize GPAC video area if present
-            if (g_useGpacPlayer) {
-                HWND hVideoArea = GetDlgItem(g_streams[i].hChild, IDC_VIDEO_AREA);
-                if (hVideoArea) {
-                    int childWidth = rcTab.right - rcTab.left;
-                    int childHeight = rcTab.bottom - rcTab.top;
-                    int videoWidth = childWidth - 370;  // Leave space for controls
-                    int videoHeight = childHeight - 20;  // Leave some margin
-                    if (videoWidth > 100 && videoHeight > 100) {
-                        SetWindowPos(hVideoArea, nullptr, 360, 10, videoWidth, videoHeight, SWP_NOZORDER);
-                        
-                        // Resize GPAC player window if available
-                        if (g_streams[i].gpacPlayer) {
-                            g_streams[i].gpacPlayer->Resize(videoWidth, videoHeight);
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -1321,16 +1283,12 @@ void AddStreamTab(const std::wstring& channel = L"") {
     if (g_useGpacPlayer) {
         tab.gpacPlayer = CreateGpacPlayer();
         if (tab.gpacPlayer) {
-            // Find the video area control that was created in CreateStreamChild
-            HWND videoArea = GetDlgItem(hChild, IDC_VIDEO_AREA);
-            if (!videoArea) {
-                AddLog(L"Video area control not found for " + tabName);
-                tab.gpacPlayer.reset(); // Fall back to external player
-            } else if (!tab.gpacPlayer->Initialize(videoArea, tabName)) {
+            // Initialize GPAC player with separate window (nullptr parent)
+            if (!tab.gpacPlayer->Initialize(nullptr, tabName)) {
                 AddLog(L"Failed to initialize GPAC player for " + tabName);
                 tab.gpacPlayer.reset(); // Fall back to external player
             } else {
-                AddLog(L"GPAC player initialized for " + tabName);
+                AddLog(L"GPAC player initialized with separate window for " + tabName);
                 // Set log callback for GPAC player
                 tab.gpacPlayer->SetLogCallback([](const std::wstring& msg) {
                     PostMessage(g_hMainWnd, WM_USER + 1, 0, (LPARAM)new std::wstring(msg));

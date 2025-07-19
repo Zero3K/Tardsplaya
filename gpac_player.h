@@ -17,7 +17,8 @@ public:
     GpacPlayer();
     ~GpacPlayer();
     
-    // Initialize GPAC player with a parent window for embedding
+    // Initialize GPAC player with optional parent window for embedding
+    // If parentWindow is nullptr, creates a separate window
     bool Initialize(HWND parentWindow, const std::wstring& channelName);
     
     // Start playing a stream URL
@@ -66,6 +67,7 @@ private:
     std::atomic<bool> m_initialized;
     std::atomic<bool> m_playing;
     std::atomic<bool> m_paused;
+    bool m_useSeparateWindow;
     std::wstring m_channelName;
     std::wstring m_currentUrl;
     

@@ -32,6 +32,7 @@ GpacPlayer::GpacPlayer()
     , m_initialized(false)
     , m_playing(false)
     , m_paused(false)
+    , m_useSeparateWindow(false)
 {
 }
 
@@ -47,8 +48,13 @@ bool GpacPlayer::Initialize(HWND parentWindow, const std::wstring& channelName) 
     
     m_parentWindow = parentWindow;
     m_channelName = channelName;
+    m_useSeparateWindow = (parentWindow == nullptr);
     
-    LogMessage(L"Initializing GPAC player for channel: " + channelName);
+    if (m_useSeparateWindow) {
+        LogMessage(L"Initializing GPAC player with separate window for channel: " + channelName);
+    } else {
+        LogMessage(L"Initializing GPAC player with embedded window for channel: " + channelName);
+    }
     
     // Initialize GPAC
     if (!InitializeGpac()) {
@@ -56,7 +62,7 @@ bool GpacPlayer::Initialize(HWND parentWindow, const std::wstring& channelName) 
         return false;
     }
     
-    // Create video window embedded in parent
+    // Create video window (separate or embedded based on mode)
     if (!CreateVideoWindow()) {
         LogMessage(L"Failed to create video window");
         CleanupGpac();
@@ -179,8 +185,17 @@ void GpacPlayer::ShowAdSkippingMessage(bool show) {
 
 void GpacPlayer::Resize(int width, int height) {
     if (m_videoWindow) {
-        SetWindowPos(m_videoWindow, nullptr, 0, 0, width, height, 
-                    SWP_NOZORDER | SWP_NOMOVE);
+        if (m_useSeparateWindow) {
+            // For separate windows, resize the entire window
+            RECT rect;
+            GetWindowRect(m_videoWindow, &rect);
+            SetWindowPos(m_videoWindow, nullptr, rect.left, rect.top, width, height, 
+                        SWP_NOZORDER);
+        } else {
+            // For embedded windows, resize within parent
+            SetWindowPos(m_videoWindow, nullptr, 0, 0, width, height, 
+                        SWP_NOZORDER | SWP_NOMOVE);
+        }
     }
     
     if (m_overlayWindow) {
@@ -276,24 +291,41 @@ void GpacPlayer::CleanupGpac() {
 }
 
 bool GpacPlayer::CreateVideoWindow() {
-    if (!m_parentWindow) {
-        return false;
+    if (m_useSeparateWindow) {
+        LogMessage(L"Creating separate video window");
+        
+        // Create a separate top-level window for video rendering
+        m_videoWindow = CreateWindowEx(
+            WS_EX_APPWINDOW,
+            L"STATIC",
+            (L"GPAC Video - " + m_channelName).c_str(),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,  // Separate window size
+            nullptr,  // No parent
+            nullptr,
+            GetModuleHandle(nullptr),
+            nullptr
+        );
+    } else {
+        if (!m_parentWindow) {
+            return false;
+        }
+        
+        LogMessage(L"Creating embedded video window");
+        
+        // Create a child window for video rendering
+        m_videoWindow = CreateWindowEx(
+            0,
+            L"STATIC",
+            L"GPAC Video",
+            WS_CHILD | WS_VISIBLE | WS_BORDER,
+            0, 0, 400, 300,  // Initial size, will be resized
+            m_parentWindow,
+            nullptr,
+            GetModuleHandle(nullptr),
+            nullptr
+        );
     }
-    
-    LogMessage(L"Creating embedded video window");
-    
-    // Create a child window for video rendering
-    m_videoWindow = CreateWindowEx(
-        0,
-        L"STATIC",
-        L"GPAC Video",
-        WS_CHILD | WS_VISIBLE | WS_BORDER,
-        0, 0, 400, 300,  // Initial size, will be resized
-        m_parentWindow,
-        nullptr,
-        GetModuleHandle(nullptr),
-        nullptr
-    );
     
     if (!m_videoWindow) {
         LogMessage(L"Failed to create video window");
@@ -308,7 +340,9 @@ bool GpacPlayer::CreateVideoWindow() {
 }
 
 bool GpacPlayer::CreateOverlayWindow() {
-    if (!m_parentWindow) {
+    HWND parentForOverlay = m_useSeparateWindow ? m_videoWindow : m_parentWindow;
+    
+    if (!parentForOverlay) {
         return false;
     }
     
@@ -321,7 +355,7 @@ bool GpacPlayer::CreateOverlayWindow() {
         L"Skipping ads...",
         WS_CHILD | SS_CENTER,
         0, 0, 140, 30,
-        m_parentWindow,
+        parentForOverlay,
         nullptr,
         GetModuleHandle(nullptr),
         nullptr
