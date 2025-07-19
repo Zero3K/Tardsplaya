@@ -285,13 +285,11 @@ namespace tsduck_transport {
         void ForceVideoSyncRecovery();
         void CreateStreamFormatChange(TSPacket& packet);
         
-        // MPEG-TS discontinuity signaling for MPC-HC buffer flush
+        // DirectShow segment event generation for MPC-HC buffer flush
         void ForceDiscontinuityOnNextPackets();
-        void SetDiscontinuityIndicator(TSPacket& packet);
-        void InjectPATWithDiscontinuity();
-        void InjectPMTWithDiscontinuity();
-        void ResetPacketContinuityCounters();
-        void TriggerStreamFormatChange();
+        void ApplyProgramRestart(TSPacket& packet);
+        void RecalculatePacketCRC(TSPacket& packet);
+        uint32_t CalculateCRC32(const uint8_t* data, int length);
         
         // Ad transition detection and handling
         bool IsAdTransition(const std::string& segment_url) const;
@@ -304,17 +302,12 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_video_sync_time_;
         std::chrono::steady_clock::time_point last_key_frame_time_;
         
-        // MPEG-TS discontinuity signaling state
-        bool force_discontinuity_on_next_video_ = false;
-        bool force_discontinuity_on_next_audio_ = false;
-        bool inject_pat_with_discontinuity_ = false;
-        bool inject_pmt_with_discontinuity_ = false;
-        std::chrono::steady_clock::time_point last_discontinuity_injection_;
-        
-        // Aggressive program structure manipulation for MPC-HC buffer flush
-        bool force_program_structure_reset_ = false;
-        uint32_t program_reset_counter_ = 0;
-        int reset_packet_count_ = 0;
+        // DirectShow segment event generation for MPC-HC buffer flush
+        bool schedule_program_restart_ = false;
+        int program_restart_countdown_ = 0;
+        uint32_t current_pat_version_ = 0;
+        uint32_t current_pmt_version_ = 0;
+        uint16_t pmt_pid_ = 0x1000; // Default PMT PID
         
         // Timing controls to prevent excessive triggering
         std::chrono::steady_clock::time_point last_format_change_time_;

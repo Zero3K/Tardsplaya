@@ -671,21 +671,15 @@ TransportStreamRouter::TransportStreamRouter() {
     last_video_sync_time_ = std::chrono::steady_clock::now();
     last_key_frame_time_ = std::chrono::steady_clock::now();
     
-    // Initialize discontinuity signaling state
-    force_discontinuity_on_next_video_ = false;
-    force_discontinuity_on_next_audio_ = false;
-    inject_pat_with_discontinuity_ = false;
-    inject_pmt_with_discontinuity_ = false;
-    last_discontinuity_injection_ = std::chrono::steady_clock::now();
-    
-    // Initialize program structure reset state
-    force_program_structure_reset_ = false;
-    program_reset_counter_ = 0;
-    reset_packet_count_ = 0;
+    // Initialize DirectShow segment event generation state
+    schedule_program_restart_ = false;
+    program_restart_countdown_ = 0;
+    current_pat_version_ = 0;
+    current_pmt_version_ = 0;
+    pmt_pid_ = 0x1000; // Default PMT PID
     
     // Initialize timing controls
     last_format_change_time_ = std::chrono::steady_clock::now();
-    last_program_reset_time_ = std::chrono::steady_clock::now();
     
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
@@ -1603,51 +1597,12 @@ bool TransportStreamRouter::DetectMediaPlayerType(const std::wstring& player_pat
 void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discontinuity) {
     if (!is_mpc_player_ || !current_config_.enable_mpc_workaround) return;
     
-    // Simple approach: Only apply discontinuity indicator to one video packet when exiting ads
-    // This triggers MPC-HC's buffer stall detection without disrupting sync
-    
-    if (packet.is_video_packet && force_discontinuity_on_next_video_) {
-        // Rate limit to prevent multiple rapid changes  
-        auto now = std::chrono::steady_clock::now();
-        auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_format_change_time_);
-        
-        if (time_since_last.count() >= 500) {  // Min 500ms between changes
-            SetDiscontinuityIndicator(packet);
-            last_format_change_time_ = now;
-            force_discontinuity_on_next_video_ = false;
-            
-            if (log_callback_) {
-                log_callback_(L"[MPC-WORKAROUND] Applied single video discontinuity to trigger buffer recovery");
-            }
-        }
-    }
-}
-}
-
-void TransportStreamRouter::ForceVideoSyncRecovery() {
-    // Schedule a single, minimal discontinuity indicator for the next video packet only
-    // This avoids audio sync issues while still triggering MPC-HC's buffer detection
-    
-    force_discontinuity_on_next_video_ = true;
-    
-    if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Scheduled single video discontinuity for buffer recovery");
+    // Apply program restart when scheduled to generate DirectShow segment events
+    if (schedule_program_restart_) {
+        ApplyProgramRestart(packet);
     }
 }
 
-void TransportStreamRouter::CreateStreamFormatChange(TSPacket& packet) {
-    // Minimal approach: Only set discontinuity indicator on video packets to trigger
-    // DirectShow events without disrupting stream timing or audio/video sync
-    
-    // Only apply to video packets to avoid affecting audio timing
-    if (IsVideoPacket(packet)) {
-        SetDiscontinuityIndicator(packet);
-        
-        if (log_callback_) {
-            log_callback_(L"[MPC-WORKAROUND] Set video discontinuity indicator to trigger buffer flush");
-        }
-    }
-}
 
 bool TransportStreamRouter::IsAdTransition(const std::string& segment_url) const {
     // Simple ad detection based on URL patterns
@@ -1672,11 +1627,13 @@ void TransportStreamRouter::HandleAdTransition(bool entering_ad) {
         // This is when the video buffer freeze typically occurs
         if (!entering_ad && was_in_ad) {
             if (log_callback_) {
-                log_callback_(L"[MPC-WORKAROUND] Exiting ad segment - scheduling video discontinuity for buffer recovery");
+                log_callback_(L"[MPC-WORKAROUND] Exiting ad segment - triggering DirectShow segment event for buffer recovery");
             }
             
-            // Schedule a single discontinuity for the next video packet
-            force_discontinuity_on_next_video_ = true;
+            // Schedule a program structure change that will generate DirectShow events
+            // This mimics what causes EC_SEGMENT_STARTED events that MPC-HC responds to
+            schedule_program_restart_ = true;
+            program_restart_countdown_ = 3; // Apply over next 3 packets for reliability
             
             // Reset timing to allow immediate action
             last_format_change_time_ = std::chrono::steady_clock::time_point{};
@@ -1685,102 +1642,188 @@ void TransportStreamRouter::HandleAdTransition(bool entering_ad) {
     }
 }
 
-// MPEG-TS discontinuity signaling implementation for MPC-HC compatibility
+// DirectShow segment event generation for MPC-HC compatibility
 void TransportStreamRouter::ForceDiscontinuityOnNextPackets() {
-    // Schedule discontinuity indicator on next video packet only
-    // Avoid touching audio to prevent sync issues
-    force_discontinuity_on_next_video_ = true;
+    // Schedule program structure restart that generates DirectShow events
+    // This triggers EC_SEGMENT_STARTED events that MPC-HC buffer flush logic responds to
+    schedule_program_restart_ = true;
+    program_restart_countdown_ = 3; // Apply over next 3 packets
     
     if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Scheduled minimal video discontinuity for buffer flush");
+        log_callback_(L"[MPC-WORKAROUND] Scheduled program restart to trigger DirectShow segment events");
     }
 }
 
-void TransportStreamRouter::SetDiscontinuityIndicator(TSPacket& packet) {
-    // Apply minimal discontinuity signaling that's just enough to trigger
-    // DirectShow buffer flush without causing timing disruption
+void TransportStreamRouter::ApplyProgramRestart(TSPacket& packet) {
+    // Generate a program structure restart that causes DirectShow to emit
+    // EC_SEGMENT_STARTED events, which trigger MPC-HC's buffer flush logic
     
-    // Ensure packet has adaptation field for discontinuity indicator
-    if (!(packet.data[3] & 0x20)) {
-        // No adaptation field present, need to add one
-        // Shift payload data to make room for minimal adaptation field
-        uint8_t old_flags = packet.data[3];
-        packet.data[3] = old_flags | 0x20; // Set adaptation field flag
-        packet.data[4] = 1; // Adaptation field length = 1 byte
-        packet.data[5] = 0x80; // Set discontinuity indicator bit
+    if (program_restart_countdown_ <= 0) {
+        schedule_program_restart_ = false;
+        return;
+    }
+    
+    auto now = std::chrono::steady_clock::now();
+    
+    // Rate limiting to prevent stream corruption
+    if (now < last_format_change_time_ + std::chrono::milliseconds(500)) {
+        return; // Too soon since last change
+    }
+    
+    // Apply different aspects of program restart over multiple packets
+    bool modified = false;
+    
+    if (packet.pid == 0x0000) { // PAT packet
+        // Increment PAT version to signal program structure change
+        if (packet.data[10] & 0x01) { // Check version bit 0
+            packet.data[10] &= ~0x3E; // Clear version bits (5 bits)
+            packet.data[10] |= ((current_pat_version_ & 0x1F) << 1); // Set new version
+        }
+        current_pat_version_ = (current_pat_version_ + 1) % 32;
+        modified = true;
         
-        // Move existing payload if present
-        if (old_flags & 0x10) { // Had payload
-            // Compact existing payload by 2 bytes
-            for (int i = 186; i >= 6; i--) {
-                packet.data[i] = (i >= 8) ? packet.data[i-2] : 0xFF; // Fill with padding
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Applied PAT version change for program restart (v" + 
+                         std::to_wstring(current_pat_version_) + L")");
+        }
+    }
+    else if (packet.pid == pmt_pid_ && pmt_pid_ != 0) { // PMT packet
+        // Increment PMT version to signal program structure change  
+        if (packet.data[10] & 0x01) { // Check version bit 0
+            packet.data[10] &= ~0x3E; // Clear version bits (5 bits)  
+            packet.data[10] |= ((current_pmt_version_ & 0x1F) << 1); // Set new version
+        }
+        current_pmt_version_ = (current_pmt_version_ + 1) % 32;
+        modified = true;
+        
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Applied PMT version change for program restart (v" + 
+                         std::to_wstring(current_pmt_version_) + L")");
+        }
+    }
+    else if (packet.is_video_packet) {
+        // Add discontinuity indicator to video packets to complete the segment boundary signal
+        if (!(packet.data[3] & 0x20)) {
+            // Add minimal adaptation field with discontinuity indicator
+            uint8_t old_flags = packet.data[3];
+            packet.data[3] = old_flags | 0x20; // Set adaptation field flag
+            packet.data[4] = 1; // Adaptation field length = 1 byte  
+            packet.data[5] = 0x80; // Set discontinuity indicator bit
+            
+            // Compact payload if present to make room
+            if (old_flags & 0x10) { // Had payload
+                for (int i = 186; i >= 6; i--) {
+                    packet.data[i] = (i >= 8) ? packet.data[i-2] : 0xFF;
+                }
+            }
+        } else {
+            // Set discontinuity bit in existing adaptation field
+            if (packet.data[4] > 0) {
+                packet.data[5] |= 0x80;
             }
         }
-    } else {
-        // Adaptation field already present, just set discontinuity bit
-        if (packet.data[4] > 0) {
-            packet.data[5] |= 0x80; // Set discontinuity indicator bit
+        modified = true;
+        
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Applied video discontinuity indicator for segment boundary");
         }
     }
     
-    // Set discontinuity flag for packet processing
-    packet.discontinuity = true;
+    if (modified) {
+        last_format_change_time_ = now;
+        program_restart_countdown_--;
+        
+        // Recalculate transport stream CRC if needed
+        RecalculatePacketCRC(packet);
+    }
+}
+
+void TransportStreamRouter::RecalculatePacketCRC(TSPacket& packet) {
+    // Recalculate CRC32 for PAT/PMT packets after modification
+    // This ensures the transport stream remains valid
     
-    // For video packets only: set payload unit start to help with recovery
-    if (packet.is_video_packet) {
+    if (packet.pid == 0x0000 || packet.pid == pmt_pid_) {
+        // Find payload start (skip TS header and adaptation field)
+        int payload_start = 4;
+        if (packet.data[3] & 0x20) { // Has adaptation field
+            payload_start += packet.data[4] + 1;
+        }
+        
+        if (payload_start < 188 && (packet.data[3] & 0x10)) { // Has payload
+            // Find section length to calculate CRC area
+            int section_length = ((packet.data[payload_start + 1] & 0x0F) << 8) | packet.data[payload_start + 2];
+            int crc_start = payload_start;
+            int crc_end = payload_start + section_length + 3 - 4; // Exclude existing CRC
+            
+            if (crc_end > 0 && crc_end < 184) {
+                // Simple CRC32 calculation for PSI sections
+                uint32_t crc = CalculateCRC32(&packet.data[crc_start], crc_end - crc_start);
+                
+                // Store CRC in big-endian format
+                packet.data[crc_end] = (crc >> 24) & 0xFF;
+                packet.data[crc_end + 1] = (crc >> 16) & 0xFF;
+                packet.data[crc_end + 2] = (crc >> 8) & 0xFF;  
+                packet.data[crc_end + 3] = crc & 0xFF;
+            }
+        }
+    }
+}
+
+uint32_t TransportStreamRouter::CalculateCRC32(const uint8_t* data, int length) {
+    // Simple CRC32 calculation for PSI sections
+    // Using standard MPEG CRC32 polynomial: 0x04C11DB7
+    
+    static const uint32_t crc_table[256] = {
+        0x00000000, 0x04C11DB7, 0x09823B6E, 0x0D4326D9, 0x130476DC, 0x17C56B6B,
+        0x1A864DB2, 0x1E475005, 0x2608EDB8, 0x22C9F00F, 0x2F8AD6D6, 0x2B4BCB61,
+        0x350C9B64, 0x31CD86D3, 0x3C8EA00A, 0x384FBDBD, 0x4C11DB70, 0x48D0C6C7,
+        0x4593E01E, 0x4152FDA9, 0x5F15ADAC, 0x5BD4B01B, 0x569796C2, 0x52568B75,
+        0x6A1936C8, 0x6ED82B7F, 0x639B0DA6, 0x675A1011, 0x791D4014, 0x7DDC5DA3,
+        0x709F7B7A, 0x745E66CD, 0x9823B6E0, 0x9CE2AB57, 0x91A18D8E, 0x95609039,
+        0x8B27C03C, 0x8FE6DD8B, 0x82A5FB52, 0x8664E6E5, 0xBE2B5B58, 0xBAEA46EF,
+        0xB7A96036, 0xB3687D81, 0xAD2F2D84, 0xA9EE3033, 0xA4AD16EA, 0xA06C0B5D,
+        0xD4326D90, 0xD0F37027, 0xDDB056FE, 0xD9714B49, 0xC7361B4C, 0xC3F706FB,
+        0xCEB42022, 0xCA753D95, 0xF23A8028, 0xF6FB9D9F, 0xFBB8BB46, 0xFF79A6F1,
+        0xE13EF6F4, 0xE5FFEB43, 0xE8BCCD9A, 0xEC7DD02D, 0x34867077, 0x30476DC0,
+        0x3D044B19, 0x39C556AE, 0x278206AB, 0x23431B1C, 0x2E003DC5, 0x2AC12072,
+        0x128E9DCF, 0x164F8078, 0x1B0CA6A1, 0x1FCDBB16, 0x018AEB13, 0x054BF6A4,
+        0x0808D07D, 0x0CC9CDCA, 0x7897AB07, 0x7C56B6B0, 0x71159069, 0x75D48DDE,
+        0x6B93DDDB, 0x6F52C06C, 0x6211E6B5, 0x66D0FB02, 0x5E9F46BF, 0x5A5E5B08,
+        0x571D7DD1, 0x53DC6066, 0x4D9B3063, 0x495A2DD4, 0x44190B0D, 0x40D816BA,
+        0xACA5C697, 0xA864DB20, 0xA527FDF9, 0xA1E6E04E, 0xBFA1B04B, 0xBB60ADFC,
+        0xB6238B25, 0xB2E29692, 0x8AAD2B2F, 0x8E6C3698, 0x832F1041, 0x87EE0DF6,
+        0x99A95DF3, 0x9D684044, 0x902B669D, 0x94EA7B2A, 0xE0B41DE7, 0xE4750050,
+        0xE9362689, 0xEDF73B3E, 0xF3B06B3B, 0xF771768C, 0xFA325055, 0xFEF34DE2,
+        0xC6BCF05F, 0xC27DEDE8, 0xCF3ECB31, 0xCBFFD686, 0xD5B88683, 0xD1799B34,
+        0xDC3ABDED, 0xD8FBA05A, 0x690CE0EE, 0x6DCDFD59, 0x608EDB80, 0x644FC637,
+        0x7A089632, 0x7EC98B85, 0x738AAD5C, 0x774BB0EB, 0x4F040D56, 0x4BC510E1,
+        0x46863638, 0x42472B8F, 0x5C007B8A, 0x58C1663D, 0x558240E4, 0x51435D53,
+        0x251D3B9E, 0x21DC2629, 0x2C9F00F0, 0x285E1D47, 0x36194D42, 0x32D850F5,
+        0x3F9B762C, 0x3B5A6B9B, 0x0315D626, 0x07D4CB91, 0x0A97ED48, 0x0E56F0FF,
+        0x1011A0FA, 0x14D0BD4D, 0x19939B94, 0x1D528623, 0xF12F560E, 0xF5EE4BB9,
+        0xF8AD6D60, 0xFC6C70D7, 0xE22B20D2, 0xE6EA3D65, 0xEBA91BBC, 0xEF68060B,
+        0xD727BBB6, 0xD3E6A601, 0xDEA580D8, 0xDA649D6F, 0xC423CD6A, 0xC0E2D0DD,
+        0xCDA1F604, 0xC960EBB3, 0xBD3E8D7E, 0xB9FF90C9, 0xB4BCB610, 0xB07DABA7,
+        0xAE3AFBA2, 0xAAFBE615, 0xA7B8C0CC, 0xA379DD7B, 0x9B3660C6, 0x9FF77D71,
+        0x92B45BA8, 0x9675461F, 0x8832161A, 0x8CF30BAD, 0x81B02D74, 0x857130C3,
+        0x5D8A9099, 0x594B8D2E, 0x5408ABF7, 0x50C9B640, 0x4E8EE645, 0x4A4FFBF2,
+        0x470CDD2B, 0x43CDC09C, 0x7B827D21, 0x7F436096, 0x7200464F, 0x76C15BF8,
+        0x68860BFD, 0x6C47164A, 0x61043093, 0x65C52D24, 0x119B4BE9, 0x155A565E,
+        0x18197087, 0x1CD86D30, 0x029F3D35, 0x065E2082, 0x0B1D065B, 0x0FDC1BEC,
+        0x3793A651, 0x3352BBE6, 0x3E119D3F, 0x3AD08088, 0x2497D08D, 0x2056CD3A,
+        0x2D15EBE3, 0x29D4F654, 0xC5A92679, 0xC1683BCE, 0xCC2B1D17, 0xC8EA00A0,
+        0xD6AD50A5, 0xD26C4D12, 0xDF2F6BCB, 0xDBEE767C, 0xE3A1CBC1, 0xE760D676,
+        0xEA23F0AF, 0xEEE2ED18, 0xF0A5BD1D, 0xF464A0AA, 0xF9278673, 0xFDE69BC4,
+        0x89B8FD09, 0x8D79E0BE, 0x803AC667, 0x84FBDBD0, 0x9ABC8BD5, 0x9E7D9662,
+        0x933EB0BB, 0x97FFAD0C, 0xAFB010B1, 0xAB710D06, 0xA6322BDF, 0xA2F33668,
+        0xBCB4666D, 0xB8757BDA, 0xB5365D03, 0xB1F740B4
+    };
+    
+    uint32_t crc = 0xFFFFFFFF;
+    for (int i = 0; i < length; i++) {
+        crc = (crc << 8) ^ crc_table[((crc >> 24) ^ data[i]) & 0xFF];
+    }
+    return crc;
+}
         packet.data[1] |= 0x40; // Set payload_unit_start_indicator
-        packet.payload_unit_start = true;
-    }
-}
-
-void TransportStreamRouter::InjectPATWithDiscontinuity() {
-    // Generate a fresh PAT packet with discontinuity indicator
-    // This signals a program structure change to MPC-HC
-    if (hls_converter_) {
-        // Note: Ideally we would generate a proper PAT packet here
-        // For now, just schedule the flags for the next PAT packet
-        inject_pat_with_discontinuity_ = true;
-        if (log_callback_) {
-            log_callback_(L"[MPC-WORKAROUND] Injecting PAT with discontinuity indicator");
-        }
-    }
-}
-
-void TransportStreamRouter::InjectPMTWithDiscontinuity() {
-    // Generate a fresh PMT packet with discontinuity indicator
-    // This signals stream composition changes to MPC-HC
-    if (hls_converter_) {
-        inject_pmt_with_discontinuity_ = true;
-        if (log_callback_) {
-            log_callback_(L"[MPC-WORKAROUND] Injecting PMT with discontinuity indicator");
-        }
-    }
-}
-
-void TransportStreamRouter::ResetPacketContinuityCounters() {
-    // Simplified: just schedule a video discontinuity to avoid sync issues
-    if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Scheduling minimal packet continuity change");
-    }
-    
-    // Only affect video packets to avoid audio sync issues
-    force_discontinuity_on_next_video_ = true;
-}
-
-void TransportStreamRouter::TriggerStreamFormatChange() {
-    // Simplified approach: just schedule a video discontinuity
-    // This is much gentler and avoids the complex timing controls that were causing issues
-    
-    if (!is_mpc_player_ || !current_config_.enable_mpc_workaround) return;
-    
-    if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Triggering minimal stream format change for buffer recovery");
-    }
-    
-    // Just schedule a discontinuity on the next video packet
-    force_discontinuity_on_next_video_ = true;
-}
-
-
-
 } // namespace tsduck_transport
