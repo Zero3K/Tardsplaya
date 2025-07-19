@@ -182,6 +182,55 @@ void TSPacket::ParseHeader() {
     }
 }
 
+// Frame Number Tagging implementations
+void TSPacket::SetFrameInfo(uint64_t global_frame, uint32_t segment_frame, bool key_frame, std::chrono::milliseconds duration) {
+    frame_number = global_frame;
+    segment_frame_number = segment_frame;
+    is_key_frame = key_frame;
+    frame_duration = duration;
+}
+
+void TSPacket::SetVideoInfo(uint64_t video_frame, bool is_video, bool is_audio) {
+    video_frame_number = video_frame;
+    is_video_packet = is_video;
+    is_audio_packet = is_audio;
+    video_sync_lost = false; // Reset sync status when setting video info
+}
+
+std::wstring TSPacket::GetFrameDebugInfo() const {
+    std::wstring info = L"Frame#" + std::to_wstring(frame_number) + 
+                       L" Seg#" + std::to_wstring(segment_frame_number) +
+                       L" PID:" + std::to_wstring(pid);
+    
+    if (is_video_packet) info += L" [VIDEO]";
+    if (is_audio_packet) info += L" [AUDIO]";
+    if (is_key_frame) info += L" [KEY]";
+    if (payload_unit_start) info += L" [START]";
+    if (discontinuity) info += L" [DISC]";
+    if (video_sync_lost) info += L" [SYNC_LOST]";
+    
+    if (frame_duration.count() > 0) {
+        info += L" (" + std::to_wstring(frame_duration.count()) + L"ms)";
+    }
+    
+    return info;
+}
+
+bool TSPacket::IsFrameDropDetected(const TSPacket& previous_packet) const {
+    // Detect frame drops by checking sequence continuity
+    if (frame_number <= previous_packet.frame_number) {
+        return false; // Not a drop, possibly duplicate or reordered
+    }
+    
+    // Check if we skipped frame numbers (indicating dropped frames)
+    uint64_t expected_frame = previous_packet.frame_number + 1;
+    return frame_number > expected_frame;
+}
+
+bool TSPacket::IsVideoSyncValid() const {
+    return is_video_packet && !video_sync_lost;
+}
+
 // TSBuffer implementation
 TSBuffer::TSBuffer(size_t max_packets) : max_packets_(max_packets), producer_active_(true) {
 }
@@ -189,8 +238,15 @@ TSBuffer::TSBuffer(size_t max_packets) : max_packets_(max_packets), producer_act
 bool TSBuffer::AddPacket(const TSPacket& packet) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    if (packet_queue_.size() >= max_packets_) {
-        // Buffer full - remove oldest packet to make room
+    // In low-latency mode, more aggressively drop old packets
+    if (low_latency_mode_ && packet_queue_.size() >= max_packets_ / 2) {
+        // Drop multiple old packets to make room for new ones
+        size_t packets_to_drop = std::min(packet_queue_.size() / 4, size_t(10));
+        for (size_t i = 0; i < packets_to_drop && !packet_queue_.empty(); ++i) {
+            packet_queue_.pop();
+        }
+    } else if (packet_queue_.size() >= max_packets_) {
+        // Standard mode - remove oldest packet to make room
         packet_queue_.pop();
     }
     
@@ -261,6 +317,16 @@ void HLSToTSConverter::Reset() {
     continuity_counter_ = 0;
     pat_sent_ = false;
     pmt_sent_ = false;
+    
+    // Frame Number Tagging: Reset frame counters
+    global_frame_counter_ = 0;
+    segment_frame_counter_ = 0;
+    last_frame_time_ = std::chrono::steady_clock::now();
+    estimated_frame_duration_ = std::chrono::milliseconds(33); // Reset to default ~30fps
+    
+    // Reset stream type detection
+    detected_video_pid_ = 0;
+    detected_audio_pid_ = 0;
 }
 
 std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
@@ -294,6 +360,12 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         return ts_packets; // No valid sync found
     }
     
+    // Frame Number Tagging: Reset segment frame counter for new segment
+    if (is_first_segment) {
+        segment_frame_counter_ = 0;
+        last_frame_time_ = std::chrono::steady_clock::now();
+    }
+    
     // Process data in 188-byte TS packet chunks starting from sync position
     for (size_t offset = sync_offset; offset + TS_PACKET_SIZE <= data_size; offset += TS_PACKET_SIZE) {
         TSPacket packet;
@@ -310,6 +382,59 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         
         // Parse packet header
         packet.ParseHeader();
+        
+        // Detect and classify stream types (video/audio)
+        DetectStreamTypes(packet);
+        
+        // Frame Number Tagging: Assign frame numbers for video packets
+        if (packet.is_video_packet || packet.payload_unit_start) {
+            // Increment frame counters for video packets or new payload units
+            global_frame_counter_++;
+            segment_frame_counter_++;
+            
+            // Estimate frame duration based on timing
+            auto now = std::chrono::steady_clock::now();
+            auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_frame_time_);
+            if (time_since_last.count() > 0 && segment_frame_counter_ > 1) {
+                estimated_frame_duration_ = time_since_last;
+            }
+            last_frame_time_ = now;
+            
+            // Check for key frame indicators in the payload
+            bool is_key_frame = false;
+            if (packet.payload_unit_start && packet.is_video_packet && packet.data[4] == 0x00) {
+                // Look for MPEG start codes that might indicate I-frames
+                if (offset + TS_PACKET_SIZE + 8 < data_size) {
+                    const uint8_t* payload = data_ptr + offset + 4;
+                    // Enhanced I-frame detection
+                    for (int i = 0; i < 32 && i < TS_PACKET_SIZE - 8; i++) {
+                        if (payload[i] == 0x00 && payload[i+1] == 0x00 && payload[i+2] == 0x01) {
+                            uint8_t frame_type = payload[i+3];
+                            // MPEG-2 I-frame detection (enhanced)
+                            if ((frame_type & 0x38) == 0x08 || frame_type == 0x00) {
+                                is_key_frame = true;
+                                break;
+                            }
+                            // H.264 IDR frame detection
+                            if ((frame_type & 0x1F) == 0x05) {
+                                is_key_frame = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Set frame information
+            packet.SetFrameInfo(global_frame_counter_, segment_frame_counter_, is_key_frame, estimated_frame_duration_);
+            
+            // Set video-specific information for video packets
+            if (packet.is_video_packet) {
+                packet.SetVideoInfo(global_frame_counter_, true, false);
+            } else if (packet.is_audio_packet) {
+                packet.SetVideoInfo(0, false, true);
+            }
+        }
         
         // Don't modify continuity counters - preserve original TS packet timing and sequencing
         // The original HLS TS segments should have correct continuity counters
@@ -476,10 +601,68 @@ uint32_t HLSToTSConverter::CalculateCRC32(const uint8_t* data, size_t length) {
     return crc;
 }
 
+void HLSToTSConverter::DetectStreamTypes(TSPacket& packet) {
+    // Detect video and audio PIDs by analyzing packet content
+    if (packet.payload_unit_start && packet.pid > 0x20) {
+        // Look for video/audio stream indicators
+        const uint8_t* payload = packet.data + 4;
+        size_t payload_size = TS_PACKET_SIZE - 4;
+        
+        // Check adaptation field
+        if ((packet.data[3] & 0x20) != 0 && payload_size > 0) {
+            uint8_t adaptation_length = payload[0];
+            if (adaptation_length < payload_size) {
+                payload += adaptation_length + 1;
+                payload_size -= adaptation_length + 1;
+            }
+        }
+        
+        // Look for PES header patterns
+        if (payload_size >= 6 && payload[0] == 0x00 && payload[1] == 0x00 && payload[2] == 0x01) {
+            uint8_t stream_id = payload[3];
+            
+            // Video stream IDs (typically 0xE0-0xEF for MPEG video)
+            if ((stream_id >= 0xE0 && stream_id <= 0xEF) || stream_id == 0xBD) {
+                packet.is_video_packet = true;
+                detected_video_pid_ = packet.pid;
+            }
+            // Audio stream IDs (typically 0xC0-0xDF for audio)
+            else if ((stream_id >= 0xC0 && stream_id <= 0xDF) || stream_id == 0xBD) {
+                packet.is_audio_packet = true;
+                detected_audio_pid_ = packet.pid;
+            }
+        }
+    } else {
+        // Use previously detected PIDs
+        if (packet.pid == detected_video_pid_) {
+            packet.is_video_packet = true;
+        } else if (packet.pid == detected_audio_pid_) {
+            packet.is_audio_packet = true;
+        }
+    }
+}
+
 // TransportStreamRouter implementation
 TransportStreamRouter::TransportStreamRouter() {
     // Initialize member variables
     player_process_handle_ = INVALID_HANDLE_VALUE;
+    
+    // Frame Number Tagging: Initialize frame tracking
+    total_frames_processed_ = 0;
+    frames_dropped_ = 0;
+    frames_duplicated_ = 0;
+    last_frame_number_ = 0;
+    last_frame_time_ = std::chrono::steady_clock::now();
+    stream_start_time_ = std::chrono::steady_clock::now();
+    
+    // Initialize video/audio stream tracking
+    video_packets_processed_ = 0;
+    audio_packets_processed_ = 0;
+    video_frames_processed_ = 0;
+    last_video_frame_number_ = 0;
+    video_sync_loss_count_ = 0;
+    last_video_packet_time_ = std::chrono::steady_clock::now();
+    last_audio_packet_time_ = std::chrono::steady_clock::now();
     
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
@@ -517,11 +700,18 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     // Reset converter and buffer
     hls_converter_->Reset();
     ts_buffer_->Reset(); // This will clear packets and reset producer_active
+    ts_buffer_->SetLowLatencyMode(config.low_latency_mode); // Configure buffer for latency mode
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Starting TSDuck-inspired transport stream routing");
         log_callback_(L"[TS_ROUTER] Player: " + config.player_path);
         log_callback_(L"[TS_ROUTER] Buffer size: " + std::to_wstring(config.buffer_size_packets) + L" packets");
+        
+        if (config.low_latency_mode) {
+            log_callback_(L"[LOW_LATENCY] Mode enabled - targeting minimal stream delay");
+            log_callback_(L"[LOW_LATENCY] Max segments: " + std::to_wstring(config.max_segments_to_buffer) + 
+                         L", Refresh: " + std::to_wstring(config.playlist_refresh_interval.count()) + L"ms");
+        }
     }
     
     // Start HLS fetcher thread
@@ -573,6 +763,32 @@ TransportStreamRouter::BufferStats TransportStreamRouter::GetBufferStats() const
         stats.buffer_utilization = static_cast<double>(stats.buffered_packets) / current_config_.buffer_size_packets;
     }
     
+    // Frame Number Tagging statistics
+    stats.total_frames_processed = total_frames_processed_.load();
+    stats.frames_dropped = frames_dropped_.load();
+    stats.frames_duplicated = frames_duplicated_.load();
+    
+    // Video/Audio stream statistics
+    stats.video_packets_processed = video_packets_processed_.load();
+    stats.audio_packets_processed = audio_packets_processed_.load();
+    stats.video_frames_processed = video_frames_processed_.load();
+    stats.video_sync_loss_count = video_sync_loss_count_.load();
+    stats.video_stream_healthy = IsVideoStreamHealthy();
+    stats.audio_stream_healthy = IsAudioStreamHealthy();
+    
+    // Calculate current FPS
+    auto now = std::chrono::steady_clock::now();
+    auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - stream_start_time_);
+    if (time_elapsed.count() > 1000 && stats.total_frames_processed > 0) {
+        stats.current_fps = static_cast<double>(stats.total_frames_processed * 1000) / time_elapsed.count();
+    }
+    
+    // Calculate average frame interval
+    if (stats.total_frames_processed > 1) {
+        auto avg_interval_ms = time_elapsed.count() / stats.total_frames_processed;
+        stats.avg_frame_interval = std::chrono::milliseconds(avg_interval_ms);
+    }
+    
     return stats;
 }
 
@@ -613,8 +829,55 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 break;
             }
             
-            // Parse segment URLs
-            auto segment_urls = ParseHLSPlaylist(playlist_content, playlist_url);
+            // Parse playlist with enhanced discontinuity detection
+            tsduck_hls::PlaylistParser playlist_parser;
+            std::vector<std::wstring> segment_urls;
+            bool has_discontinuities = false;
+            
+            if (playlist_parser.ParsePlaylist(playlist_content)) {
+                // Extract segment URLs from parsed playlist
+                auto segments = playlist_parser.GetSegments();
+                for (const auto& segment : segments) {
+                    segment_urls.push_back(segment.url);
+                }
+                
+                // Check for discontinuities that indicate ad transitions
+                has_discontinuities = playlist_parser.HasDiscontinuities();
+                
+                if (has_discontinuities) {
+                    if (log_callback_) {
+                        log_callback_(L"[DISCONTINUITY] Detected ad transition - implementing fast restart");
+                    }
+                    
+                    // Clear buffer immediately for fast restart after ad break
+                    ts_buffer_->Clear();
+                    
+                    // Reset frame numbering to prevent frame drop false positives
+                    hls_converter_->Reset();
+                    
+                    // Reset frame statistics to prevent false drop alerts after discontinuity
+                    ResetFrameStatistics();
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
+                    }
+                    
+                    // For fast restart, only process the newest segments
+                    if (segment_urls.size() > 1) {
+                        // Keep only the last segment for immediate restart
+                        std::vector<std::wstring> restart_segments;
+                        restart_segments.push_back(segment_urls.back());
+                        segment_urls = restart_segments;
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[FAST_RESTART] Using only newest segment for immediate playback");
+                        }
+                    }
+                }
+            } else {
+                // Fallback to basic parsing if enhanced parser fails
+                segment_urls = ParseHLSPlaylist(playlist_content, playlist_url);
+            }
             
             if (segment_urls.empty()) {
                 if (log_callback_) {
@@ -627,14 +890,33 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 continue;
             }
             
-            // Process new segments
+            // Process new segments with low-latency optimizations
             int segments_processed = 0;
-            for (const auto& segment_url : segment_urls) {
+            size_t total_segments = segment_urls.size();
+            
+            for (size_t i = 0; i < segment_urls.size(); ++i) {
                 if (cancel_token || !routing_active_) break;
+                
+                const auto& segment_url = segment_urls[i];
                 
                 // Skip already processed segments
                 if (std::find(processed_segments.begin(), processed_segments.end(), segment_url) != processed_segments.end()) {
                     continue;
+                }
+                
+                // Low-latency optimization: If we have multiple unprocessed segments and this isn't
+                // one of the newest ones, skip it to stay closer to live edge
+                if (current_config_.low_latency_mode && current_config_.skip_old_segments) {
+                    size_t remaining_segments = total_segments - i;
+                    if (remaining_segments > current_config_.max_segments_to_buffer && 
+                        i < (total_segments - current_config_.max_segments_to_buffer)) {
+                        
+                        processed_segments.push_back(segment_url); // Mark as processed to avoid reprocessing
+                        if (log_callback_) {
+                            log_callback_(L"[LOW_LATENCY] Skipping older segment to maintain live edge");
+                        }
+                        continue;
+                    }
                 }
                 
                 // Fetch segment data
@@ -658,16 +940,39 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Add to buffer with improved flow control for multiple streams
-                    size_t buffer_high_watermark = current_config_.buffer_size_packets * 9 / 10; // 90% full for better buffering
-                    size_t buffer_low_watermark = current_config_.buffer_size_packets / 4;       // 25% full for faster recovery
+                    // Add to buffer with special handling for post-discontinuity segments
+                    size_t buffer_high_watermark, buffer_low_watermark;
+                    
+                    if (has_discontinuities) {
+                        // Immediately after discontinuity: minimal buffering for fastest restart
+                        buffer_high_watermark = current_config_.buffer_size_packets / 8; // 12.5% for immediate restart
+                        buffer_low_watermark = current_config_.buffer_size_packets / 16;  // 6.25% for fastest response
+                        
+                        if (log_callback_ && segments_processed == 0) {
+                            log_callback_(L"[FAST_RESTART] Using minimal buffering for immediate playback after ad");
+                        }
+                    } else if (current_config_.low_latency_mode) {
+                        // For low-latency, use smaller buffers and more aggressive flow control
+                        buffer_high_watermark = current_config_.buffer_size_packets * 6 / 10; // 60% full for low latency
+                        buffer_low_watermark = current_config_.buffer_size_packets / 8;       // 12.5% full for faster response
+                    } else {
+                        // Standard buffering for quality over latency
+                        buffer_high_watermark = current_config_.buffer_size_packets * 9 / 10; // 90% full for better buffering
+                        buffer_low_watermark = current_config_.buffer_size_packets / 4;       // 25% full for faster recovery
+                    }
                     
                     for (const auto& packet : ts_packets) {
                         if (!routing_active_ || cancel_token) break;
                         
-                        // Implement more aggressive flow control to maintain larger buffers and prevent frame drops
+                        // Check stream health before adding packets
+                        CheckStreamHealth(packet);
+                        
+                        // Implement flow control with latency-optimized timing
                         while (ts_buffer_->GetBufferedPackets() >= buffer_high_watermark && routing_active_ && !cancel_token) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(2)); // Faster response to buffer pressure
+                            auto sleep_duration = current_config_.low_latency_mode ? 
+                                std::chrono::milliseconds(1) :   // Faster response for low latency
+                                std::chrono::milliseconds(2);    // Standard response
+                            std::this_thread::sleep_for(sleep_duration);
                         }
                         
                         ts_buffer_->AddPacket(packet);
@@ -694,11 +999,23 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             
             if (segments_processed > 0 && log_callback_) {
                 log_callback_(L"[TS_ROUTER] Batch complete: " + std::to_wstring(segments_processed) + L" new segments processed");
+                
+                if (current_config_.low_latency_mode) {
+                    log_callback_(L"[LOW_LATENCY] Targeting live edge with " + std::to_wstring(current_config_.max_segments_to_buffer) + L" segment buffer");
+                }
             }
             
-            // Wait before next playlist refresh, but check cancellation more frequently
-            for (int i = 0; i < 20 && routing_active_ && !cancel_token; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 2 seconds, but check every 100ms
+            // Wait before next playlist refresh, use configurable interval for low-latency
+            auto refresh_interval = current_config_.low_latency_mode ? 
+                current_config_.playlist_refresh_interval : 
+                std::chrono::milliseconds(2000);  // Default 2 seconds
+                
+            // Break the wait into smaller chunks to check cancellation more frequently
+            auto chunk_duration = std::chrono::milliseconds(100);
+            auto chunks_needed = refresh_interval.count() / chunk_duration.count();
+            
+            for (int i = 0; i < chunks_needed && routing_active_ && !cancel_token; ++i) {
+                std::this_thread::sleep_for(chunk_duration);
             }
             
         } catch (const std::exception& e) {
@@ -786,9 +1103,79 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             }
         }
         
-        // Get and send packets with reduced timeout for better responsiveness in multiple streams
+        // Get and send packets with timeout optimized for latency mode
         TSPacket packet;
-        if (ts_buffer_->GetNextPacket(packet, std::chrono::milliseconds(50))) { // Faster timeout for more responsive streaming
+        auto packet_timeout = current_config_.low_latency_mode ? 
+            std::chrono::milliseconds(10) :   // Very fast timeout for low latency
+            std::chrono::milliseconds(50);    // Standard timeout
+            
+        if (ts_buffer_->GetNextPacket(packet, packet_timeout)) {
+            // Frame Number Tagging: Track frame statistics
+            if (packet.frame_number > 0) {
+                // Check for frame drops or duplicates
+                uint64_t current_frame = packet.frame_number;
+                uint64_t last_frame = last_frame_number_.load();
+                
+                if (current_frame > last_frame + 1) {
+                    // Frame drop detected
+                    uint32_t dropped = static_cast<uint32_t>(current_frame - last_frame - 1);
+                    frames_dropped_ += dropped;
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[FRAME_TAG] Frame drop detected: " + std::to_wstring(dropped) + 
+                                     L" frames dropped between #" + std::to_wstring(last_frame) + 
+                                     L" and #" + std::to_wstring(current_frame));
+                    }
+                } else if (current_frame <= last_frame && last_frame > 0) {
+                    // Potential duplicate or reordered frame
+                    frames_duplicated_++;
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[FRAME_TAG] Duplicate/reordered frame: #" + std::to_wstring(current_frame) + 
+                                     L" (last: #" + std::to_wstring(last_frame) + L")");
+                    }
+                }
+                
+                last_frame_number_ = current_frame;
+                total_frames_processed_++;
+                
+                // Video-specific frame tracking
+                if (packet.is_video_packet) {
+                    video_frames_processed_++;
+                    last_video_frame_number_ = packet.video_frame_number;
+                    
+                    // Check for video synchronization issues
+                    if (packet.video_sync_lost) {
+                        video_sync_loss_count_++;
+                        if (log_callback_) {
+                            log_callback_(L"[VIDEO_SYNC] Video synchronization lost at frame #" + std::to_wstring(current_frame));
+                        }
+                    }
+                }
+                
+                // Log frame info for key frames or periodically
+                if (packet.is_key_frame || (current_frame % 300 == 0)) { // Every 300 frames or key frames
+                    if (log_callback_) {
+                        log_callback_(L"[FRAME_TAG] " + packet.GetFrameDebugInfo());
+                    }
+                }
+                
+                // Special handling for video stream health
+                if (packet.is_video_packet) {
+                    auto now = std::chrono::steady_clock::now();
+                    auto video_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_video_packet_time_);
+                    
+                    // If we haven't seen video packets for more than 5 seconds, log warning
+                    if (video_gap.count() > 5000) {
+                        if (log_callback_) {
+                            log_callback_(L"[VIDEO_HEALTH] Warning: No video packets for " + std::to_wstring(video_gap.count()) + L"ms");
+                        }
+                    }
+                    
+                    last_video_packet_time_ = now;
+                }
+            }
+            
             if (!SendTSPacketToPlayer(player_stdin, packet)) {
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
@@ -1050,6 +1437,23 @@ std::vector<std::wstring> TransportStreamRouter::ParseHLSPlaylist(const std::str
         segment_urls.push_back(full_url);
     }
     
+    // For low-latency mode, only return the newest segments (live edge)
+    if (current_config_.low_latency_mode && segment_urls.size() > current_config_.max_segments_to_buffer) {
+        // Keep only the most recent segments for minimal latency
+        size_t start_index = segment_urls.size() - current_config_.max_segments_to_buffer;
+        std::vector<std::wstring> live_edge_segments(
+            segment_urls.begin() + start_index, 
+            segment_urls.end()
+        );
+        
+        if (log_callback_) {
+            log_callback_(L"[LOW_LATENCY] Targeting live edge: " + std::to_wstring(live_edge_segments.size()) + 
+                         L" of " + std::to_wstring(segment_urls.size()) + L" segments");
+        }
+        
+        return live_edge_segments;
+    }
+    
     return segment_urls;
 
 }
@@ -1058,6 +1462,72 @@ void TransportStreamRouter::InsertPCR(TSPacket& packet, uint64_t pcr_value) {
     // PCR insertion disabled - HLS segments already have proper timing information
     // Modifying PCR can interfere with the original stream timing and cause playback issues
     // Let the original TS packets pass through unchanged for best compatibility
+}
+
+void TransportStreamRouter::ResetFrameStatistics() {
+    // Reset all frame tracking statistics after discontinuities
+    total_frames_processed_ = 0;
+    frames_dropped_ = 0;
+    frames_duplicated_ = 0;
+    last_frame_number_ = 0;
+    last_frame_time_ = std::chrono::steady_clock::now();
+    stream_start_time_ = std::chrono::steady_clock::now();
+    
+    // Reset video/audio stream health tracking
+    video_packets_processed_ = 0;
+    audio_packets_processed_ = 0;
+    video_frames_processed_ = 0;
+    last_video_frame_number_ = 0;
+    video_sync_loss_count_ = 0;
+    last_video_packet_time_ = std::chrono::steady_clock::now();
+    last_audio_packet_time_ = std::chrono::steady_clock::now();
+}
+
+bool TransportStreamRouter::IsVideoStreamHealthy() const {
+    auto now = std::chrono::steady_clock::now();
+    auto video_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_video_packet_time_);
+    
+    // Consider video healthy if we've seen packets within the last 3 seconds
+    return video_gap.count() < 3000 && video_packets_processed_.load() > 0;
+}
+
+bool TransportStreamRouter::IsAudioStreamHealthy() const {
+    auto now = std::chrono::steady_clock::now();
+    auto audio_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_audio_packet_time_);
+    
+    // Consider audio healthy if we've seen packets within the last 3 seconds
+    return audio_gap.count() < 3000 && audio_packets_processed_.load() > 0;
+}
+
+void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
+    auto now = std::chrono::steady_clock::now();
+    
+    if (packet.is_video_packet) {
+        video_packets_processed_++;
+        last_video_packet_time_ = now;
+        
+        // Check for video sync issues
+        if (!packet.IsVideoSyncValid()) {
+            video_sync_loss_count_++;
+        }
+    } else if (packet.is_audio_packet) {
+        audio_packets_processed_++;
+        last_audio_packet_time_ = now;
+    }
+    
+    // Log warnings if stream health is degraded
+    static auto last_health_check = std::chrono::steady_clock::now();
+    auto health_check_interval = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_health_check);
+    
+    if (health_check_interval.count() > 10000) { // Check every 10 seconds
+        if (!IsVideoStreamHealthy() && log_callback_) {
+            log_callback_(L"[STREAM_HEALTH] WARNING: Video stream appears unhealthy - possible black frame issue");
+        }
+        if (!IsAudioStreamHealthy() && log_callback_) {
+            log_callback_(L"[STREAM_HEALTH] WARNING: Audio stream appears unhealthy");
+        }
+        last_health_check = now;
+    }
 }
 
 

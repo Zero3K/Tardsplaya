@@ -20,9 +20,26 @@ This version includes **TSDuck-inspired HLS processing** for improved streaming 
 - **Enhanced Ad Detection**: Sophisticated SCTE-35 and pattern-based ad detection
 - **Optimized Timing**: Better segment timing for smoother playback
 
-### NEW: TSDuck Transport Stream Re-routing
+### NEW: Frame Number Tagging for Lag Reduction
 
-**Transport Stream Router** - Complete HLS to MPEG Transport Stream conversion:
+**Frame Number Tagging** - Advanced frame tracking and monitoring system:
+
+- **Frame Sequence Tracking**: Each transport stream packet receives unique frame numbers for precise ordering
+- **Drop Detection**: Automatically detects and reports dropped frames that can cause lag
+- **Duplicate Detection**: Identifies duplicate or reordered frames that may indicate network issues  
+- **Key Frame Identification**: Marks I-frames and key frames for better buffering decisions
+- **Real-time Statistics**: Displays current FPS, frame drops, and timing information
+- **Lag Analysis**: Provides detailed frame timing data to help identify lag sources
+
+### Technical Details
+
+Frame Number Tagging enhances the existing TSDuck transport stream system:
+
+- **TSPacket Enhancement**: Added frame numbering, timing, and metadata to each packet
+- **HLS Converter Integration**: Assigns frame numbers during segment conversion
+- **Statistical Monitoring**: Tracks frame rates, drops, and timing across all streams
+- **Debug Logging**: Detailed frame information for troubleshooting lag issues
+- **Status Display**: Real-time frame statistics in the status bar
 
 - **Stream Re-routing**: Routes HLS streams through transport stream format to media players
 - **Built-in by Default**: TSDuck TS Mode is now the standard streaming method
@@ -48,7 +65,9 @@ The TSDuck integration includes:
 | Buffer Management | Static 3 segments | Dynamic 2-8 segments based on content |
 | Ad Detection | Basic pattern matching | TSDuck-style multi-pattern analysis |
 | Timing Precision | Basic duration parsing | Millisecond-precise calculations |
-| Lag Reduction | Manual tuning | Automatic optimization |
+| Lag Reduction | Manual tuning | Automatic optimization + Frame Number Tagging |
+| **Frame Tracking** | **No frame monitoring** | **Real-time frame numbering and drop detection** |
+| **Lag Analysis** | **Basic logging only** | **Detailed frame statistics and timing data** |
 | **Stream Format** | **HLS segments only** | **HLS segments + Transport Stream routing** |
 | **Player Compatibility** | **Basic stdin piping** | **Professional TS format support** |
 
