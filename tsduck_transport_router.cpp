@@ -1222,10 +1222,6 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                 }
                 goto cleanup_and_exit;
             }
-                    }
-                    goto cleanup_and_exit;
-                }
-            }
             packets_sent++;
             last_packet_time = std::chrono::steady_clock::now();
         } else {
