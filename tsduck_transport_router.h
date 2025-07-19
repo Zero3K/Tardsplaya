@@ -216,6 +216,9 @@ namespace tsduck_transport {
         // TS routing thread - sends TS packets to media player
         void TSRouterThread(std::atomic<bool>& cancel_token);
         
+        // Reset frame statistics (for discontinuities)
+        void ResetFrameStatistics();
+        
         // Launch media player process with transport stream input
         bool LaunchMediaPlayer(const RouterConfig& config, HANDLE& process_handle, HANDLE& stdin_handle);
         

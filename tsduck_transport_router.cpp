@@ -738,8 +738,55 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 break;
             }
             
-            // Parse segment URLs
-            auto segment_urls = ParseHLSPlaylist(playlist_content, playlist_url);
+            // Parse playlist with enhanced discontinuity detection
+            tsduck_hls::PlaylistParser playlist_parser;
+            std::vector<std::wstring> segment_urls;
+            bool has_discontinuities = false;
+            
+            if (playlist_parser.ParsePlaylist(playlist_content)) {
+                // Extract segment URLs from parsed playlist
+                auto segments = playlist_parser.GetSegments();
+                for (const auto& segment : segments) {
+                    segment_urls.push_back(segment.url);
+                }
+                
+                // Check for discontinuities that indicate ad transitions
+                has_discontinuities = playlist_parser.HasDiscontinuities();
+                
+                if (has_discontinuities) {
+                    if (log_callback_) {
+                        log_callback_(L"[DISCONTINUITY] Detected ad transition - implementing fast restart");
+                    }
+                    
+                    // Clear buffer immediately for fast restart after ad break
+                    ts_buffer_->Clear();
+                    
+                    // Reset frame numbering to prevent frame drop false positives
+                    hls_converter_->Reset();
+                    
+                    // Reset frame statistics to prevent false drop alerts after discontinuity
+                    ResetFrameStatistics();
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
+                    }
+                    
+                    // For fast restart, only process the newest segments
+                    if (segment_urls.size() > 1) {
+                        // Keep only the last segment for immediate restart
+                        std::vector<std::wstring> restart_segments;
+                        restart_segments.push_back(segment_urls.back());
+                        segment_urls = restart_segments;
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[FAST_RESTART] Using only newest segment for immediate playback");
+                        }
+                    }
+                }
+            } else {
+                // Fallback to basic parsing if enhanced parser fails
+                segment_urls = ParseHLSPlaylist(playlist_content, playlist_url);
+            }
             
             if (segment_urls.empty()) {
                 if (log_callback_) {
@@ -802,10 +849,18 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Add to buffer with flow control optimized for latency mode
+                    // Add to buffer with special handling for post-discontinuity segments
                     size_t buffer_high_watermark, buffer_low_watermark;
                     
-                    if (current_config_.low_latency_mode) {
+                    if (has_discontinuities) {
+                        // Immediately after discontinuity: minimal buffering for fastest restart
+                        buffer_high_watermark = current_config_.buffer_size_packets / 8; // 12.5% for immediate restart
+                        buffer_low_watermark = current_config_.buffer_size_packets / 16;  // 6.25% for fastest response
+                        
+                        if (log_callback_ && segments_processed == 0) {
+                            log_callback_(L"[FAST_RESTART] Using minimal buffering for immediate playback after ad");
+                        }
+                    } else if (current_config_.low_latency_mode) {
                         // For low-latency, use smaller buffers and more aggressive flow control
                         buffer_high_watermark = current_config_.buffer_size_packets * 6 / 10; // 60% full for low latency
                         buffer_low_watermark = current_config_.buffer_size_packets / 8;       // 12.5% full for faster response
@@ -1284,6 +1339,16 @@ void TransportStreamRouter::InsertPCR(TSPacket& packet, uint64_t pcr_value) {
     // PCR insertion disabled - HLS segments already have proper timing information
     // Modifying PCR can interfere with the original stream timing and cause playback issues
     // Let the original TS packets pass through unchanged for best compatibility
+}
+
+void TransportStreamRouter::ResetFrameStatistics() {
+    // Reset all frame tracking statistics after discontinuities
+    total_frames_processed_ = 0;
+    frames_dropped_ = 0;
+    frames_duplicated_ = 0;
+    last_frame_number_ = 0;
+    last_frame_time_ = std::chrono::steady_clock::now();
+    stream_start_time_ = std::chrono::steady_clock::now();
 }
 
 
