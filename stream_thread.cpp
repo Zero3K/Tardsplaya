@@ -20,23 +20,22 @@ std::thread StartStreamThread(
 ) {
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
-        // Calculate adaptive buffer size for multiple streams to prevent frame drops
+        // For low-latency streaming, use smaller buffers to reduce delay
+        size_t base_buffer_packets = 3000;  // Reduced from 1000*segments to fixed 3000 for low latency
+        
+        // For multiple streams, still scale but keep it reasonable for latency
         auto& resource_manager = StreamResourceManager::getInstance();
         int active_streams = resource_manager.GetActiveStreamCount();
         
-        // Base calculation: segments * 1000 packets per segment
-        size_t base_buffer_packets = static_cast<size_t>(buffer_segments * 1000);
-        
-        // Scale buffer up for multiple streams to maintain quality
         if (active_streams > 1) {
-            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 1.5); // 50% larger for multiple streams
+            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 1.2); // Only 20% larger
         }
         if (active_streams > 3) {
-            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 2.0); // Double for many streams
+            base_buffer_packets = static_cast<size_t>(base_buffer_packets * 1.5); // Max 50% larger
         }
         
         return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
-                                         base_buffer_packets, channel_name, main_window, tab_index, player_process_handle);
+                                         base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle);
     }
     
     // Use traditional HLS streaming
@@ -82,6 +81,7 @@ std::thread StartTransportStreamThread(
     std::function<void(const std::wstring&)> log_callback,
     size_t buffer_packets,
     const std::wstring& channel_name,
+    std::atomic<int>* chunk_count,
     HWND main_window,
     size_t tab_index,
     HANDLE* player_process_handle
@@ -98,7 +98,7 @@ std::thread StartTransportStreamThread(
             // Create transport stream router
             tsduck_transport::TransportStreamRouter router;
             
-            // Configure router
+            // Configure router with low-latency optimizations
             tsduck_transport::TransportStreamRouter::RouterConfig config;
             config.player_path = player_path;
             config.player_args = L"-";  // Read from stdin
@@ -108,6 +108,12 @@ std::thread StartTransportStreamThread(
             config.pcr_interval = std::chrono::milliseconds(40);
             config.enable_pat_pmt_repetition = true;
             config.pat_pmt_interval = std::chrono::milliseconds(100);
+            
+            // Enable low-latency mode for reduced stream delay
+            config.low_latency_mode = true;
+            config.max_segments_to_buffer = 2;  // Only buffer latest 2 segments
+            config.playlist_refresh_interval = std::chrono::milliseconds(500);  // Check every 500ms
+            config.skip_old_segments = true;
             
             if (log_callback) {
                 log_callback(L"[TS_MODE] Starting TSDuck transport stream routing");
@@ -132,11 +138,47 @@ std::thread StartTransportStreamThread(
                 while (router.IsRouting() && !cancel_token) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     
-                    // Optionally report buffer status
+                    // Report buffer and frame statistics
                     auto stats = router.GetBufferStats();
+                    
+                    // Update chunk count for status bar (convert frames to approximate chunks)
+                    if (chunk_count) {
+                        *chunk_count = static_cast<int>(stats.buffered_packets);
+                    }
+                    
+                    // Periodic logging with frame information
                     if (log_callback && stats.total_packets_processed % 1000 == 0) {
-                        log_callback(L"[TS_MODE] Buffer: " + std::to_wstring(stats.buffered_packets) + 
-                                   L" packets, Utilization: " + std::to_wstring(int(stats.buffer_utilization * 100)) + L"%");
+                        std::wstring status_msg = L"[TS_MODE] Buffer: " + std::to_wstring(stats.buffered_packets) + 
+                                   L" packets, Utilization: " + std::to_wstring(int(stats.buffer_utilization * 100)) + L"%";
+                        
+                        // Add frame information if available
+                        if (stats.total_frames_processed > 0) {
+                            status_msg += L", Frames: " + std::to_wstring(stats.total_frames_processed);
+                            if (stats.current_fps > 0) {
+                                status_msg += L", FPS: " + std::to_wstring(static_cast<int>(stats.current_fps));
+                            }
+                            if (stats.frames_dropped > 0) {
+                                status_msg += L", Dropped: " + std::to_wstring(stats.frames_dropped);
+                            }
+                        }
+                        
+                        // Add video/audio health information
+                        if (stats.video_packets_processed > 0 || stats.audio_packets_processed > 0) {
+                            status_msg += L", Video: " + std::to_wstring(stats.video_packets_processed) + 
+                                         L", Audio: " + std::to_wstring(stats.audio_packets_processed);
+                            
+                            if (!stats.video_stream_healthy) {
+                                status_msg += L" [VIDEO_UNHEALTHY]";
+                            }
+                            if (!stats.audio_stream_healthy) {
+                                status_msg += L" [AUDIO_UNHEALTHY]";
+                            }
+                            if (stats.video_sync_loss_count > 0) {
+                                status_msg += L" [SYNC_LOSS:" + std::to_wstring(stats.video_sync_loss_count) + L"]";
+                            }
+                        }
+                        
+                        log_callback(status_msg);
                     }
                 }
                 

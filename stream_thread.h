@@ -45,6 +45,7 @@ std::thread StartTransportStreamThread(
     std::function<void(const std::wstring&)> log_callback = nullptr,
     size_t buffer_packets = 5000,
     const std::wstring& channel_name = L"",
+    std::atomic<int>* chunk_count = nullptr,
     HWND main_window = nullptr,
     size_t tab_index = 0,
     HANDLE* player_process_handle = nullptr
