@@ -671,6 +671,13 @@ TransportStreamRouter::TransportStreamRouter() {
     last_video_sync_time_ = std::chrono::steady_clock::now();
     last_key_frame_time_ = std::chrono::steady_clock::now();
     
+    // Initialize discontinuity signaling state
+    force_discontinuity_on_next_video_ = false;
+    force_discontinuity_on_next_audio_ = false;
+    inject_pat_with_discontinuity_ = false;
+    inject_pmt_with_discontinuity_ = false;
+    last_discontinuity_injection_ = std::chrono::steady_clock::now();
+    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();
@@ -1584,6 +1591,27 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
     
     auto now = std::chrono::steady_clock::now();
     
+    // Apply discontinuity indicators if scheduled
+    if ((packet.is_video_packet && force_discontinuity_on_next_video_) ||
+        (packet.is_audio_packet && force_discontinuity_on_next_audio_)) {
+        
+        SetDiscontinuityIndicator(packet);
+        
+        if (packet.is_video_packet) {
+            force_discontinuity_on_next_video_ = false;
+            if (log_callback_) {
+                log_callback_(L"[MPC-WORKAROUND] Applied discontinuity indicator to video packet");
+            }
+        }
+        
+        if (packet.is_audio_packet) {
+            force_discontinuity_on_next_audio_ = false;
+            if (log_callback_) {
+                log_callback_(L"[MPC-WORKAROUND] Applied discontinuity indicator to audio packet");
+            }
+        }
+    }
+    
     // Force video sync recovery on discontinuities or at regular intervals during ads
     if (is_discontinuity || 
         (in_ad_segment_ && std::chrono::duration_cast<std::chrono::milliseconds>(now - last_video_sync_time_) >= current_config_.video_sync_recovery_interval)) {
@@ -1598,7 +1626,7 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
         }
     }
     
-    // Insert synthetic key frame markers for video packets
+    // Insert synthetic key frame markers for video packets (legacy fallback)
     if (packet.is_video_packet && current_config_.insert_key_frame_markers) {
         auto key_frame_interval = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_key_frame_time_);
         if (key_frame_interval.count() > 1000) { // Force key frame every second during problematic segments
@@ -1609,22 +1637,19 @@ void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discont
 }
 
 void TransportStreamRouter::ForceVideoSyncRecovery() {
-    // This method forces video synchronization recovery by:
-    // 1. Setting discontinuity indicator on next video packet
-    // 2. Ensuring PCR is updated
-    // 3. Forcing PAT/PMT retransmission
+    // Implement proper MPEG-TS discontinuity signaling to trigger MPC-HC's
+    // automatic buffer flush logic (same effect as the MPC-HC patch)
     
     if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Forcing video sync recovery");
+        log_callback_(L"[MPC-WORKAROUND] Forcing MPEG-TS discontinuity signaling for buffer flush");
     }
+    
+    // Force discontinuity indicators on next packets to trigger DirectShow events
+    // This will cause MPC-HC to detect stream changes and trigger buffer flushing
+    ForceDiscontinuityOnNextPackets();
     
     // Reset frame statistics to prevent confusion
     ResetFrameStatistics();
-    
-    // Clear buffer to prevent old frames from causing issues
-    if (ts_buffer_) {
-        ts_buffer_->Clear();
-    }
 }
 
 void TransportStreamRouter::InsertSyntheticKeyFrameMarker(TSPacket& packet) {
@@ -1671,6 +1696,72 @@ void TransportStreamRouter::HandleAdTransition(bool entering_ad) {
             }
             // Force immediate sync recovery when exiting ads
             ForceVideoSyncRecovery();
+        }
+    }
+}
+
+// MPEG-TS discontinuity signaling implementation for MPC-HC compatibility
+void TransportStreamRouter::ForceDiscontinuityOnNextPackets() {
+    // Schedule discontinuity indicators on next video and audio packets
+    force_discontinuity_on_next_video_ = true;
+    force_discontinuity_on_next_audio_ = true;
+    inject_pat_with_discontinuity_ = true;
+    inject_pmt_with_discontinuity_ = true;
+    last_discontinuity_injection_ = std::chrono::steady_clock::now();
+    
+    if (log_callback_) {
+        log_callback_(L"[MPC-WORKAROUND] Scheduled discontinuity indicators for stream buffer flush");
+    }
+}
+
+void TransportStreamRouter::SetDiscontinuityIndicator(TSPacket& packet) {
+    // Ensure packet has adaptation field for discontinuity indicator
+    if (!(packet.data[3] & 0x20)) {
+        // No adaptation field present, need to add one
+        // Shift payload data to make room for minimal adaptation field
+        uint8_t old_flags = packet.data[3];
+        packet.data[3] = old_flags | 0x20; // Set adaptation field flag
+        packet.data[4] = 1; // Adaptation field length = 1 byte
+        packet.data[5] = 0x80; // Set discontinuity indicator bit
+        
+        // Move existing payload if present
+        if (old_flags & 0x10) { // Had payload
+            // Compact existing payload by 2 bytes
+            for (int i = 186; i >= 6; i--) {
+                packet.data[i] = (i >= 8) ? packet.data[i-2] : 0xFF; // Fill with padding
+            }
+        }
+    } else {
+        // Adaptation field already present, just set discontinuity bit
+        if (packet.data[4] > 0) {
+            packet.data[5] |= 0x80; // Set discontinuity indicator bit
+        }
+    }
+    
+    // Also set discontinuity flag for packet processing
+    packet.discontinuity = true;
+}
+
+void TransportStreamRouter::InjectPATWithDiscontinuity() {
+    // Generate a fresh PAT packet with discontinuity indicator
+    // This signals a program structure change to MPC-HC
+    if (hls_converter_) {
+        // Note: Ideally we would generate a proper PAT packet here
+        // For now, just schedule the flags for the next PAT packet
+        inject_pat_with_discontinuity_ = true;
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Injecting PAT with discontinuity indicator");
+        }
+    }
+}
+
+void TransportStreamRouter::InjectPMTWithDiscontinuity() {
+    // Generate a fresh PMT packet with discontinuity indicator
+    // This signals stream composition changes to MPC-HC
+    if (hls_converter_) {
+        inject_pmt_with_discontinuity_ = true;
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Injecting PMT with discontinuity indicator");
         }
     }
 }

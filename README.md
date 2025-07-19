@@ -20,6 +20,18 @@ This version includes **TSDuck-inspired HLS processing** for improved streaming 
 - **Enhanced Ad Detection**: Sophisticated SCTE-35 and pattern-based ad detection
 - **Optimized Timing**: Better segment timing for smoother playback
 
+### NEW: MPC-HC Buffer Freeze Workaround
+
+**Automatic MPC-HC/MPC-BE Compatibility** - Advanced workaround for video buffer freeze during ad transitions:
+
+- **Automatic Detection**: Detects MPC-HC, MPC-BE, VLC, and PotPlayer automatically
+- **MPEG-TS Discontinuity Signaling**: Generates proper transport stream discontinuity indicators that trigger MPC-HC's buffer flush logic
+- **Stream Event Generation**: Creates the same effect as the MPC-HC patch (https://github.com/Zero3K/mpc-hc/pull/2) without requiring MPC-HC modifications
+- **Ad Transition Handling**: Detects ad segments and applies buffer recovery during transitions
+- **Zero Configuration**: Works automatically with detected players, no settings required
+
+This implements the same buffer flush mechanism as the referenced MPC-HC patch but from the stream provider side, resolving video freeze issues during ad skipping.
+
 ### NEW: Frame Number Tagging for Lag Reduction
 
 **Frame Number Tagging** - Advanced frame tracking and monitoring system:

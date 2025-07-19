@@ -16,6 +16,8 @@
    - Enter a popular Twitch channel (e.g., "shroud", "ninja")
    - Click "Load" to fetch stream qualities
    - Select a quality and click "Watch"
+   - **Watch for ad transitions** to test MPC-HC workaround
+   - **Check debug log** for workaround messages
 
 ### **Method 2: Windows 7 VM Testing**
 ```bash
@@ -107,7 +109,21 @@ wine Tardsplaya.exe
 6. Close tabs (Ctrl+W) ✓
 ```
 
-### **Phase 3: Error Handling**
+### **Phase 3: MPC-HC Buffer Freeze Testing**
+```
+1. Install MPC-HC or MPC-BE media player ✓
+2. Start stream with ads (popular channel) ✓
+3. Check debug log for workaround detection:
+   "[MPC-WORKAROUND] Detected MPC-compatible player: mpc-hc.exe" ✓
+4. Wait for ad segments during stream ✓
+5. Verify no video freeze during ad transitions ✓
+6. Check log for discontinuity signaling:
+   "[MPC-WORKAROUND] Applied discontinuity indicator to video packet" ✓
+7. Verify smooth return to content after ads ✓
+8. Compare with MPV (should show no workaround messages) ✓
+```
+
+### **Phase 4: Error Handling**
 ```
 1. Invalid channel names ✓
 2. Offline channels ✓

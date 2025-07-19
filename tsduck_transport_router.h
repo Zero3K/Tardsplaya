@@ -285,6 +285,12 @@ namespace tsduck_transport {
         void ForceVideoSyncRecovery();
         void InsertSyntheticKeyFrameMarker(TSPacket& packet);
         
+        // MPEG-TS discontinuity signaling for MPC-HC buffer flush
+        void ForceDiscontinuityOnNextPackets();
+        void SetDiscontinuityIndicator(TSPacket& packet);
+        void InjectPATWithDiscontinuity();
+        void InjectPMTWithDiscontinuity();
+        
         // Ad transition detection and handling
         bool IsAdTransition(const std::string& segment_url) const;
         void HandleAdTransition(bool entering_ad);
@@ -295,6 +301,13 @@ namespace tsduck_transport {
         bool in_ad_segment_ = false;
         std::chrono::steady_clock::time_point last_video_sync_time_;
         std::chrono::steady_clock::time_point last_key_frame_time_;
+        
+        // MPEG-TS discontinuity signaling state
+        bool force_discontinuity_on_next_video_ = false;
+        bool force_discontinuity_on_next_audio_ = false;
+        bool inject_pat_with_discontinuity_ = false;
+        bool inject_pmt_with_discontinuity_ = false;
+        std::chrono::steady_clock::time_point last_discontinuity_injection_;
     };
     
 
