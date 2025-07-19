@@ -1680,25 +1680,17 @@ void TransportStreamRouter::ForceVideoSyncRecovery() {
     // automatic buffer flush logic (equivalent to the MPC-HC patch)
     
     if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Forcing aggressive TS program structure changes for buffer flush");
+        log_callback_(L"[MPC-WORKAROUND] Initiating comprehensive buffer flush sequence");
     }
     
-    // Force discontinuity indicators on next packets
-    ForceDiscontinuityOnNextPackets();
-    
-    // More aggressive: Force program structure regeneration to trigger DirectShow events
-    // This should cause DirectShow to fire EC_SEGMENT_STARTED/EC_STREAM_CONTROL events
-    force_program_structure_reset_ = true;
-    program_reset_counter_++;
-    
-    // Reset packet continuity counters to force graph reconstruction
-    ResetPacketContinuityCounters();
+    // Use the comprehensive stream format change approach
+    TriggerStreamFormatChange();
     
     // Reset frame statistics to prevent confusion
     ResetFrameStatistics();
     
     if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Applied program structure reset #" + std::to_wstring(program_reset_counter_));
+        log_callback_(L"[MPC-WORKAROUND] Buffer flush sequence #" + std::to_wstring(program_reset_counter_) + L" initiated");
     }
 }
 
@@ -1765,6 +1757,17 @@ void TransportStreamRouter::ForceDiscontinuityOnNextPackets() {
     inject_pat_with_discontinuity_ = true;
     inject_pmt_with_discontinuity_ = true;
     last_discontinuity_injection_ = std::chrono::steady_clock::now();
+    
+    // For MPC-HC: also force a more dramatic stream format change
+    if (is_mpc_player_ && current_config_.enable_mpc_workaround) {
+        // Force program structure reset to trigger DirectShow format negotiation
+        force_program_structure_reset_ = true;
+        reset_packet_count_ = 0;
+        
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Triggering comprehensive stream format change for buffer flush");
+        }
+    }
     
     if (log_callback_) {
         log_callback_(L"[MPC-WORKAROUND] Scheduled discontinuity indicators for stream buffer flush");
@@ -1847,6 +1850,29 @@ void TransportStreamRouter::ResetPacketContinuityCounters() {
     force_discontinuity_on_next_audio_ = true;
     inject_pat_with_discontinuity_ = true;
     inject_pmt_with_discontinuity_ = true;
+}
+
+void TransportStreamRouter::TriggerStreamFormatChange() {
+    // Create a temporary stream format change to trigger DirectShow format negotiation
+    // This should cause DirectShow to flush buffers and rebuild connections
+    
+    if (!is_mpc_player_ || !current_config_.enable_mpc_workaround) return;
+    
+    if (log_callback_) {
+        log_callback_(L"[MPC-WORKAROUND] Triggering stream format change to force DirectShow buffer flush");
+    }
+    
+    // Force all the dramatic changes at once for maximum impact
+    force_program_structure_reset_ = true;
+    force_discontinuity_on_next_video_ = true;
+    force_discontinuity_on_next_audio_ = true;
+    inject_pat_with_discontinuity_ = true;
+    inject_pmt_with_discontinuity_ = true;
+    reset_packet_count_ = 0;
+    program_reset_counter_++;
+    
+    // This comprehensive approach should trigger the DirectShow events that
+    // MPC-HC is listening for (EC_SEGMENT_STARTED, EC_STREAM_CONTROL_*, etc.)
 }
 
 

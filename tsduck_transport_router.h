@@ -291,6 +291,7 @@ namespace tsduck_transport {
         void InjectPATWithDiscontinuity();
         void InjectPMTWithDiscontinuity();
         void ResetPacketContinuityCounters();
+        void TriggerStreamFormatChange();
         
         // Ad transition detection and handling
         bool IsAdTransition(const std::string& segment_url) const;
