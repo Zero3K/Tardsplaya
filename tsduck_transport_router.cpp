@@ -1217,27 +1217,13 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                 }
             }
             
-            // Clear transport error indicator if it was temporarily set for format change
-            if (clear_transport_error_on_next_packet_) {
-                TSPacket modifiedPacket = packet;
-                // Clear transport error indicator (TEI bit) in TS header
-                modifiedPacket.data[1] &= 0x7F;  // Clear bit 7 (TEI)
-                clear_transport_error_on_next_packet_ = false;
-                
-                if (!SendTSPacketToPlayer(player_stdin, modifiedPacket)) {
-                    if (log_callback_) {
-                        log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
-                    }
-                    goto cleanup_and_exit;
-                }
-                
+            // Send packet normally
+            if (!SendTSPacketToPlayer(player_stdin, packet)) {
                 if (log_callback_) {
-                    log_callback_(L"[MPC-WORKAROUND] Cleared temporary transport error indicator");
+                    log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
                 }
-            } else {
-                if (!SendTSPacketToPlayer(player_stdin, packet)) {
-                    if (log_callback_) {
-                        log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
+                goto cleanup_and_exit;
+            }
                     }
                     goto cleanup_and_exit;
                 }
@@ -1617,73 +1603,49 @@ bool TransportStreamRouter::DetectMediaPlayerType(const std::wstring& player_pat
 void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discontinuity) {
     if (!is_mpc_player_ || !current_config_.enable_mpc_workaround) return;
     
-    // Apply stream format change during ad transitions to trigger DirectShow events
-    // that activate MPC-HC's buffer stall detection and automatic flush logic
-    if (packet.is_video_packet && (force_discontinuity_on_next_video_ || format_change_packets_remaining_ > 0)) {
-        // Rate limit format changes to prevent overwhelming the stream
+    // Simple approach: Only apply discontinuity indicator to one video packet when exiting ads
+    // This triggers MPC-HC's buffer stall detection without disrupting sync
+    
+    if (packet.is_video_packet && force_discontinuity_on_next_video_) {
+        // Rate limit to prevent multiple rapid changes  
         auto now = std::chrono::steady_clock::now();
         auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_format_change_time_);
         
-        if (time_since_last.count() >= 100) {  // Min 100ms between format changes
-            CreateStreamFormatChange(packet);
+        if (time_since_last.count() >= 500) {  // Min 500ms between changes
+            SetDiscontinuityIndicator(packet);
             last_format_change_time_ = now;
-            
-            if (format_change_packets_remaining_ > 0) {
-                format_change_packets_remaining_--;
-            }
-            
             force_discontinuity_on_next_video_ = false;
             
             if (log_callback_) {
-                log_callback_(L"[MPC-WORKAROUND] Applied stream format change to trigger DirectShow buffer flush (remaining: " + 
-                             std::to_wstring(format_change_packets_remaining_) + L")");
+                log_callback_(L"[MPC-WORKAROUND] Applied single video discontinuity to trigger buffer recovery");
             }
         }
     }
 }
+}
 
 void TransportStreamRouter::ForceVideoSyncRecovery() {
-    // Schedule a minimal discontinuity indicator for the next video packet only
-    // This is much gentler and avoids audio sync issues
+    // Schedule a single, minimal discontinuity indicator for the next video packet only
+    // This avoids audio sync issues while still triggering MPC-HC's buffer detection
     
     force_discontinuity_on_next_video_ = true;
     
     if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Scheduled minimal video buffer recovery");
+        log_callback_(L"[MPC-WORKAROUND] Scheduled single video discontinuity for buffer recovery");
     }
 }
 
 void TransportStreamRouter::CreateStreamFormatChange(TSPacket& packet) {
-    // Create a dramatic stream format change that will trigger DirectShow events
-    // like EC_SEGMENT_STARTED, which activates MPC-HC's buffer stall detection
+    // Minimal approach: Only set discontinuity indicator on video packets to trigger
+    // DirectShow events without disrupting stream timing or audio/video sync
     
-    // Force a program association table (PAT) change to signal new program structure
-    if (packet.pid == 0x00) {  // PAT packet
-        // Increment version number in PAT to signal format change
-        if (packet.data[5] & 0x01) {  // Check if current_next_indicator is set
-            packet.data[10] = (packet.data[10] & 0xC1) | ((packet.data[10] + 0x02) & 0x3E);  // Increment version
+    // Only apply to video packets to avoid affecting audio timing
+    if (IsVideoPacket(packet)) {
+        SetDiscontinuityIndicator(packet);
+        
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Set video discontinuity indicator to trigger buffer flush");
         }
-    }
-    
-    // Force a program map table (PMT) change to signal stream format change
-    if (packet.pid == 0x100 || packet.pid == 0x101) {  // Common PMT PIDs
-        if (packet.data[5] & 0x01) {  // Check if current_next_indicator is set
-            packet.data[10] = (packet.data[10] & 0xC1) | ((packet.data[10] + 0x02) & 0x3E);  // Increment version
-        }
-    }
-    
-    // Set discontinuity indicator and payload unit start to maximize format change signal
-    SetDiscontinuityIndicator(packet);
-    packet.payload_unit_start = true;
-    packet.is_key_frame = true;
-    
-    // Add transport error indicator temporarily to force filter graph reconstruction
-    // (will be cleared on next packet to avoid permanent errors)
-    packet.data[1] |= 0x80;  // Set transport error indicator (TEI bit)
-    clear_transport_error_on_next_packet_ = true;
-    
-    if (log_callback_) {
-        log_callback_(L"[MPC-WORKAROUND] Created stream format change (PAT/PMT version bump + discontinuity)");
     }
 }
 
@@ -1710,13 +1672,11 @@ void TransportStreamRouter::HandleAdTransition(bool entering_ad) {
         // This is when the video buffer freeze typically occurs
         if (!entering_ad && was_in_ad) {
             if (log_callback_) {
-                log_callback_(L"[MPC-WORKAROUND] Exiting ad segment - triggering stream format change to flush video buffers");
+                log_callback_(L"[MPC-WORKAROUND] Exiting ad segment - scheduling video discontinuity for buffer recovery");
             }
             
-            // Schedule multiple format changes over several video packets for reliability
-            // The MPC-HC patch shows that buffer stalls require more aggressive intervention
+            // Schedule a single discontinuity for the next video packet
             force_discontinuity_on_next_video_ = true;
-            format_change_packets_remaining_ = 3;  // Apply to next 3 video packets
             
             // Reset timing to allow immediate action
             last_format_change_time_ = std::chrono::steady_clock::time_point{};
