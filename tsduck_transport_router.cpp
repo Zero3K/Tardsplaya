@@ -1220,7 +1220,8 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             // Clear transport error indicator if it was temporarily set for format change
             if (clear_transport_error_on_next_packet_) {
                 TSPacket modifiedPacket = packet;
-                modifiedPacket.transport_error = false;
+                // Clear transport error indicator (TEI bit) in TS header
+                modifiedPacket.data[1] &= 0x7F;  // Clear bit 7 (TEI)
                 clear_transport_error_on_next_packet_ = false;
                 
                 if (!SendTSPacketToPlayer(player_stdin, modifiedPacket)) {
@@ -1678,7 +1679,7 @@ void TransportStreamRouter::CreateStreamFormatChange(TSPacket& packet) {
     
     // Add transport error indicator temporarily to force filter graph reconstruction
     // (will be cleared on next packet to avoid permanent errors)
-    packet.transport_error = true;
+    packet.data[1] |= 0x80;  // Set transport error indicator (TEI bit)
     clear_transport_error_on_next_packet_ = true;
     
     if (log_callback_) {
