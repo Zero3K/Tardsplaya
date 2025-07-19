@@ -850,6 +850,32 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
     }
 }
 
+// Media Player Compatibility Detection for MPC-HC workaround
+bool IsMPCCompatiblePlayer(const std::wstring& playerPath) {
+    // Convert to lowercase for case-insensitive comparison
+    std::wstring lowerPath = playerPath;
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
+    
+    // Check for MPC-HC and MPC-BE (the players known to have the freeze issue)
+    if (lowerPath.find(L"mpc-hc") != std::wstring::npos ||
+        lowerPath.find(L"mpc-be") != std::wstring::npos ||
+        lowerPath.find(L"mpc_hc") != std::wstring::npos ||
+        lowerPath.find(L"mpc_be") != std::wstring::npos ||
+        lowerPath.find(L"mpcbe") != std::wstring::npos ||
+        lowerPath.find(L"mpchc") != std::wstring::npos) {
+        return true;
+    }
+    
+    // Check for other media players that might have similar issues
+    // VLC and PotPlayer might also benefit from the workaround
+    if (lowerPath.find(L"vlc") != std::wstring::npos ||
+        lowerPath.find(L"potplayer") != std::wstring::npos) {
+        return true;
+    }
+    
+    return false;
+}
+
 void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Starting for tab " + std::to_wstring(tabIndex) + 
                L", channel=" + tab.channel + L", isStreaming=" + std::to_wstring(tab.isStreaming));
@@ -925,6 +951,12 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     // TSDuck TS Mode is now the default streaming mode
     StreamingMode mode = StreamingMode::TRANSPORT_STREAM;
     
+    // Detect if we need to enable MPC-HC workaround
+    bool enableMPCWorkaround = IsMPCCompatiblePlayer(g_playerPath);
+    if (enableMPCWorkaround) {
+        AddLog(L"[MPC-WORKAROUND] Detected MPC-compatible player - enabling video sync workaround");
+    }
+    
     AddLog(L"[TS_MODE] Starting TSDuck transport stream routing for " + tab.channel + L" (" + standardQuality + L")");
     
     // Start the buffering thread
@@ -944,7 +976,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         tabIndex, // tab index for identifying which stream to auto-stop
         originalQuality, // selected quality for ad recovery
         mode, // streaming mode (HLS or Transport Stream)
-        &tab.playerProcess // player process handle for monitoring
+        &tab.playerProcess, // player process handle for monitoring
+        enableMPCWorkaround // enable MPC-HC workaround if needed
     );
     
     AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));

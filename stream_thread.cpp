@@ -16,7 +16,8 @@ std::thread StartStreamThread(
     size_t tab_index,
     const std::wstring& selected_quality,
     StreamingMode mode,
-    HANDLE* player_process_handle
+    HANDLE* player_process_handle,
+    bool enable_mpc_workaround
 ) {
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
@@ -35,7 +36,7 @@ std::thread StartStreamThread(
         }
         
         return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
-                                         base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle);
+                                         base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle, enable_mpc_workaround);
     }
     
     // Use traditional HLS streaming
@@ -84,7 +85,8 @@ std::thread StartTransportStreamThread(
     std::atomic<int>* chunk_count,
     HWND main_window,
     size_t tab_index,
-    HANDLE* player_process_handle
+    HANDLE* player_process_handle,
+    bool enable_mpc_workaround
 ) {
     return std::thread([=, &cancel_token]() mutable {
         if (log_callback)
@@ -114,6 +116,18 @@ std::thread StartTransportStreamThread(
             config.max_segments_to_buffer = 2;  // Only buffer latest 2 segments
             config.playlist_refresh_interval = std::chrono::milliseconds(500);  // Check every 500ms
             config.skip_old_segments = true;
+            
+            // Configure MPC-HC workaround if enabled
+            if (enable_mpc_workaround) {
+                config.enable_mpc_workaround = true;
+                config.force_video_sync_on_discontinuity = true;
+                config.insert_key_frame_markers = true;
+                config.video_sync_recovery_interval = std::chrono::milliseconds(200);
+                
+                if (log_callback) {
+                    log_callback(L"[MPC-WORKAROUND] Enabled video synchronization workaround for MPC-compatible player");
+                }
+            }
             
             if (log_callback) {
                 log_callback(L"[TS_MODE] Starting TSDuck transport stream routing");

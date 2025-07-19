@@ -173,6 +173,12 @@ namespace tsduck_transport {
             size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
             std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
             bool skip_old_segments = true;  // Skip older segments when catching up
+            
+            // Media player compatibility workarounds
+            bool enable_mpc_workaround = false;  // Enable MPC-HC/MPC-BE compatibility workaround
+            bool force_video_sync_on_discontinuity = false;  // Force video sync signals during ad transitions
+            bool insert_key_frame_markers = false;  // Insert synthetic key frame markers for better seeking
+            std::chrono::milliseconds video_sync_recovery_interval{200}; // Force sync recovery every N ms during ads
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -272,6 +278,23 @@ namespace tsduck_transport {
         
         // Insert PCR (Program Clock Reference) for timing
         void InsertPCR(TSPacket& packet, uint64_t pcr_value);
+        
+        // Media player compatibility workarounds
+        bool DetectMediaPlayerType(const std::wstring& player_path);
+        void ApplyMPCWorkaround(TSPacket& packet, bool is_discontinuity = false);
+        void ForceVideoSyncRecovery();
+        void InsertSyntheticKeyFrameMarker(TSPacket& packet);
+        
+        // Ad transition detection and handling
+        bool IsAdTransition(const std::string& segment_url) const;
+        void HandleAdTransition(bool entering_ad);
+        
+    private:
+        // Additional private members for media player workarounds
+        bool is_mpc_player_ = false;
+        bool in_ad_segment_ = false;
+        std::chrono::steady_clock::time_point last_video_sync_time_;
+        std::chrono::steady_clock::time_point last_key_frame_time_;
     };
     
 

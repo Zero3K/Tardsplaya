@@ -115,6 +115,27 @@ The integration works as a fallback system:
 
 Requires Visual Studio 2015 or later. The project includes all necessary TLS client components and will compile them automatically.
 
+## Media Player Compatibility
+
+### MPC-HC/MPC-BE Workaround
+
+This version includes an automatic workaround for an issue with MPC-HC and MPC-BE where video freezes on black frames after ad skipping while audio continues playing. The workaround is enabled automatically when these players are detected.
+
+**How it works:**
+- Detects MPC-HC, MPC-BE, VLC, and PotPlayer automatically
+- Forces video synchronization recovery during ad transitions
+- Inserts synthetic key frame markers to help players recover
+- Ensures proper stream discontinuity signaling
+
+**Supported Players:**
+- ✅ MPV (no workaround needed)
+- ✅ MPC-HC (workaround enabled automatically)  
+- ✅ MPC-BE (workaround enabled automatically)
+- ✅ VLC (workaround enabled automatically)
+- ✅ PotPlayer (workaround enabled automatically)
+
+The workaround activates automatically when problematic players are detected and operates transparently in the background.
+
 ## Compatibility
 
 - Windows 7 SP1 and later

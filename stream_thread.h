@@ -34,7 +34,8 @@ std::thread StartStreamThread(
     size_t tab_index = 0,
     const std::wstring& selected_quality = L"",
     StreamingMode mode = StreamingMode::TRANSPORT_STREAM,
-    HANDLE* player_process_handle = nullptr
+    HANDLE* player_process_handle = nullptr,
+    bool enable_mpc_workaround = false
 );
 
 // Start TSDuck transport stream routing (alternative to traditional HLS streaming)
@@ -48,5 +49,6 @@ std::thread StartTransportStreamThread(
     std::atomic<int>* chunk_count = nullptr,
     HWND main_window = nullptr,
     size_t tab_index = 0,
-    HANDLE* player_process_handle = nullptr
+    HANDLE* player_process_handle = nullptr,
+    bool enable_mpc_workaround = false
 );

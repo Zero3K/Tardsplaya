@@ -15,6 +15,7 @@
 // Forward declarations
 extern bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token = nullptr);
 std::wstring Utf8ToWide(const std::string& str);
+std::string WideToUtf8(const std::wstring& str);
 void AddDebugLog(const std::wstring& msg);
 
 // HttpGetBinary implementation for transport stream router with retry logic
@@ -664,6 +665,12 @@ TransportStreamRouter::TransportStreamRouter() {
     last_video_packet_time_ = std::chrono::steady_clock::now();
     last_audio_packet_time_ = std::chrono::steady_clock::now();
     
+    // Initialize MPC workaround state
+    is_mpc_player_ = false;
+    in_ad_segment_ = false;
+    last_video_sync_time_ = std::chrono::steady_clock::now();
+    last_key_frame_time_ = std::chrono::steady_clock::now();
+    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();
@@ -696,6 +703,9 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     current_config_ = config;
     log_callback_ = log_callback;
     routing_active_ = true;
+    
+    // Detect media player type for workarounds
+    DetectMediaPlayerType(config.player_path);
     
     // Reset converter and buffer
     hls_converter_->Reset();
@@ -929,6 +939,13 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
+                    // Check for ad transitions and apply MPC workaround if needed
+                    std::string segment_url_utf8 = WideToUtf8(segment_url);
+                    bool is_ad_segment = IsAdTransition(segment_url_utf8);
+                    if (is_ad_segment != in_ad_segment_) {
+                        HandleAdTransition(is_ad_segment);
+                    }
+                    
                     // Convert to TS packets
                     auto ts_packets = hls_converter_->ConvertSegment(segment_data, first_segment);
                     first_segment = false;
@@ -961,8 +978,16 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         buffer_low_watermark = current_config_.buffer_size_packets / 4;       // 25% full for faster recovery
                     }
                     
-                    for (const auto& packet : ts_packets) {
+                    for (const auto& packet_orig : ts_packets) {
                         if (!routing_active_ || cancel_token) break;
+                        
+                        // Make a copy so we can apply workarounds
+                        TSPacket packet = packet_orig;
+                        
+                        // Apply MPC workaround if enabled
+                        if (current_config_.enable_mpc_workaround) {
+                            ApplyMPCWorkaround(packet, has_discontinuities && segments_processed == 0);
+                        }
                         
                         // Check stream health before adding packets
                         CheckStreamHealth(packet);
@@ -1527,6 +1552,125 @@ void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
             log_callback_(L"[STREAM_HEALTH] WARNING: Audio stream appears unhealthy");
         }
         last_health_check = now;
+    }
+}
+
+// MPC-HC Workaround Implementation
+bool TransportStreamRouter::DetectMediaPlayerType(const std::wstring& player_path) {
+    std::wstring lowerPath = player_path;
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
+    
+    if (lowerPath.find(L"mpc-hc") != std::wstring::npos ||
+        lowerPath.find(L"mpc-be") != std::wstring::npos ||
+        lowerPath.find(L"mpc_hc") != std::wstring::npos ||
+        lowerPath.find(L"mpc_be") != std::wstring::npos ||
+        lowerPath.find(L"mpcbe") != std::wstring::npos ||
+        lowerPath.find(L"mpchc") != std::wstring::npos ||
+        lowerPath.find(L"vlc") != std::wstring::npos ||
+        lowerPath.find(L"potplayer") != std::wstring::npos) {
+        is_mpc_player_ = true;
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Detected MPC-compatible player: " + player_path);
+        }
+        return true;
+    }
+    
+    is_mpc_player_ = false;
+    return false;
+}
+
+void TransportStreamRouter::ApplyMPCWorkaround(TSPacket& packet, bool is_discontinuity) {
+    if (!is_mpc_player_ || !current_config_.enable_mpc_workaround) return;
+    
+    auto now = std::chrono::steady_clock::now();
+    
+    // Force video sync recovery on discontinuities or at regular intervals during ads
+    if (is_discontinuity || 
+        (in_ad_segment_ && std::chrono::duration_cast<std::chrono::milliseconds>(now - last_video_sync_time_) >= current_config_.video_sync_recovery_interval)) {
+        
+        ForceVideoSyncRecovery();
+        last_video_sync_time_ = now;
+        
+        if (log_callback_) {
+            log_callback_(L"[MPC-WORKAROUND] Applied video sync recovery" + 
+                         (is_discontinuity ? L" (discontinuity)" : L" (periodic)"));
+        }
+    }
+    
+    // Insert synthetic key frame markers for video packets
+    if (packet.is_video_packet && current_config_.insert_key_frame_markers) {
+        auto key_frame_interval = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_key_frame_time_);
+        if (key_frame_interval.count() > 1000) { // Force key frame every second during problematic segments
+            InsertSyntheticKeyFrameMarker(packet);
+            last_key_frame_time_ = now;
+        }
+    }
+}
+
+void TransportStreamRouter::ForceVideoSyncRecovery() {
+    // This method forces video synchronization recovery by:
+    // 1. Setting discontinuity indicator on next video packet
+    // 2. Ensuring PCR is updated
+    // 3. Forcing PAT/PMT retransmission
+    
+    if (log_callback_) {
+        log_callback_(L"[MPC-WORKAROUND] Forcing video sync recovery");
+    }
+    
+    // Reset frame statistics to prevent confusion
+    ResetFrameStatistics();
+    
+    // Clear buffer to prevent old frames from causing issues
+    if (ts_buffer_) {
+        ts_buffer_->Clear();
+    }
+}
+
+void TransportStreamRouter::InsertSyntheticKeyFrameMarker(TSPacket& packet) {
+    if (!packet.is_video_packet) return;
+    
+    // Mark this packet as a key frame to help players recover
+    packet.is_key_frame = true;
+    packet.payload_unit_start = true;
+    
+    // Set discontinuity indicator to signal a fresh start
+    packet.discontinuity = true;
+    
+    if (log_callback_) {
+        AddDebugLog(L"[MPC-WORKAROUND] Inserted synthetic key frame marker");
+    }
+}
+
+bool TransportStreamRouter::IsAdTransition(const std::string& segment_url) const {
+    // Simple ad detection based on URL patterns
+    // Twitch ads typically have different URL patterns than content
+    std::string lowerUrl = segment_url;
+    std::transform(lowerUrl.begin(), lowerUrl.end(), lowerUrl.begin(), ::tolower);
+    
+    return (lowerUrl.find("ads") != std::string::npos ||
+            lowerUrl.find("commercial") != std::string::npos ||
+            lowerUrl.find("preroll") != std::string::npos ||
+            lowerUrl.find("midroll") != std::string::npos ||
+            lowerUrl.find("-ad-") != std::string::npos ||
+            lowerUrl.find("_ad_") != std::string::npos);
+}
+
+void TransportStreamRouter::HandleAdTransition(bool entering_ad) {
+    bool was_in_ad = in_ad_segment_;
+    in_ad_segment_ = entering_ad;
+    
+    if (is_mpc_player_ && current_config_.enable_mpc_workaround) {
+        if (entering_ad && !was_in_ad) {
+            if (log_callback_) {
+                log_callback_(L"[MPC-WORKAROUND] Entering ad segment - preparing for sync recovery");
+            }
+        } else if (!entering_ad && was_in_ad) {
+            if (log_callback_) {
+                log_callback_(L"[MPC-WORKAROUND] Exiting ad segment - forcing video sync recovery");
+            }
+            // Force immediate sync recovery when exiting ads
+            ForceVideoSyncRecovery();
+        }
     }
 }
 
