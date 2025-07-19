@@ -3,6 +3,16 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
+# GPAC library files (when integrated)
+gpac/
+libgpac.*
+**/gpac/**
+
+# GPAC build outputs
+*.mp4
+*.ts
+*.m3u8
+
 # User-specific files
 *.rsuser
 *.suo
