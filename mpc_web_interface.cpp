@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <thread>
+#include <vector>
 
 // Forward declaration for debug logging from main application
 extern void AddDebugLog(const std::wstring& msg);
@@ -54,7 +55,7 @@ void MPCWebInterface::CheckAvailability() const {
         AddDebugLog(L"[MPC-WEB] Availability changed: " + std::wstring(now_available ? L"true" : L"false"));
     }
     
-    available_ = now_available;
+    available_.store(now_available);
 }
 
 bool MPCWebInterface::TestConnection() const {
