@@ -4,6 +4,7 @@
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
+#include "mpc_web_interface.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -484,18 +485,30 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
     
     std::istringstream ss(playlist);
     std::string line;
+    bool expecting_segment_url = false;
     
     while (std::getline(ss, line)) {
         if (line.empty()) continue;
         
         if (line[0] == '#') {
-            // Skip all header/tag lines
+            // Check for discontinuity tags that require buffer clearing and player recovery
+            if (line.find("#EXT-X-DISCONTINUITY") == 0) {
+                should_clear_buffer = true;
+                AddDebugLog(L"[DISCONTINUITY] Found #EXT-X-DISCONTINUITY tag - buffer clear and player recovery needed");
+            }
+            else if (line.find("#EXTINF:") == 0) {
+                expecting_segment_url = true;
+            }
+            // Skip other header/tag lines
             continue;
         }
         
-        // This is a segment URL - add it directly
-        std::wstring wline(line.begin(), line.end());
-        segs.push_back(wline);
+        if (expecting_segment_url) {
+            // This is a segment URL - add it directly
+            std::wstring wline(line.begin(), line.end());
+            segs.push_back(wline);
+            expecting_segment_url = false;
+        }
     }
     
     return std::make_pair(segs, should_clear_buffer);
@@ -740,8 +753,9 @@ bool BufferAndPipeStreamToPlayer(
     // Build command with media player configured to read from stdin
     std::wstring cmd;
     if (player_path.find(L"mpc-hc") != std::wstring::npos) {
-        // MPC-HC: read from stdin
-        cmd = L"\"" + player_path + L"\" - /new /nofocus";
+        // MPC-HC: read from stdin and enable web interface for discontinuity handling
+        cmd = L"\"" + player_path + L"\" - /new /nofocus /webroot";
+        AddDebugLog(L"[MPC-HC] Launching with web interface enabled for discontinuity recovery");
     } else if (player_path.find(L"vlc") != std::wstring::npos) {
         // VLC: read from stdin
         cmd = L"\"" + player_path + L"\" - --intf dummy --no-one-instance";
@@ -811,6 +825,23 @@ bool BufferAndPipeStreamToPlayer(
     std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Brief delay for process startup
     bool initial_check = ProcessStillRunning(pi.hProcess, channel_name + L" initial_verification", pi.dwProcessId);
     AddDebugLog(L"[PROCESS] Initial verification after 100ms: " + std::to_wstring(initial_check) + L" for " + channel_name);
+
+    // Initialize MPC-HC web interface for discontinuity handling if applicable
+    std::unique_ptr<MPCWebInterface> mpc_web_interface = nullptr;
+    if (IsMPCHC(player_path)) {
+        AddDebugLog(L"[MPC-HC] Detected MPC-HC player, attempting to initialize web interface");
+        
+        // Give MPC-HC additional time to start up and enable web interface
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        
+        mpc_web_interface = CreateMPCWebInterface(player_path);
+        if (mpc_web_interface && mpc_web_interface->IsAvailable()) {
+            AddDebugLog(L"[MPC-HC] Web interface successfully initialized for discontinuity recovery");
+        } else {
+            AddDebugLog(L"[MPC-HC] Web interface not available, will use traditional streaming without discontinuity recovery");
+            mpc_web_interface.reset(); // Clear the pointer if not available
+        }
+    }
 
     // 3. Start thread to maintain player window title with channel name
     std::thread title_thread([pi, channel_name]() {
@@ -970,8 +1001,22 @@ bool BufferAndPipeStreamToPlayer(
                     std::queue<std::vector<char>> empty_queue;
                     buffer_queue.swap(empty_queue); // Clear the queue efficiently
                 }
-                AddDebugLog(L"[AD_SKIP] Cleared " + std::to_wstring(cleared_segments) + 
-                           L" buffered segments when entering/exiting ad block for " + channel_name);
+                AddDebugLog(L"[DISCONTINUITY] Cleared " + std::to_wstring(cleared_segments) + 
+                           L" buffered segments due to discontinuity for " + channel_name);
+                
+                // Use MPC-HC web interface for discontinuity recovery if available
+                if (mpc_web_interface && mpc_web_interface->IsAvailable()) {
+                    AddDebugLog(L"[DISCONTINUITY] Attempting MPC-HC web interface recovery for " + channel_name);
+                    
+                    bool recovery_success = mpc_web_interface->HandleDiscontinuity();
+                    if (recovery_success) {
+                        AddDebugLog(L"[DISCONTINUITY] MPC-HC web interface recovery successful for " + channel_name);
+                    } else {
+                        AddDebugLog(L"[DISCONTINUITY] MPC-HC web interface recovery failed, continuing with buffer clear only for " + channel_name);
+                    }
+                } else {
+                    AddDebugLog(L"[DISCONTINUITY] No web interface available, using buffer clear only for " + channel_name);
+                }
             }
             
             AddDebugLog(L"[DOWNLOAD] Parsed " + std::to_wstring(segments.size()) + 

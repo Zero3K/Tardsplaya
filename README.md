@@ -128,9 +128,26 @@ A C++ application that buffers Twitch streams to media players like MPC-HC, MPC-
 - **Stream Buffering**: Downloads and buffers stream segments before sending to media player for smooth playback
 - **Multiple Quality Support**: Automatically detects and allows selection of available stream qualities
 - **Multi-Stream Support**: Open multiple tabs to watch different streams simultaneously
+- **MPC-HC Discontinuity Recovery**: Automatically handles stream discontinuities (ad breaks) using MPC-HC's web interface to prevent freezing
 - **Windows 7 Compatibility**: Includes certificate validation workarounds for older Windows versions
 - **Real-time Logging**: Shows detailed logs of streaming operations
 - **Modern C++ Implementation**: Clean, efficient C++17 code with minimal dependencies
+
+### MPC-HC Web Interface Integration
+
+When using MPC-HC as the media player, Tardsplaya automatically:
+
+- **Enables MPC-HC's built-in web interface** for enhanced stream control
+- **Detects stream discontinuities** (typically during ad breaks) in real-time
+- **Automatically recovers from freezing** by sending pause/resume commands via HTTP
+- **Provides seamless viewing experience** during ad transitions and stream format changes
+- **Falls back to traditional streaming** if web interface is not available
+
+**Technical Details**:
+- Uses MPC-HC's web interface on port 13579 (default)
+- Sends HTTP commands for pause/resume/seek operations during discontinuities
+- Compatible with all recent MPC-HC versions that support web interface
+- No manual configuration required - automatically enabled when MPC-HC is detected
 
 ## Requirements
 

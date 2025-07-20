@@ -3,6 +3,7 @@
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
+#include "mpc_web_interface.h"
 #define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
@@ -1264,8 +1265,18 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     
     PROCESS_INFORMATION pi = {};
     
-    // Build command line using the configured player arguments (simple approach like HLS mode)
-    std::wstring cmd_line = L"\"" + config.player_path + L"\" " + config.player_args;
+    // Build command line using the configured player arguments
+    std::wstring cmd_line;
+    if (IsMPCHC(config.player_path)) {
+        // MPC-HC: Enable web interface for discontinuity handling
+        cmd_line = L"\"" + config.player_path + L"\" " + config.player_args + L" /webroot";
+        if (log_callback_) {
+            log_callback_(L"[TS_ROUTER] Launching MPC-HC with web interface enabled");
+        }
+    } else {
+        // Other players: use standard arguments
+        cmd_line = L"\"" + config.player_path + L"\" " + config.player_args;
+    }
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Launching player: " + cmd_line);

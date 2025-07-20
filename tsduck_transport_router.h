@@ -16,6 +16,9 @@
 #define NOMINMAX
 #include <windows.h>
 
+// Forward declaration for MPC web interface
+class MPCWebInterface;
+
 namespace tsduck_transport {
 
     // Transport Stream packet size (MPEG-TS standard)
@@ -226,6 +229,9 @@ namespace tsduck_transport {
         RouterConfig current_config_;
         std::function<void(const std::wstring&)> log_callback_;
         HANDLE player_process_handle_;
+        
+        // MPC-HC web interface for discontinuity handling
+        std::unique_ptr<MPCWebInterface> mpc_web_interface_;
         
         // Frame Number Tagging statistics
         std::atomic<uint64_t> total_frames_processed_{0};
