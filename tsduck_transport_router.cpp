@@ -351,12 +351,21 @@ void HLSToTSConverter::ResetForQualitySwitch(bool switching_to_audio_only) {
     segment_frame_counter_ = 0;
     last_frame_time_ = std::chrono::steady_clock::now();
     
-    // Set appropriate frame duration for the target stream type
-    if (switching_to_audio_only) {
-        estimated_frame_duration_ = std::chrono::milliseconds(100); // ~10fps for audio packets
-    } else {
-        estimated_frame_duration_ = std::chrono::milliseconds(33);  // ~30fps for video
+    // Only reset frame duration if switching between different stream types
+    // or if the current duration is still at default value (not yet calibrated)
+    // This prevents timing disruption in MPC-HC when switching between same stream types
+    bool needs_duration_reset = is_changing_stream_type || 
+                               (estimated_frame_duration_.count() == 33 && !switching_to_audio_only) ||
+                               (estimated_frame_duration_.count() == 100 && switching_to_audio_only);
+    
+    if (needs_duration_reset) {
+        if (switching_to_audio_only) {
+            estimated_frame_duration_ = std::chrono::milliseconds(100); // ~10fps for audio packets
+        } else {
+            estimated_frame_duration_ = std::chrono::milliseconds(33);  // ~30fps for video
+        }
     }
+    // Otherwise preserve the calibrated frame duration to maintain smooth playback
 }
 
 std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
