@@ -776,6 +776,15 @@ TransportStreamRouter::BufferStats TransportStreamRouter::GetBufferStats() const
     stats.video_stream_healthy = IsVideoStreamHealthy();
     stats.audio_stream_healthy = IsAudioStreamHealthy();
     
+    // NEW: Ad Skipping Statistics
+    stats.total_segments_processed = total_segments_processed_.load();
+    stats.ad_segments_detected = ad_segments_detected_.load();
+    stats.ad_segments_skipped = ad_segments_skipped_.load();
+    stats.total_ad_duration_skipped = std::chrono::milliseconds(total_ad_duration_skipped_ms_.load());
+    stats.total_stream_time_saved = stats.total_ad_duration_skipped; // Same as ad duration skipped
+    stats.ad_skipping_active = current_config_.enable_ad_skipping;
+    stats.currently_in_ad_break = currently_in_ad_break_.load();
+    
     // Calculate current FPS
     auto now = std::chrono::steady_clock::now();
     auto time_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - stream_start_time_);
@@ -829,16 +838,62 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 break;
             }
             
-            // Parse playlist with enhanced discontinuity detection
+            // Parse playlist with enhanced ad detection and skipping
             tsduck_hls::PlaylistParser playlist_parser;
+            
+            // Configure ad skipping based on router config
+            tsduck_hls::PlaylistParser::AdSkippingConfig ad_config;
+            ad_config.enable_ad_skipping = current_config_.enable_ad_skipping;
+            ad_config.skip_scte35_segments = current_config_.skip_scte35_ads;
+            ad_config.skip_pattern_detected_ads = current_config_.skip_pattern_detected_ads;
+            ad_config.maintain_stream_continuity = current_config_.maintain_stream_continuity;
+            ad_config.max_ad_break_duration = current_config_.max_ad_break_duration;
+            
+            playlist_parser.SetAdSkippingConfig(ad_config);
+            
             std::vector<std::wstring> segment_urls;
             bool has_discontinuities = false;
             
-            if (playlist_parser.ParsePlaylist(playlist_content)) {
-                // Extract segment URLs from parsed playlist
-                auto segments = playlist_parser.GetSegments();
-                for (const auto& segment : segments) {
+            if (playlist_parser.ParsePlaylist(playlist_content, ad_config)) {
+                // Get segments with ad skipping applied (if enabled)
+                auto all_segments = playlist_parser.GetSegments();
+                auto filtered_segments = current_config_.enable_ad_skipping ? 
+                    playlist_parser.GetFilteredSegments(true) : all_segments;
+                
+                // Extract segment URLs from filtered playlist
+                for (const auto& segment : filtered_segments) {
                     segment_urls.push_back(segment.url);
+                }
+                
+                // Update ad skipping statistics
+                if (current_config_.enable_ad_skipping) {
+                    total_segments_processed_ += static_cast<uint32_t>(all_segments.size());
+                    
+                    uint32_t ads_detected = 0;
+                    uint32_t ads_skipped = 0;
+                    uint64_t ad_duration_skipped = 0;
+                    
+                    for (const auto& segment : all_segments) {
+                        if (segment.IsAdSegment()) {
+                            ads_detected++;
+                            if (segment.ShouldSkipForAdFree()) {
+                                ads_skipped++;
+                                ad_duration_skipped += segment.precise_duration.count();
+                            }
+                        }
+                    }
+                    
+                    ad_segments_detected_ += ads_detected;
+                    ad_segments_skipped_ += ads_skipped;
+                    total_ad_duration_skipped_ms_ += ad_duration_skipped;
+                    
+                    // Log ad skipping activity
+                    if (current_config_.log_ad_skipping && ads_skipped > 0) {
+                        if (log_callback_) {
+                            log_callback_(L"[AD_SKIP] Skipped " + std::to_wstring(ads_skipped) + 
+                                         L" ad segments (" + std::to_wstring(ad_duration_skipped / 1000) + L"s saved)");
+                        }
+                    }
                 }
                 
                 // Check for discontinuities that indicate ad transitions

@@ -120,7 +120,7 @@ struct StreamTab {
 
 HINSTANCE g_hInst;
 HWND g_hMainWnd, g_hTab, g_hLogList, g_hStatusBar;
-HWND g_hFavoritesList, g_hFavoritesAdd, g_hFavoritesDelete, g_hFavoritesEdit, g_hCheckVersion;
+HWND g_hFavoritesList, g_hFavoritesAdd, g_hFavoritesDelete, g_hFavoritesEdit, g_hCheckVersion, g_hAdSkippingCheck;
 HFONT g_hFont = nullptr; // Tahoma font for UI controls
 HACCEL g_hAccel = nullptr; // Accelerator table for hotkeys
 std::vector<StreamTab> g_streams;
@@ -395,6 +395,23 @@ void OnFavoriteDoubleClick() {
 
 void CheckVersion() {
     MessageBoxW(g_hMainWnd, L"Tardsplaya Version 1.0\nTwitch Stream Player", L"Version", MB_OK);
+}
+
+void OnAdSkippingToggle() {
+    // Get the current checkbox state
+    bool adSkippingEnabled = (SendMessage(g_hAdSkippingCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    
+    // Update status and provide user feedback
+    if (adSkippingEnabled) {
+        AddLog(L"Ad skipping enabled using TSDuck SCTE-35 detection");
+        UpdateStatusBar(L"Ad skipping: ON (TSDuck)");
+    } else {
+        AddLog(L"Ad skipping disabled - all segments will be played");
+        UpdateStatusBar(L"Ad skipping: OFF");
+    }
+    
+    // The actual ad skipping configuration will be applied when starting a stream
+    // This is handled in the StartStream function when creating the TransportStreamRouter config
 }
 
 void UpdateStatusBar(const std::wstring& text) {
@@ -927,6 +944,9 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     
     AddLog(L"[TS_MODE] Starting TSDuck transport stream routing for " + tab.channel + L" (" + standardQuality + L")");
     
+    // Get ad skipping setting from checkbox
+    bool adSkippingEnabled = (SendMessage(g_hAdSkippingCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
         g_playerPath,
@@ -944,7 +964,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         tabIndex, // tab index for identifying which stream to auto-stop
         originalQuality, // selected quality for ad recovery
         mode, // streaming mode (HLS or Transport Stream)
-        &tab.playerProcess // player process handle for monitoring
+        &tab.playerProcess, // player process handle for monitoring
+        adSkippingEnabled // ad skipping configuration
     );
     
     AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));
@@ -1056,6 +1077,13 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     SendMessage(hStop, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
+    
+    // Ad Skipping checkbox
+    HWND hAdSkippingCheck = CreateWindowEx(0, L"BUTTON", L"Skip Ads (TSDuck)", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 70, 170, 140, 20, hwnd, (HMENU)IDC_ENABLE_AD_SKIPPING, g_hInst, nullptr);
+    SendMessage(hAdSkippingCheck, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
+    // Store checkbox handle for later access
+    g_hAdSkippingCheck = hAdSkippingCheck;
     
 
 
@@ -1449,6 +1477,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             break;
         case IDC_CHECK_VERSION:
             CheckVersion();
+            break;
+        case IDC_ENABLE_AD_SKIPPING:
+            OnAdSkippingToggle();
             break;
         case IDC_FAVORITES_LIST:
             if (HIWORD(wParam) == LBN_DBLCLK) {

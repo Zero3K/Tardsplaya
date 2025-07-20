@@ -173,6 +173,14 @@ namespace tsduck_transport {
             size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
             std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
             bool skip_old_segments = true;  // Skip older segments when catching up
+            
+            // NEW: Ad Skipping Configuration
+            bool enable_ad_skipping = false;      // Master toggle for ad skipping
+            bool skip_scte35_ads = true;          // Skip segments with SCTE-35 markers  
+            bool skip_pattern_detected_ads = true; // Skip ads detected by pattern analysis
+            bool maintain_stream_continuity = true; // Ensure smooth playback during ad skips
+            std::chrono::milliseconds max_ad_break_duration{300000}; // Max 5-minute ad breaks
+            bool log_ad_skipping = true;          // Log ad skipping actions for debugging
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -208,6 +216,15 @@ namespace tsduck_transport {
             uint32_t video_sync_loss_count = 0;
             bool video_stream_healthy = true;
             bool audio_stream_healthy = true;
+            
+            // NEW: Ad Skipping Statistics
+            uint32_t total_segments_processed = 0;
+            uint32_t ad_segments_detected = 0;
+            uint32_t ad_segments_skipped = 0;
+            std::chrono::milliseconds total_ad_duration_skipped{0};
+            std::chrono::milliseconds total_stream_time_saved{0};
+            bool ad_skipping_active = false;
+            bool currently_in_ad_break = false;
         };
         BufferStats GetBufferStats() const;
         
@@ -243,6 +260,15 @@ namespace tsduck_transport {
         std::atomic<uint32_t> video_sync_loss_count_{0};
         std::chrono::steady_clock::time_point last_video_packet_time_;
         std::chrono::steady_clock::time_point last_audio_packet_time_;
+        
+        // NEW: Ad Skipping Statistics
+        std::atomic<uint32_t> total_segments_processed_{0};
+        std::atomic<uint32_t> ad_segments_detected_{0};
+        std::atomic<uint32_t> ad_segments_skipped_{0};
+        std::atomic<uint64_t> total_ad_duration_skipped_ms_{0};
+        std::atomic<bool> currently_in_ad_break_{false};
+        std::chrono::steady_clock::time_point ad_break_start_time_;
+        mutable std::mutex ad_stats_mutex_;
         
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);

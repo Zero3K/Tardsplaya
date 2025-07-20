@@ -39,6 +39,7 @@
 #define IDC_FAVORITES_EDIT      1109
 #define IDC_CHECK_VERSION       1110
 #define IDC_STATUS_BAR          1111
+#define IDC_ENABLE_AD_SKIPPING  1112
 
 
 // Tray icon support

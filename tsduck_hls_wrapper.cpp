@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <cwctype>
 
 namespace tsduck_hls {
 
@@ -11,9 +12,10 @@ PlaylistParser::PlaylistParser() {
     // Initialize with defaults
 }
 
-bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
+bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content, const AdSkippingConfig& config) {
     segments_.clear();
     has_discontinuities_ = false;
+    ad_config_ = config;
     
     std::istringstream stream(m3u8_content);
     std::string line;
@@ -57,9 +59,12 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
             }
             else if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 current_segment.has_scte35_out = true;
+                current_segment.is_ad_segment = true;
+                current_segment.is_ad_break_start = true;
             }
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
                 current_segment.has_scte35_in = true;
+                current_segment.is_ad_break_end = true;
             }
             else if (line.find("#EXT-X-DATERANGE") == 0) {
                 ParseDateRangeLine(line, current_segment);
@@ -78,8 +83,13 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
         }
     }
     
-    // Post-processing: calculate precise timing
+    // Post-processing: calculate precise timing and analyze ads
     CalculatePreciseTiming();
+    
+    if (ad_config_.enable_ad_skipping) {
+        AnalyzeAdSegments();
+        ApplyAdSkippingLogic();
+    }
     
     return !segments_.empty();
 }
@@ -226,6 +236,167 @@ std::chrono::milliseconds BufferingOptimizer::CalculatePreloadTime(const std::ve
 bool BufferingOptimizer::ShouldFlushBuffer(const MediaSegment& current, const MediaSegment& next) {
     // TSDuck-style discontinuity analysis
     return next.has_discontinuity;
+}
+
+// NEW: Ad detection and skipping methods
+std::vector<MediaSegment> PlaylistParser::GetFilteredSegments(bool exclude_ads) const {
+    if (!exclude_ads || !ad_config_.enable_ad_skipping) {
+        return segments_;
+    }
+    
+    std::vector<MediaSegment> filtered;
+    for (const auto& segment : segments_) {
+        if (!segment.ShouldSkipForAdFree()) {
+            filtered.push_back(segment);
+        }
+    }
+    return filtered;
+}
+
+bool PlaylistParser::HasAdSegments() const {
+    for (const auto& segment : segments_) {
+        if (segment.IsAdSegment()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int PlaylistParser::GetAdSegmentCount() const {
+    int count = 0;
+    for (const auto& segment : segments_) {
+        if (segment.IsAdSegment()) {
+            count++;
+        }
+    }
+    return count;
+}
+
+std::chrono::milliseconds PlaylistParser::GetTotalAdDuration() const {
+    std::chrono::milliseconds total{0};
+    for (const auto& segment : segments_) {
+        if (segment.IsAdSegment()) {
+            total += segment.precise_duration;
+        }
+    }
+    return total;
+}
+
+void PlaylistParser::AnalyzeAdSegments() {
+    // Enhanced ad detection beyond SCTE-35 markers
+    for (auto& segment : segments_) {
+        // Pattern-based ad detection (if enabled)
+        if (ad_config_.skip_pattern_detected_ads) {
+            if (DetectAdPatternsInSegment(segment)) {
+                segment.is_ad_segment = true;
+            }
+        }
+    }
+    
+    // Mark ad break boundaries for better continuity
+    MarkAdBreakBoundaries();
+}
+
+void PlaylistParser::ApplyAdSkippingLogic() {
+    bool in_ad_break = false;
+    std::chrono::milliseconds current_ad_break_duration{0};
+    
+    for (auto& segment : segments_) {
+        // Check if we're entering an ad break
+        if (!in_ad_break && segment.IsAdSegment()) {
+            in_ad_break = true;
+            current_ad_break_duration = std::chrono::milliseconds{0};
+            segment.is_ad_break_start = true;
+        }
+        
+        // If we're in an ad break, accumulate duration
+        if (in_ad_break) {
+            current_ad_break_duration += segment.precise_duration;
+            
+            // Check if ad break exceeds maximum duration
+            if (current_ad_break_duration > ad_config_.max_ad_break_duration) {
+                // Stop skipping - this might not be an ad break
+                in_ad_break = false;
+                // Retroactively mark previous segments as non-ad
+                for (auto& prev_seg : segments_) {
+                    if (prev_seg.sequence_number >= segment.sequence_number - 10) { // Last 10 segments
+                        prev_seg.should_skip = false;
+                    }
+                }
+                continue;
+            }
+            
+            // Apply skipping logic based on configuration
+            if ((ad_config_.skip_scte35_segments && segment.has_scte35_out) ||
+                (ad_config_.skip_pattern_detected_ads && segment.is_ad_segment)) {
+                segment.should_skip = true;
+            }
+        }
+        
+        // Check if we're exiting an ad break
+        if (in_ad_break && (segment.has_scte35_in || !segment.IsAdSegment())) {
+            in_ad_break = false;
+            segment.is_ad_break_end = true;
+            current_ad_break_duration = std::chrono::milliseconds{0};
+        }
+    }
+}
+
+bool PlaylistParser::DetectAdPatternsInSegment(const MediaSegment& segment) const {
+    // Pattern-based ad detection (placeholder implementation)
+    // This could be enhanced with more sophisticated pattern matching
+    
+    std::wstring url = segment.url;
+    std::transform(url.begin(), url.end(), url.begin(), ::towlower);
+    
+    // Common ad-related URL patterns
+    std::vector<std::wstring> ad_patterns = {
+        L"ad-",
+        L"ads/",
+        L"advertisement",
+        L"preroll",
+        L"midroll",
+        L"postroll",
+        L"commercial",
+        L"/ads/",
+        L"_ad_",
+        L"adbreak"
+    };
+    
+    for (const auto& pattern : ad_patterns) {
+        if (url.find(pattern) != std::wstring::npos) {
+            return true;
+        }
+    }
+    
+    // Duration-based detection (very short or very long segments might be ads)
+    auto duration_ms = segment.precise_duration.count();
+    if (duration_ms < 1000 || duration_ms > 60000) { // < 1s or > 60s
+        return true;
+    }
+    
+    return false;
+}
+
+void PlaylistParser::MarkAdBreakBoundaries() {
+    // Identify and mark the start/end of ad breaks for better stream continuity
+    bool in_ad_sequence = false;
+    
+    for (size_t i = 0; i < segments_.size(); ++i) {
+        auto& segment = segments_[i];
+        
+        if (!in_ad_sequence && segment.IsAdSegment()) {
+            // Starting an ad sequence
+            in_ad_sequence = true;
+            segment.is_ad_break_start = true;
+        } else if (in_ad_sequence && !segment.IsAdSegment()) {
+            // Ending an ad sequence
+            in_ad_sequence = false;
+            if (i > 0) {
+                segments_[i - 1].is_ad_break_end = true;
+            }
+        }
+    }
 }
 
 } // namespace tsduck_hls

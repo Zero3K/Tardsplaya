@@ -16,7 +16,8 @@ std::thread StartStreamThread(
     size_t tab_index,
     const std::wstring& selected_quality,
     StreamingMode mode,
-    HANDLE* player_process_handle
+    HANDLE* player_process_handle,
+    bool enable_ad_skipping
 ) {
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
@@ -35,7 +36,7 @@ std::thread StartStreamThread(
         }
         
         return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
-                                         base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle);
+                                         base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle, enable_ad_skipping);
     }
     
     // Use traditional HLS streaming
@@ -84,7 +85,8 @@ std::thread StartTransportStreamThread(
     std::atomic<int>* chunk_count,
     HWND main_window,
     size_t tab_index,
-    HANDLE* player_process_handle
+    HANDLE* player_process_handle,
+    bool enable_ad_skipping
 ) {
     return std::thread([=, &cancel_token]() mutable {
         if (log_callback)
@@ -115,10 +117,23 @@ std::thread StartTransportStreamThread(
             config.playlist_refresh_interval = std::chrono::milliseconds(500);  // Check every 500ms
             config.skip_old_segments = true;
             
+            // Configure ad skipping based on user preference
+            config.enable_ad_skipping = enable_ad_skipping;
+            config.skip_scte35_ads = enable_ad_skipping;  // Use SCTE-35 markers when ad skipping is enabled
+            config.skip_pattern_detected_ads = enable_ad_skipping;  // Use pattern detection when enabled
+            config.maintain_stream_continuity = true;  // Always maintain smooth playback
+            config.max_ad_break_duration = std::chrono::milliseconds(300000);  // Max 5-minute ad breaks
+            config.log_ad_skipping = true;  // Enable ad skipping logging
+            
             if (log_callback) {
                 log_callback(L"[TS_MODE] Starting TSDuck transport stream routing");
                 log_callback(L"[TS_MODE] Buffer: " + std::to_wstring(buffer_packets) + L" packets (~" + 
                             std::to_wstring((buffer_packets * 188) / 1024) + L"KB)");
+                if (enable_ad_skipping) {
+                    log_callback(L"[AD_SKIP] Ad skipping enabled (SCTE-35 + pattern detection)");
+                } else {
+                    log_callback(L"[AD_SKIP] Ad skipping disabled - all segments will be played");
+                }
             }
             
             // Start routing
