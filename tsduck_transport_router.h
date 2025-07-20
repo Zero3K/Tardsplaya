@@ -16,6 +16,12 @@
 #define NOMINMAX
 #include <windows.h>
 
+// Forward declaration for DirectShow events support
+namespace directshow_events {
+    class DirectShowMediaPlayer;
+    enum class MediaEvent;
+}
+
 namespace tsduck_transport {
 
     // Transport Stream packet size (MPEG-TS standard)
@@ -176,6 +182,11 @@ namespace tsduck_transport {
             size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
             std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
             bool skip_old_segments = true;  // Skip older segments when catching up
+            
+            // DirectShow Events support for enhanced discontinuity handling
+            bool enable_directshow_events = true;  // Use DirectShow events when available
+            bool prefer_directshow_player = false; // Automatically switch to DirectShow-compatible player
+            bool fallback_to_keyframe_wait = true; // Fall back to VirtualDub2 method if DirectShow fails
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -253,6 +264,11 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_discontinuity_time_; // To prevent too frequent discontinuity handling
         std::chrono::steady_clock::time_point keyframe_wait_start_time_; // Time-based timeout for keyframe waiting
         
+        // DirectShow events integration for enhanced discontinuity handling
+        std::unique_ptr<directshow_events::DirectShowMediaPlayer> directshow_player_;
+        std::atomic<bool> directshow_active_{false};  // True if DirectShow events are being used
+        std::atomic<bool> directshow_fallback_{false}; // True if fell back to keyframe waiting
+        
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
         
@@ -265,6 +281,11 @@ namespace tsduck_transport {
         // VirtualDub2-style discontinuity handling methods
         void SetWaitForKeyframe();         // Set waiting state after discontinuity
         bool ShouldSkipFrame(const TSPacket& packet);  // Check if frame should be skipped
+        
+        // DirectShow events discontinuity handling methods
+        bool TryDirectShowDiscontinuityHandling();  // Try DirectShow approach first
+        void OnDirectShowEvent(directshow_events::MediaEvent event, const std::wstring& description); // DirectShow event callback
+        std::wstring GetOptimalDirectShowPlayer() const; // Get best DirectShow-compatible player
         
         // Video stream health monitoring
         bool IsVideoStreamHealthy() const;

@@ -3,6 +3,7 @@
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
+#include "directshow_events.h"
 #define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
@@ -688,6 +689,11 @@ TransportStreamRouter::TransportStreamRouter() {
     last_discontinuity_time_ = std::chrono::steady_clock::time_point{};
     keyframe_wait_start_time_ = std::chrono::steady_clock::time_point{};
     
+    // Initialize DirectShow events support
+    directshow_player_ = std::make_unique<directshow_events::DirectShowMediaPlayer>();
+    directshow_active_ = false;
+    directshow_fallback_ = false;
+    
     // Initialize video/audio stream tracking
     video_packets_processed_ = 0;
     audio_packets_processed_ = 0;
@@ -729,6 +735,37 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     current_config_ = config;
     log_callback_ = log_callback;
     routing_active_ = true;
+    
+    // Check if DirectShow events should be used
+    if (config.enable_directshow_events) {
+        // Determine the best player for DirectShow support
+        std::wstring target_player = config.player_path;
+        
+        if (config.prefer_directshow_player) {
+            std::wstring optimal_player = GetOptimalDirectShowPlayer();
+            if (!optimal_player.empty()) {
+                target_player = optimal_player;
+                if (log_callback_) {
+                    log_callback_(L"[DIRECTSHOW] Switching to optimal DirectShow player: " + target_player);
+                }
+            }
+        }
+        
+        // Check if the target player supports DirectShow
+        if (directshow_events::DirectShowController::IsDirectShowCompatible(target_player)) {
+            if (log_callback_) {
+                log_callback_(L"[DIRECTSHOW] Player supports DirectShow events: " + target_player);
+                log_callback_(L"[DIRECTSHOW] Enhanced discontinuity handling will be used for ad breaks");
+            }
+            directshow_active_ = true;
+        } else {
+            if (log_callback_) {
+                log_callback_(L"[DIRECTSHOW] Player does not support DirectShow: " + target_player);
+                log_callback_(L"[DIRECTSHOW] Falling back to VirtualDub2-style keyframe waiting");
+            }
+            directshow_fallback_ = true;
+        }
+    }
     
     // Reset converter and buffer
     hls_converter_->ResetGlobalFrameCounter(); // Reset global counter for new stream
@@ -895,6 +932,20 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     
                     // VirtualDub2-style discontinuity handling: wait for keyframe to prevent black frames
                     SetWaitForKeyframe();
+                    
+                    // Try DirectShow events approach first if enabled
+                    if (current_config_.enable_directshow_events && directshow_active_) {
+                        if (TryDirectShowDiscontinuityHandling()) {
+                            if (log_callback_) {
+                                log_callback_(L"[DIRECTSHOW] DirectShow discontinuity handling activated");
+                            }
+                        } else {
+                            if (log_callback_) {
+                                log_callback_(L"[DIRECTSHOW] DirectShow handling failed, falling back to keyframe waiting");
+                            }
+                            directshow_fallback_ = true;
+                        }
+                    }
                     
                     if (log_callback_) {
                         log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
@@ -1153,9 +1204,27 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             // Only react to discontinuities on video packets to avoid false positives
             if (packet.discontinuity && packet.is_video_packet) {
                 if (log_callback_) {
-                    log_callback_(L"[DISCONTINUITY] Video packet discontinuity detected - waiting for keyframe");
+                    log_callback_(L"[DISCONTINUITY] Video packet discontinuity detected");
                 }
-                SetWaitForKeyframe();
+                
+                // Try DirectShow approach first
+                if (current_config_.enable_directshow_events && directshow_active_ && !directshow_fallback_) {
+                    if (TryDirectShowDiscontinuityHandling()) {
+                        if (log_callback_) {
+                            log_callback_(L"[DIRECTSHOW] Packet-level discontinuity handled via DirectShow");
+                        }
+                    } else {
+                        if (log_callback_) {
+                            log_callback_(L"[DIRECTSHOW] Packet-level DirectShow handling failed, using keyframe waiting");
+                        }
+                        SetWaitForKeyframe();
+                    }
+                } else {
+                    if (log_callback_) {
+                        log_callback_(L"[DISCONTINUITY] Using VirtualDub2-style keyframe waiting");
+                    }
+                    SetWaitForKeyframe();
+                }
             }
             
             // Frame Number Tagging: Track frame statistics
@@ -1310,6 +1379,39 @@ cleanup_and_exit:
 }
 
 bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE& process_handle, HANDLE& stdin_handle) {
+    // Try DirectShow player launch first if enabled and compatible
+    if (config.enable_directshow_events && directshow_active_ && directshow_player_) {
+        if (log_callback_) {
+            log_callback_(L"[DIRECTSHOW] Attempting to launch DirectShow-compatible media player");
+        }
+        
+        // Create DirectShow event callback
+        auto ds_callback = [this](directshow_events::MediaEvent event, const std::wstring& description) {
+            OnDirectShowEvent(event, description);
+        };
+        
+        // Try to launch with DirectShow support
+        bool ds_launch_success = directshow_player_->Launch(config.player_path, L"-", ds_callback);
+        
+        if (ds_launch_success) {
+            // Get the process handle from DirectShow player
+            process_handle = directshow_player_->GetPlayerProcess();
+            stdin_handle = INVALID_HANDLE_VALUE; // DirectShow doesn't use stdin pipe
+            
+            if (log_callback_) {
+                log_callback_(L"[DIRECTSHOW] Media player launched successfully with DirectShow events support");
+            }
+            
+            return true;
+        } else {
+            if (log_callback_) {
+                log_callback_(L"[DIRECTSHOW] DirectShow launch failed, falling back to standard pipe method");
+            }
+            directshow_fallback_ = true;
+        }
+    }
+    
+    // Standard pipe-based player launch (original implementation)
     SECURITY_ATTRIBUTES sa = {};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
@@ -1389,6 +1491,14 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
 }
 
 bool TransportStreamRouter::SendTSPacketToPlayer(HANDLE stdin_handle, const TSPacket& packet) {
+    // If using DirectShow mode, we don't send via stdin pipe
+    if (directshow_active_ && !directshow_fallback_ && stdin_handle == INVALID_HANDLE_VALUE) {
+        // DirectShow mode - packets are handled internally by DirectShow player
+        // Just return success since the packet routing is handled differently
+        return true;
+    }
+    
+    // Standard pipe mode
     if (stdin_handle == INVALID_HANDLE_VALUE) {
         return false;
     }
@@ -1701,6 +1811,93 @@ bool TransportStreamRouter::ShouldSkipFrame(const TSPacket& packet) {
     }
     
     return true; // Skip this video frame
+}
+
+// DirectShow events discontinuity handling methods
+bool TransportStreamRouter::TryDirectShowDiscontinuityHandling() {
+    if (!directshow_active_ || !directshow_player_) {
+        return false;
+    }
+    
+    // Check if DirectShow player is healthy
+    if (!directshow_player_->IsPlayerHealthy()) {
+        if (log_callback_) {
+            log_callback_(L"[DIRECTSHOW] Player not healthy, cannot handle discontinuity");
+        }
+        return false;
+    }
+    
+    // Send discontinuity event to DirectShow player
+    bool success = directshow_player_->HandleDiscontinuity();
+    
+    if (success) {
+        if (log_callback_) {
+            log_callback_(L"[DIRECTSHOW] Successfully sent buffer clear event to media player");
+        }
+        
+        // DirectShow handled it, so we don't need keyframe waiting
+        wait_for_keyframe_ = false;
+        keyframe_wait_counter_ = 0;
+        
+        return true;
+    } else {
+        if (log_callback_) {
+            log_callback_(L"[DIRECTSHOW] Failed to handle discontinuity, will fallback to keyframe waiting");
+        }
+        return false;
+    }
+}
+
+void TransportStreamRouter::OnDirectShowEvent(directshow_events::MediaEvent event, const std::wstring& description) {
+    if (!log_callback_) {
+        return;
+    }
+    
+    switch (event) {
+        case directshow_events::MediaEvent::SEGMENT_STARTED:
+            log_callback_(L"[DIRECTSHOW_EVENT] " + description);
+            break;
+            
+        case directshow_events::MediaEvent::BUFFER_CLEAR_REQUEST:
+            log_callback_(L"[DIRECTSHOW_EVENT] " + description);
+            break;
+            
+        case directshow_events::MediaEvent::PLAYBACK_RESUMED:
+            log_callback_(L"[DIRECTSHOW_EVENT] " + description);
+            // Clear any pending keyframe waiting since DirectShow handled the transition
+            wait_for_keyframe_ = false;
+            keyframe_wait_counter_ = 0;
+            break;
+            
+        case directshow_events::MediaEvent::GRAPH_READY:
+            log_callback_(L"[DIRECTSHOW_EVENT] " + description);
+            break;
+            
+        case directshow_events::MediaEvent::ERROR_OCCURRED:
+            log_callback_(L"[DIRECTSHOW_ERROR] " + description);
+            // On DirectShow error, fall back to keyframe waiting
+            directshow_fallback_ = true;
+            break;
+    }
+}
+
+std::wstring TransportStreamRouter::GetOptimalDirectShowPlayer() const {
+    // Use the utility function to find the best DirectShow player
+    std::wstring optimal_player = directshow_events::utils::GetPreferredDirectShowPlayer();
+    
+    if (!optimal_player.empty()) {
+        if (log_callback_) {
+            log_callback_(L"[DIRECTSHOW] Found optimal DirectShow player: " + optimal_player);
+        }
+        return optimal_player;
+    }
+    
+    // No optimal player found, check if current player is DirectShow-compatible
+    if (directshow_events::DirectShowController::IsDirectShowCompatible(current_config_.player_path)) {
+        return current_config_.player_path;
+    }
+    
+    return L""; // No DirectShow-compatible player available
 }
 
 
