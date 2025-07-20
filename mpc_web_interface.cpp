@@ -216,10 +216,35 @@ bool MPCWebInterface::HandleDiscontinuity() {
         } else {
             AddDebugLog(L"[MPC-WEB] Failed to resume paused player for discontinuity");
         }
+    } else if (current_state == PlayerState::Unknown) {
+        // If state is unknown but web interface is available, attempt recovery anyway
+        AddDebugLog(L"[MPC-WEB] Player state unknown, attempting generic discontinuity recovery");
+        
+        // Try frame step first as it's least disruptive
+        if (FrameStep()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            success = true;
+            AddDebugLog(L"[MPC-WEB] Discontinuity handled with frame step (unknown state)");
+        } else {
+            // Fallback to pause/resume cycle
+            AddDebugLog(L"[MPC-WEB] Frame step failed, trying pause/resume for unknown state");
+            if (PausePlayback()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                
+                if (ResumePlayback()) {
+                    success = true;
+                    AddDebugLog(L"[MPC-WEB] Discontinuity handled with pause/resume (unknown state)");
+                } else {
+                    AddDebugLog(L"[MPC-WEB] Failed to resume after pause (unknown state)");
+                }
+            } else {
+                AddDebugLog(L"[MPC-WEB] Failed to pause for unknown state recovery");
+            }
+        }
     }
     
     // Fallback: Try seeking to beginning if still having issues
-    if (!success && current_state != PlayerState::Unknown) {
+    if (!success) {
         AddDebugLog(L"[MPC-WEB] Attempting seek fallback for discontinuity recovery");
         
         if (SeekToBeginning()) {
