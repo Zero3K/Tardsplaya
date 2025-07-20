@@ -68,7 +68,7 @@ public:
     
 private:
     WebConfig config_;
-    std::atomic<bool> initialized_{false};
+    mutable std::atomic<bool> initialized_{false};
     mutable std::atomic<bool> available_{false};
     mutable std::chrono::steady_clock::time_point last_check_time_;
     mutable std::chrono::milliseconds check_interval_{5000}; // Check availability every 5 seconds

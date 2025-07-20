@@ -61,7 +61,7 @@ MPCWebInterface::MPCWebInterface() {
 
 MPCWebInterface::~MPCWebInterface() {
     // Release the assigned port when instance is destroyed
-    if (initialized_) {
+    if (config_.port > 0) {
         MPCPortManager::ReleasePort(config_.port);
     }
 }
@@ -73,19 +73,33 @@ bool MPCWebInterface::Initialize(const WebConfig& config) {
     
     // Test initial connection
     if (TestConnection()) {
-        initialized_ = true;
-        available_ = true;
+        initialized_.store(true);
+        available_.store(true);
         AddDebugLog(L"[MPC-WEB] Web interface successfully initialized and available");
         return true;
     } else {
-        AddDebugLog(L"[MPC-WEB] Web interface initialization failed - not available");
-        initialized_ = false;
-        available_ = false;
+        AddDebugLog(L"[MPC-WEB] Web interface initialization failed - not available yet (MPC-HC may not be running)");
+        initialized_.store(false);
+        available_.store(false);
         return false;
     }
 }
 
 bool MPCWebInterface::IsAvailable() const {
+    // Try to initialize if not done yet (when MPC-HC becomes available)
+    if (!initialized_.load()) {
+        // Try to initialize now that MPC-HC might be running
+        if (TestConnection()) {
+            initialized_.store(true);
+            available_.store(true);
+            AddDebugLog(L"[MPC-WEB] Web interface successfully initialized and available on port " + 
+                        std::to_wstring(config_.port));
+            last_check_time_ = std::chrono::steady_clock::now();
+            return true;
+        }
+        return false;
+    }
+    
     // Check if we need to retest availability (cache for performance)
     auto now = std::chrono::steady_clock::now();
     if (now - last_check_time_ > check_interval_) {
@@ -505,17 +519,14 @@ std::unique_ptr<MPCWebInterface> CreateMPCWebInterface(const std::wstring& playe
     
     AddDebugLog(L"[MPC-WEB] Creating web interface for port " + std::to_wstring(assigned_port));
     
-    // Try to initialize with assigned port
-    if (web_interface->Initialize(config)) {
-        AddDebugLog(L"[MPC-WEB] Successfully created and initialized MPC-HC web interface on port " + 
-                    std::to_wstring(assigned_port));
-        return web_interface;
-    } else {
-        AddDebugLog(L"[MPC-WEB] Failed to initialize MPC-HC web interface on port " + 
-                    std::to_wstring(assigned_port));
-        // Port will be released by destructor
-        return nullptr;
-    }
+    // Set the configuration but don't require immediate initialization success
+    // The web interface will be initialized later when MPC-HC starts
+    web_interface->SetConfig(config);
+    
+    AddDebugLog(L"[MPC-WEB] Created MPC-HC web interface with assigned port " + 
+                std::to_wstring(assigned_port) + L" (will initialize when MPC-HC starts)");
+    
+    return web_interface;
 }
 
 bool IsMPCHC(const std::wstring& player_path) {
