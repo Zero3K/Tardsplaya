@@ -664,6 +664,9 @@ TransportStreamRouter::TransportStreamRouter() {
     last_frame_time_ = std::chrono::steady_clock::now();
     stream_start_time_ = std::chrono::steady_clock::now();
     
+    // Initialize discontinuity handling
+    last_discontinuity_time_ = std::chrono::steady_clock::time_point{};
+    
     // Initialize video/audio stream tracking
     video_packets_processed_ = 0;
     audio_packets_processed_ = 0;
@@ -1126,9 +1129,10 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             
         if (ts_buffer_->GetNextPacket(packet, packet_timeout)) {
             // Check for packet-level discontinuity flag (from TS packet headers)
-            if (packet.discontinuity) {
+            // Only react to discontinuities on video packets to avoid false positives
+            if (packet.discontinuity && packet.is_video_packet) {
                 if (log_callback_) {
-                    log_callback_(L"[DISCONTINUITY] Packet-level discontinuity detected - waiting for keyframe");
+                    log_callback_(L"[DISCONTINUITY] Video packet discontinuity detected - waiting for keyframe");
                 }
                 SetWaitForKeyframe();
             }
@@ -1565,8 +1569,24 @@ void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
 
 // VirtualDub2-style discontinuity handling methods
 void TransportStreamRouter::SetWaitForKeyframe() {
+    auto now = std::chrono::steady_clock::now();
+    
+    // Throttle discontinuity handling to prevent too frequent activation
+    // Don't activate keyframe waiting if we just handled a discontinuity within the last 2 seconds
+    if (last_discontinuity_time_.time_since_epoch().count() > 0) {
+        auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_discontinuity_time_);
+        if (time_since_last.count() < 2000) {
+            if (log_callback_) {
+                log_callback_(L"[KEYFRAME_WAIT] Throttling discontinuity handling (last one was " + 
+                             std::to_wstring(time_since_last.count()) + L"ms ago)");
+            }
+            return; // Skip this discontinuity
+        }
+    }
+    
     wait_for_keyframe_ = true;
     keyframe_wait_counter_ = 0;
+    last_discontinuity_time_ = now;
     
     if (log_callback_) {
         log_callback_(L"[KEYFRAME_WAIT] Activated keyframe waiting mode (max 30 frames)");
