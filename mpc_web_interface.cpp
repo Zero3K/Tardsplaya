@@ -137,33 +137,60 @@ bool MPCWebInterface::HandleDiscontinuity() {
         return false;
     }
     
-    AddDebugLog(L"[MPC-WEB] Handling discontinuity - implementing pause/resume cycle");
+    AddDebugLog(L"[MPC-WEB] Handling discontinuity - trying step forward approach");
     
     // Get current state
     PlayerState current_state = GetPlayerState();
     AddDebugLog(L"[MPC-WEB] Current player state before discontinuity: " + std::to_wstring(static_cast<int>(current_state)));
     
-    // Strategy: Brief pause and resume to reset decoder
-    // This helps MPC-HC recover from stream format changes
-    
     bool success = false;
     
     if (current_state == PlayerState::Playing) {
-        // Method 1: Quick pause/resume cycle
-        AddDebugLog(L"[MPC-WEB] Attempting quick pause/resume for discontinuity recovery");
+        // Method 1: Try step forward approach first (less disruptive)
+        AddDebugLog(L"[MPC-WEB] Attempting step forward for discontinuity recovery");
         
-        if (PausePlayback()) {
-            // Brief pause to allow decoder reset
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (StepForward()) {
+            // Brief delay to let step complete
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
             
-            if (ResumePlayback()) {
+            // Check if player is still responsive and playing
+            PlayerState step_state = GetPlayerState();
+            if (step_state == PlayerState::Playing || step_state == PlayerState::Paused) {
                 success = true;
-                AddDebugLog(L"[MPC-WEB] Discontinuity handled successfully with pause/resume");
+                AddDebugLog(L"[MPC-WEB] Discontinuity handled successfully with step forward");
             } else {
-                AddDebugLog(L"[MPC-WEB] Failed to resume after discontinuity pause");
+                AddDebugLog(L"[MPC-WEB] Step forward didn't resolve discontinuity, trying pause/resume");
+                
+                // Fallback to pause/resume if step didn't work
+                if (PausePlayback()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    
+                    if (ResumePlayback()) {
+                        success = true;
+                        AddDebugLog(L"[MPC-WEB] Discontinuity handled with pause/resume fallback");
+                    } else {
+                        AddDebugLog(L"[MPC-WEB] Failed to resume after discontinuity pause");
+                    }
+                } else {
+                    AddDebugLog(L"[MPC-WEB] Failed to pause for discontinuity handling");
+                }
             }
         } else {
-            AddDebugLog(L"[MPC-WEB] Failed to pause for discontinuity handling");
+            AddDebugLog(L"[MPC-WEB] Step forward failed, trying pause/resume fallback");
+            
+            // Fallback to pause/resume if step command failed
+            if (PausePlayback()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                
+                if (ResumePlayback()) {
+                    success = true;
+                    AddDebugLog(L"[MPC-WEB] Discontinuity handled with pause/resume fallback");
+                } else {
+                    AddDebugLog(L"[MPC-WEB] Failed to resume after discontinuity pause");
+                }
+            } else {
+                AddDebugLog(L"[MPC-WEB] Failed to pause for discontinuity handling");
+            }
         }
     } else if (current_state == PlayerState::Paused || current_state == PlayerState::Stopped) {
         // If already paused/stopped, try to resume
@@ -213,6 +240,11 @@ bool MPCWebInterface::PausePlayback() {
 bool MPCWebInterface::ResumePlayback() {
     AddDebugLog(L"[MPC-WEB] Sending resume/play command");
     return SendHTTPCommand(L"wm_command=887", std::wstring{}); // 887 is play command
+}
+
+bool MPCWebInterface::StepForward() {
+    AddDebugLog(L"[MPC-WEB] Sending step forward command");
+    return SendHTTPCommand(L"wm_command=922", std::wstring{}); // 922 is step forward command
 }
 
 bool MPCWebInterface::SeekToBeginning() {

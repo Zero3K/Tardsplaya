@@ -46,6 +46,7 @@ public:
     bool HandleDiscontinuity();             // Main discontinuity recovery function
     bool PausePlayback();                   // Pause before discontinuity
     bool ResumePlayback();                  // Resume after discontinuity
+    bool StepForward();                     // Step one frame forward
     bool SeekToBeginning();                 // Seek to start if frozen
     bool RefreshStream();                   // Force stream refresh
     
