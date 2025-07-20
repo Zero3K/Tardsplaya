@@ -718,6 +718,14 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     current_playlist_url_ = hls_playlist_url;
     url_switch_pending_ = false;
     
+    // Debug: Log ad switching configuration
+    if (log_callback_ && current_config_.is_in_ad_mode && current_config_.quality_to_url_map) {
+        log_callback_(L"[AD_SYSTEM] Ad-based quality switching initialized");
+        log_callback_(L"[AD_SYSTEM] Ad quality: " + current_config_.ad_mode_quality);
+        log_callback_(L"[AD_SYSTEM] User quality: " + current_config_.user_quality);
+        log_callback_(L"[AD_SYSTEM] Available qualities: " + std::to_wstring(current_config_.quality_to_url_map->size()));
+    }
+    
     // Start HLS fetcher thread
     hls_fetcher_thread_ = std::thread([this, hls_playlist_url, &cancel_token]() {
         HLSFetcherThread(hls_playlist_url, cancel_token);
@@ -881,7 +889,8 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 
                 // Handle ad state transitions
                 if (current_config_.is_in_ad_mode && current_config_.needs_switch_to_ad && 
-                    current_config_.needs_switch_to_user && current_config_.quality_to_url_map) {
+                    current_config_.needs_switch_to_user && current_config_.quality_to_url_map &&
+                    !current_config_.ad_mode_quality.empty() && !current_config_.user_quality.empty()) {
                     
                     bool currently_in_ad = current_config_.is_in_ad_mode->load();
                     
@@ -932,6 +941,11 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                                 log_callback_(L"[AD_MODE] ERROR: User quality '" + current_config_.user_quality + L"' not found in quality map");
                             }
                         }
+                    }
+                } else if (ad_start_detected || ad_end_detected) {
+                    // Ad markers detected but quality switching not properly configured
+                    if (log_callback_) {
+                        log_callback_(L"[AD_DETECTION] SCTE-35 markers detected but quality switching is not properly configured");
                     }
                 }
                 
@@ -1632,6 +1646,22 @@ void TransportStreamRouter::SwitchPlaylistURL(const std::wstring& new_url) {
     std::lock_guard<std::mutex> lock(url_switch_mutex_);
     current_playlist_url_ = new_url;
     url_switch_pending_ = true;
+    
+    // Clear buffer to ensure clean transition to new quality
+    if (ts_buffer_) {
+        ts_buffer_->Clear();
+        if (log_callback_) {
+            log_callback_(L"[URL_SWITCH] Cleared buffer for clean quality transition");
+        }
+    }
+    
+    // Reset converter for clean stream restart
+    if (hls_converter_) {
+        hls_converter_->Reset();
+        if (log_callback_) {
+            log_callback_(L"[URL_SWITCH] Reset converter for new quality stream");
+        }
+    }
     
     if (log_callback_) {
         log_callback_(L"[URL_SWITCH] URL switch queued, will take effect on next playlist fetch");
