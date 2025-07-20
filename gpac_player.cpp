@@ -1,24 +1,25 @@
 #include "gpac_player.h"
+#include "gpac_minimal.h"
 #include <iostream>
 #include <sstream>
 
-// For now, we'll create a stub implementation that simulates GPAC
-// In a real implementation, you would include GPAC headers:
-// #include <gpac/terminal.h>
-// #include <gpac/modules/service.h>
-// #include <gpac/options.h>
-
-// Stub GPAC structures for compilation
+// Real GPAC structures using minimal implementation
 struct GF_Terminal {
-    void* dummy;
+    GF_FilterSession* session;
+    GF_Filter* ts_demux;
+    std::unique_ptr<SimpleVideoRenderer> renderer;
+    bool initialized;
+    
+    GF_Terminal() : session(nullptr), ts_demux(nullptr), initialized(false) {}
 };
 
 struct GF_User {
-    void* dummy;
+    void* opaque;
+    std::function<void(const std::wstring&)> log_callback;
 };
 
 struct GF_Config {
-    void* dummy;
+    std::map<std::string, std::string> settings;
 };
 
 // GPAC Player Implementation
@@ -225,7 +226,7 @@ bool GpacPlayer::ProcessMpegTsData(const uint8_t* data, size_t dataSize) {
         return false;
     }
     
-    if (!m_terminal) {
+    if (!m_terminal || !m_terminal->session || !m_terminal->ts_demux) {
         LogMessage(L"Cannot process MPEG-TS data: GPAC terminal not available");
         return false;
     }
@@ -239,43 +240,42 @@ bool GpacPlayer::ProcessMpegTsData(const uint8_t* data, size_t dataSize) {
     LogMessage(L"Processing " + std::to_wstring(numPackets) + L" MPEG-TS packets (" + 
                std::to_wstring(dataSize) + L" bytes)");
     
-    // TODO: Real GPAC implementation would be:
-    /*
-    GF_Err err = gf_term_feed_data(m_terminal, (char*)data, dataSize);
+    // Feed data to GPAC minimal implementation
+    GF_Err err = GpacMinimal::FeedTSData(m_terminal->ts_demux, data, dataSize);
     if (err != GF_OK) {
         LogMessage(L"GPAC failed to process MPEG-TS data, error: " + std::to_wstring(err));
         return false;
     }
-    */
     
-    // For stub implementation, simulate MPEG-TS processing
-    if (dataSize > 0) {
-        // Simulate parsing transport stream packets
-        for (size_t i = 0; i < numPackets && i < 10; ++i) { // Log first 10 packets
-            const uint8_t* packet = data + (i * 188);
-            if (packet[0] == 0x47) { // MPEG-TS sync byte
-                uint16_t pid = ((packet[1] & 0x1F) << 8) | packet[2];
-                LogMessage(L"MPEG-TS packet " + std::to_wstring(i) + L": PID=" + std::to_wstring(pid));
-                
-                // Common PIDs: 0=PAT, 17=PMT, 256=Video, 257=Audio
-                if (pid == 256) {
-                    LogMessage(L"  -> Video stream detected (H.264/H.265)");
-                } else if (pid == 257) {
-                    LogMessage(L"  -> Audio stream detected (AAC)");
-                } else if (pid == 0) {
-                    LogMessage(L"  -> Program Association Table (PAT)");
-                } else if (pid == 17) {
-                    LogMessage(L"  -> Program Map Table (PMT)");
-                }
-            }
-        }
-        
-        // Simulate successful decoding
-        LogMessage(L"MPEG-TS data processed successfully by GPAC decoders");
-        return true;
+    // Process the session to handle any decoded data
+    err = GpacMinimal::ProcessSession(m_terminal->session);
+    if (err != GF_OK) {
+        LogMessage(L"GPAC failed to process session, error: " + std::to_wstring(err));
+        return false;
     }
     
-    return false;
+    // Check for video frames and render them
+    if (m_terminal->renderer) {
+        uint8_t* video_data;
+        size_t video_size;
+        uint32_t width, height;
+        
+        if (GpacMinimal::GetVideoFrame(m_terminal->session, &video_data, &video_size, &width, &height)) {
+            m_terminal->renderer->RenderFrame(video_data, video_size, width, height);
+            LogMessage(L"Rendered video frame: " + std::to_wstring(width) + L"x" + std::to_wstring(height));
+        } else {
+            // For demonstration, render a test pattern
+            static int frame_counter = 0;
+            if (++frame_counter % 100 == 0) { // Every 100 packets, show a test pattern
+                uint8_t test_data[1920 * 1080 * 4]; // Dummy data
+                m_terminal->renderer->RenderFrame(test_data, sizeof(test_data), 1920, 1080);
+                LogMessage(L"Rendered test pattern frame");
+            }
+        }
+    }
+    
+    LogMessage(L"MPEG-TS data processed successfully by GPAC minimal implementation");
+    return true;
 }
 
 void GpacPlayer::SetLogCallback(std::function<void(const std::wstring&)> callback) {
@@ -283,42 +283,16 @@ void GpacPlayer::SetLogCallback(std::function<void(const std::wstring&)> callbac
 }
 
 bool GpacPlayer::InitializeGpac() {
-    LogMessage(L"Initializing GPAC library with MPEG-TS decoder support");
+    LogMessage(L"Initializing GPAC library with minimal implementation for MPEG-TS decoder support");
     
     try {
-        // TODO: Real GPAC initialization would be:
-        /*
-        GF_Err e = GF_OK;
-        gf_sys_init(GF_FALSE);
-        
-        m_config = gf_cfg_init(nullptr, &e);
-        if (!m_config || e != GF_OK) {
-            LogMessage(L"Failed to initialize GPAC config");
+        // Initialize GPAC minimal system
+        if (!GpacMinimal::Initialize()) {
+            LogMessage(L"Failed to initialize GPAC minimal system");
             return false;
         }
         
-        // Set up MPEG-TS specific configuration
-        gf_cfg_set_key(m_config, "Systems", "DefAudioDec", "faad");
-        gf_cfg_set_key(m_config, "Systems", "DefVideoDec", "ffmpeg");
-        gf_cfg_set_key(m_config, "MPEG-2 TS", "AutoActivateService", "yes");
-        
-        m_user = (GF_User*)gf_malloc(sizeof(GF_User));
-        memset(m_user, 0, sizeof(GF_User));
-        m_user->config = m_config;
-        m_user->EventProc = OnGpacEvent;
-        m_user->opaque = this;
-        
-        m_terminal = gf_term_new(m_user);
-        if (!m_terminal) {
-            LogMessage(L"Failed to create GPAC terminal");
-            return false;
-        }
-        
-        // Enable MPEG-TS demuxer
-        gf_term_set_option(m_terminal, GF_OPT_RELOAD_CONFIG, 1);
-        */
-        
-        // For stub implementation, simulate proper GPAC initialization
+        // Create GPAC structures
         m_config = new GF_Config();
         m_user = new GF_User();  
         m_terminal = new GF_Terminal();
@@ -328,8 +302,37 @@ bool GpacPlayer::InitializeGpac() {
             return false;
         }
         
-        LogMessage(L"GPAC library initialized with MPEG-TS decoder support (stub mode)");
-        LogMessage(L"Ready to process MPEG-TS streams with H.264/H.265 video and AAC audio");
+        // Initialize user structure
+        m_user->opaque = this;
+        
+        // Create filter session
+        m_terminal->session = GpacMinimal::CreateSession();
+        if (!m_terminal->session) {
+            LogMessage(L"Failed to create GPAC filter session");
+            return false;
+        }
+        
+        // Create TS demux filter
+        m_terminal->ts_demux = GpacMinimal::CreateTSDemuxFilter(m_terminal->session);
+        if (!m_terminal->ts_demux) {
+            LogMessage(L"Failed to create MPEG-TS demux filter");
+            return false;
+        }
+        
+        // Initialize video renderer if we have a video window
+        if (m_videoWindow) {
+            m_terminal->renderer = std::make_unique<SimpleVideoRenderer>();
+            if (!m_terminal->renderer->Initialize(m_videoWindow, 800, 600)) {
+                LogMessage(L"Warning: Failed to initialize video renderer, continuing without video output");
+            } else {
+                LogMessage(L"Video renderer initialized successfully");
+            }
+        }
+        
+        m_terminal->initialized = true;
+        
+        LogMessage(L"GPAC library initialized with minimal implementation - ready for MPEG-TS processing");
+        LogMessage(L"Ready to process MPEG-TS streams with PAT/PMT parsing and basic video rendering");
         return true;
         
     } catch (const std::exception& e) {
@@ -344,34 +347,33 @@ bool GpacPlayer::InitializeGpac() {
 void GpacPlayer::CleanupGpac() {
     LogMessage(L"Cleaning up GPAC resources");
     
-    // TODO: Real GPAC cleanup would be:
-    /*
     if (m_terminal) {
-        gf_term_del(m_terminal);
+        if (m_terminal->renderer) {
+            m_terminal->renderer->Shutdown();
+            m_terminal->renderer.reset();
+        }
+        
+        if (m_terminal->session) {
+            GpacMinimal::DeleteSession(m_terminal->session);
+            m_terminal->session = nullptr;
+        }
+        
+        delete m_terminal;
         m_terminal = nullptr;
     }
     
     if (m_user) {
-        gf_free(m_user);
+        delete m_user;
         m_user = nullptr;
     }
     
     if (m_config) {
-        gf_cfg_del(m_config);
+        delete m_config;
         m_config = nullptr;
     }
     
-    gf_sys_close();
-    */
-    
-    // For stub implementation
-    delete m_terminal;
-    delete m_user;
-    delete m_config;
-    
-    m_terminal = nullptr;
-    m_user = nullptr;
-    m_config = nullptr;
+    // Shutdown GPAC minimal system
+    GpacMinimal::Shutdown();
     
     LogMessage(L"GPAC resources cleaned up");
 }

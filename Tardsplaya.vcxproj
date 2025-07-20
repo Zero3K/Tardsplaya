@@ -106,6 +106,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="favorites.cpp" />
+    <ClCompile Include="gpac_minimal.cpp" />
     <ClCompile Include="gpac_player.cpp" />
     <ClCompile Include="gpac_stream_thread.cpp" />
     <ClCompile Include="playlist_parser.cpp" />
@@ -124,6 +125,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="favorites.h" />
+    <ClInclude Include="gpac_minimal.h" />
     <ClInclude Include="gpac_player.h" />
     <ClInclude Include="gpac_stream_thread.h" />
     <ClInclude Include="json_minimal.h" />
