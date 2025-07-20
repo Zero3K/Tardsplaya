@@ -406,17 +406,17 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
             // during segment processing which can take variable time due to network/processing delays
             estimated_frame_duration_ = std::chrono::milliseconds(33); // Stable 30fps timing
             
-            // Check for key frame indicators in the payload
+            // Enhanced key frame detection with multiple fallback methods
             bool is_key_frame = false;
+            
+            // Method 1: Look for MPEG/H.264 start codes (original method)
             if (packet.data[4] == 0x00) {
-                // Look for MPEG start codes that might indicate I-frames
                 if (offset + TS_PACKET_SIZE + 8 < data_size) {
                     const uint8_t* payload = data_ptr + offset + 4;
-                    // Enhanced I-frame detection
                     for (int i = 0; i < 32 && i < TS_PACKET_SIZE - 8; i++) {
                         if (payload[i] == 0x00 && payload[i+1] == 0x00 && payload[i+2] == 0x01) {
                             uint8_t frame_type = payload[i+3];
-                            // MPEG-2 I-frame detection (enhanced)
+                            // MPEG-2 I-frame detection
                             if ((frame_type & 0x38) == 0x08 || frame_type == 0x00) {
                                 is_key_frame = true;
                                 break;
@@ -426,9 +426,29 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
                                 is_key_frame = true;
                                 break;
                             }
+                            // H.264 SPS/PPS detection (often precedes keyframes)
+                            if ((frame_type & 0x1F) == 0x07 || (frame_type & 0x1F) == 0x08) {
+                                is_key_frame = true;
+                                break;
+                            }
                         }
                     }
                 }
+            }
+            
+            // Method 2: Heuristic-based detection for streams with poor signaling
+            if (!is_key_frame && global_frame_counter_ > 0) {
+                // Assume keyframes occur every ~60-120 frames (2-4 seconds at 30fps)
+                // This provides a safety net when codec-level detection fails
+                if ((global_frame_counter_ % 60) == 1) {
+                    is_key_frame = true; // Mark as likely keyframe based on position
+                }
+            }
+            
+            // Method 3: Emergency keyframe marking for first frame after segment boundary
+            if (!is_key_frame && segment_frame_counter_ == 1) {
+                // First frame of a new segment is very likely to be a keyframe in HLS
+                is_key_frame = true;
             }
             
             // Set frame information for new frames
@@ -666,6 +686,7 @@ TransportStreamRouter::TransportStreamRouter() {
     
     // Initialize discontinuity handling
     last_discontinuity_time_ = std::chrono::steady_clock::time_point{};
+    keyframe_wait_start_time_ = std::chrono::steady_clock::time_point{};
     
     // Initialize video/audio stream tracking
     video_packets_processed_ = 0;
@@ -1589,10 +1610,10 @@ void TransportStreamRouter::SetWaitForKeyframe() {
     auto now = std::chrono::steady_clock::now();
     
     // Throttle discontinuity handling to prevent too frequent activation
-    // Don't activate keyframe waiting if we just handled a discontinuity within the last 2 seconds
+    // Don't activate keyframe waiting if we just handled a discontinuity within the last 1 second (reduced from 2)
     if (last_discontinuity_time_.time_since_epoch().count() > 0) {
         auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_discontinuity_time_);
-        if (time_since_last.count() < 2000) {
+        if (time_since_last.count() < 1000) { // Reduced from 2000ms to 1000ms
             if (log_callback_) {
                 log_callback_(L"[KEYFRAME_WAIT] Throttling discontinuity handling (last one was " + 
                              std::to_wstring(time_since_last.count()) + L"ms ago)");
@@ -1604,9 +1625,10 @@ void TransportStreamRouter::SetWaitForKeyframe() {
     wait_for_keyframe_ = true;
     keyframe_wait_counter_ = 0;
     last_discontinuity_time_ = now;
+    keyframe_wait_start_time_ = now; // Start time-based timeout
     
     if (log_callback_) {
-        log_callback_(L"[KEYFRAME_WAIT] Activated keyframe waiting mode for VIDEO ONLY (max 30 video frames)");
+        log_callback_(L"[KEYFRAME_WAIT] Activated aggressive keyframe waiting mode for VIDEO ONLY (max 10 video frames OR 2 seconds)");
         log_callback_(L"[KEYFRAME_WAIT] Audio will continue flowing normally during video keyframe wait");
     }
 }
@@ -1620,6 +1642,22 @@ bool TransportStreamRouter::ShouldSkipFrame(const TSPacket& packet) {
     // Only apply keyframe waiting to video packets - let audio flow normally
     if (!packet.is_video_packet) {
         return false; // Never skip non-video packets during keyframe waiting
+    }
+    
+    auto now = std::chrono::steady_clock::now();
+    
+    // Check time-based timeout first (2 seconds maximum wait)
+    auto wait_duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - keyframe_wait_start_time_);
+    if (wait_duration.count() > 2000) {
+        // Time timeout reached, stop waiting and resume normal playback
+        wait_for_keyframe_ = false;
+        keyframe_wait_counter_ = 0;
+        
+        if (log_callback_) {
+            log_callback_(L"[KEYFRAME_WAIT] Time timeout reached (2 seconds) - resuming playback to prevent indefinite blocking");
+        }
+        
+        return false; // Don't skip this frame, resume normal playback
     }
     
     // Only count video frames for the wait counter, not every video packet
@@ -1637,28 +1675,29 @@ bool TransportStreamRouter::ShouldSkipFrame(const TSPacket& packet) {
         
         if (log_callback_) {
             log_callback_(L"[KEYFRAME_WAIT] Found keyframe after " + std::to_wstring(current_wait) + 
-                         L" video frames - resuming normal playback");
+                         L" video frames (" + std::to_wstring(wait_duration.count()) + L"ms) - resuming normal playback");
         }
         
         return false; // Don't skip this keyframe
     }
     
-    // Check timeout (30 video frames max, like VirtualDub2)
-    if (current_wait >= 30) {
-        // Timeout reached, stop waiting and resume normal playback
+    // Check frame count timeout (10 video frames max - reduced from 30 for faster recovery)
+    if (current_wait >= 10) {
+        // Frame timeout reached, stop waiting and resume normal playback
         wait_for_keyframe_ = false;
         keyframe_wait_counter_ = 0;
         
         if (log_callback_) {
-            log_callback_(L"[KEYFRAME_WAIT] Timeout reached (30 video frames) - resuming playback without keyframe");
+            log_callback_(L"[KEYFRAME_WAIT] Frame timeout reached (10 video frames) - resuming playback to prevent indefinite blocking");
         }
         
         return false; // Don't skip this frame, resume normal playback
     }
     
     // We're still waiting for a keyframe and haven't timed out
-    if (log_callback_ && packet.payload_unit_start && (current_wait % 5 == 0)) { // Log every 5 video frames to avoid spam
-        log_callback_(L"[KEYFRAME_WAIT] Still waiting for keyframe (" + std::to_wstring(current_wait) + L"/30 video frames)");
+    if (log_callback_ && packet.payload_unit_start && (current_wait % 3 == 0)) { // Log every 3 video frames to reduce spam
+        log_callback_(L"[KEYFRAME_WAIT] Still waiting for keyframe (" + std::to_wstring(current_wait) + L"/10 video frames, " + 
+                     std::to_wstring(wait_duration.count()) + L"ms elapsed)");
     }
     
     return true; // Skip this video frame

@@ -249,8 +249,9 @@ namespace tsduck_transport {
         
         // VirtualDub2-style discontinuity handling state
         std::atomic<bool> wait_for_keyframe_{false};  // Flag to indicate we're waiting for a keyframe
-        std::atomic<int> keyframe_wait_counter_{0};   // Counter for frames waited (max 30)
+        std::atomic<int> keyframe_wait_counter_{0};   // Counter for frames waited (max 10 - reduced from 30)
         std::chrono::steady_clock::time_point last_discontinuity_time_; // To prevent too frequent discontinuity handling
+        std::chrono::steady_clock::time_point keyframe_wait_start_time_; // Time-based timeout for keyframe waiting
         
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
