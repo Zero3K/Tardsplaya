@@ -5,6 +5,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <vector>
 
 // Forward declarations for GPAC types to avoid including full headers
 struct GF_Terminal;

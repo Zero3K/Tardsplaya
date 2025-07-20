@@ -15,25 +15,17 @@
 // Static initialization
 bool GpacMinimal::s_initialized = false;
 
-// Minimal filter session structure
-struct GF_FilterSession {
-    std::unique_ptr<MpegTsParser> ts_parser;
-    std::unique_ptr<SimpleVideoRenderer> video_renderer;
-    HWND video_window;
-    bool has_video_output;
-    bool has_audio_output;
-    
-    GF_FilterSession() : video_window(nullptr), has_video_output(false), has_audio_output(false) {
-        ts_parser = std::make_unique<MpegTsParser>();
-    }
-};
+// Structure implementations
+GF_FilterSession::GF_FilterSession() : video_window(nullptr), has_video_output(false), has_audio_output(false) {
+    ts_parser = std::make_unique<MpegTsParser>();
+}
 
-struct GF_Filter {
-    GF_FilterSession* session;
-    bool is_ts_demux;
-    
-    GF_Filter(GF_FilterSession* sess, bool ts_demux) : session(sess), is_ts_demux(ts_demux) {}
-};
+GF_FilterSession::~GF_FilterSession() {
+    // Destructor for cleanup
+}
+
+GF_Filter::GF_Filter(GF_FilterSession* sess, bool ts_demux) : session(sess), is_ts_demux(ts_demux) {
+}
 
 // GpacMinimal implementation
 bool GpacMinimal::Initialize() {
@@ -377,11 +369,11 @@ void MpegTsParser::ProcessPES(uint16_t pid, const uint8_t* data, size_t size) {
     }
 }
 
-void MpegTsParser::SetVideoCallback(std::function<void(const uint8_t*, size_t, uint32_t, uint32_t)> callback) {
+void MpegTsParser::SetVideoCallback(VideoCallback callback) {
     m_video_callback = callback;
 }
 
-void MpegTsParser::SetAudioCallback(std::function<void(const uint8_t*, size_t, uint32_t, uint32_t)> callback) {
+void MpegTsParser::SetAudioCallback(AudioCallback callback) {
     m_audio_callback = callback;
 }
 

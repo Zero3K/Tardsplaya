@@ -11,10 +11,32 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <functional>
+#include <map>
 
-// Forward declarations for minimal GPAC types
-struct GF_FilterSession;
-struct GF_Filter;
+// Forward declarations for minimal GPAC types - actual definitions below
+class MpegTsParser;
+class SimpleVideoRenderer;
+
+// Actual structure definitions
+struct GF_FilterSession {
+    std::unique_ptr<MpegTsParser> ts_parser;
+    std::unique_ptr<SimpleVideoRenderer> video_renderer;
+    HWND video_window;
+    bool has_video_output;
+    bool has_audio_output;
+    
+    GF_FilterSession();
+    ~GF_FilterSession();
+};
+
+struct GF_Filter {
+    GF_FilterSession* session;
+    bool is_ts_demux;
+    
+    GF_Filter(GF_FilterSession* sess, bool ts_demux);
+};
+
 struct GF_FilterPid;
 struct GF_FilterPacket;
 
@@ -84,6 +106,10 @@ private:
     static bool s_initialized;
 };
 
+// Type definitions for callbacks
+typedef std::function<void(const uint8_t*, size_t, uint32_t, uint32_t)> VideoCallback;
+typedef std::function<void(const uint8_t*, size_t, uint32_t, uint32_t)> AudioCallback;
+
 // MPEG-TS Parser helper class
 class MpegTsParser {
 public:
@@ -121,8 +147,8 @@ public:
     bool IsInitialized() const { return m_pat_parsed && m_pmt_parsed; }
     
     // Callbacks for decoded data
-    void SetVideoCallback(std::function<void(const uint8_t*, size_t, uint32_t, uint32_t)> callback);
-    void SetAudioCallback(std::function<void(const uint8_t*, size_t, uint32_t, uint32_t)> callback);
+    void SetVideoCallback(VideoCallback callback);
+    void SetAudioCallback(AudioCallback callback);
     
 private:
     bool m_pat_parsed;
@@ -134,8 +160,8 @@ private:
     std::map<uint16_t, uint8_t> m_continuity_counters;
     
     // Callbacks
-    std::function<void(const uint8_t*, size_t, uint32_t, uint32_t)> m_video_callback;
-    std::function<void(const uint8_t*, size_t, uint32_t, uint32_t)> m_audio_callback;
+    VideoCallback m_video_callback;
+    AudioCallback m_audio_callback;
     
     // Helper functions
     uint16_t GetPID(const uint8_t* packet);

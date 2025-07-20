@@ -44,7 +44,7 @@ GpacPlayer::~GpacPlayer() {
 
 bool GpacPlayer::Initialize(HWND parentWindow, const std::wstring& channelName) {
     if (m_initialized.load()) {
-        LogMessage(L"GPAC player already initialized for channel: " + channelName);
+        LogMessage(std::wstring(L"GPAC player already initialized for channel: ") + channelName);
         return true;
     }
     
@@ -52,19 +52,19 @@ bool GpacPlayer::Initialize(HWND parentWindow, const std::wstring& channelName) 
     m_channelName = channelName;
     m_useSeparateWindow = (parentWindow == nullptr);
     
-    LogMessage(L"Starting GPAC player initialization for channel: " + channelName + 
-               (m_useSeparateWindow ? L" (separate window)" : L" (embedded window)"));
+    LogMessage(std::wstring(L"Starting GPAC player initialization for channel: ") + channelName + 
+               (m_useSeparateWindow ? std::wstring(L" (separate window)") : std::wstring(L" (embedded window)")));
     
     // Initialize GPAC core
     if (!InitializeGpac()) {
-        LogMessage(L"ERROR: Failed to initialize GPAC core for channel: " + channelName);
+        LogMessage(std::wstring(L"ERROR: Failed to initialize GPAC core for channel: ") + channelName);
         return false;
     }
     LogMessage(L"GPAC core initialized successfully");
     
     // Create video window (separate or embedded based on mode)
     if (!CreateVideoWindow()) {
-        LogMessage(L"ERROR: Failed to create video window for channel: " + channelName);
+        LogMessage(std::wstring(L"ERROR: Failed to create video window for channel: ") + channelName);
         CleanupGpac();
         return false;
     }
@@ -72,14 +72,14 @@ bool GpacPlayer::Initialize(HWND parentWindow, const std::wstring& channelName) 
     
     // Create overlay window for ad-skipping messages
     if (!CreateOverlayWindow()) {
-        LogMessage(L"ERROR: Failed to create overlay window for channel: " + channelName);
+        LogMessage(std::wstring(L"ERROR: Failed to create overlay window for channel: ") + channelName);
         CleanupGpac();
         return false;
     }
     LogMessage(L"Overlay window created successfully");
     
     m_initialized = true;
-    LogMessage(L"GPAC player initialization completed successfully for channel: " + channelName);
+    LogMessage(std::wstring(L"GPAC player initialization completed successfully for channel: ") + channelName);
     return true;
 }
 
@@ -89,7 +89,7 @@ bool GpacPlayer::Play(const std::wstring& streamUrl) {
         return false;
     }
     
-    LogMessage(L"Starting playback of: " + streamUrl);
+    LogMessage(std::wstring(L"Starting playback of: ") + streamUrl);
     m_currentUrl = streamUrl;
     
     // TODO: Real GPAC implementation would be:
@@ -241,21 +241,21 @@ bool GpacPlayer::ProcessMpegTsData(const uint8_t* data, size_t dataSize) {
     // Only log periodically to avoid spam
     static int process_counter = 0;
     if (++process_counter % 100 == 0) {
-        LogMessage(L"Processing " + std::to_wstring(numPackets) + L" MPEG-TS packets (" + 
-                   std::to_wstring(dataSize) + L" bytes) - batch #" + std::to_wstring(process_counter / 100));
+        LogMessage(std::wstring(L"Processing ") + std::to_wstring(numPackets) + std::wstring(L" MPEG-TS packets (") + 
+                   std::to_wstring(dataSize) + std::wstring(L" bytes) - batch #") + std::to_wstring(process_counter / 100));
     }
     
     // Feed data to GPAC minimal implementation
     GF_Err err = GpacMinimal::FeedTSData(m_terminal->ts_demux, data, dataSize);
     if (err != GF_OK) {
-        LogMessage(L"GPAC failed to process MPEG-TS data, error: " + std::to_wstring(err));
+        LogMessage(std::wstring(L"GPAC failed to process MPEG-TS data, error: ") + std::to_wstring(err));
         return false;
     }
     
     // Process the session to handle any decoded data
     err = GpacMinimal::ProcessSession(m_terminal->session);
     if (err != GF_OK) {
-        LogMessage(L"GPAC failed to process session, error: " + std::to_wstring(err));
+        LogMessage(std::wstring(L"GPAC failed to process session, error: ") + std::to_wstring(err));
         return false;
     }
     
@@ -270,7 +270,7 @@ bool GpacPlayer::ProcessMpegTsData(const uint8_t* data, size_t dataSize) {
     
     // Periodic status reporting
     if (process_counter % 500 == 0) {
-        LogMessage(L"MPEG-TS stream processing active - " + std::to_wstring(process_counter * numPackets) + L" total packets processed");
+        LogMessage(std::wstring(L"MPEG-TS stream processing active - ") + std::to_wstring(process_counter * numPackets) + std::wstring(L" total packets processed"));
         
         if (m_terminal->session->ts_parser && m_terminal->session->ts_parser->IsInitialized()) {
             LogMessage(L"Stream parsing initialized - PAT/PMT processed, streams identified");
@@ -344,8 +344,8 @@ bool GpacPlayer::InitializeGpac() {
             m_terminal->session->ts_parser->SetAudioCallback(
                 [this](const uint8_t* data, size_t size, uint32_t sampleRate, uint32_t channels) {
                     // Audio processing placeholder
-                    LogMessage(L"Audio frame received: " + std::to_wstring(size) + L" bytes, " + 
-                              std::to_wstring(sampleRate) + L"Hz, " + std::to_wstring(channels) + L" channels");
+                    LogMessage(std::wstring(L"Audio frame received: ") + std::to_wstring(size) + std::wstring(L" bytes, ") + 
+                              std::to_wstring(sampleRate) + std::wstring(L"Hz, ") + std::to_wstring(channels) + std::wstring(L" channels"));
                 }
             );
         }
@@ -357,7 +357,7 @@ bool GpacPlayer::InitializeGpac() {
         return true;
         
     } catch (const std::exception& e) {
-        LogMessage(L"Exception during GPAC initialization: " + std::wstring(e.what(), e.what() + strlen(e.what())));
+        LogMessage(std::wstring(L"Exception during GPAC initialization: ") + std::wstring(e.what(), e.what() + strlen(e.what())));
         return false;
     } catch (...) {
         LogMessage(L"Unknown exception during GPAC initialization");
@@ -416,7 +416,7 @@ bool GpacPlayer::CreateVideoWindow() {
         m_videoWindow = CreateWindowEx(
             WS_EX_APPWINDOW,
             L"GpacVideoWindow",
-            (L"GPAC Video Player - " + m_channelName).c_str(),
+            (std::wstring(L"GPAC Video Player - ") + m_channelName).c_str(),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT, CW_USEDEFAULT, 800, 600,  // Separate window size
             nullptr,  // No parent
@@ -427,7 +427,7 @@ bool GpacPlayer::CreateVideoWindow() {
         
         if (!m_videoWindow) {
             DWORD error = GetLastError();
-            LogMessage(L"Failed to create separate video window, error: " + std::to_wstring(error));
+            LogMessage(std::wstring(L"Failed to create separate video window, error: ") + std::to_wstring(error));
             return false;
         }
         
@@ -455,7 +455,7 @@ bool GpacPlayer::CreateVideoWindow() {
         
         if (!m_videoWindow) {
             DWORD error = GetLastError();
-            LogMessage(L"Failed to create embedded video window, error: " + std::to_wstring(error));
+            LogMessage(std::wstring(L"Failed to create embedded video window, error: ") + std::to_wstring(error));
             return false;
         }
         
@@ -466,7 +466,7 @@ bool GpacPlayer::CreateVideoWindow() {
     SetClassLongPtr(m_videoWindow, GCLP_HBRBACKGROUND, (LONG_PTR)GetStockObject(BLACK_BRUSH));
     
     // Set window title to show it's ready for MPEG-TS
-    SetWindowText(m_videoWindow, (L"GPAC MPEG-TS Player - " + m_channelName).c_str());
+    SetWindowText(m_videoWindow, (std::wstring(L"GPAC MPEG-TS Player - ") + m_channelName).c_str());
     
     return true;
 }
@@ -496,7 +496,7 @@ bool GpacPlayer::CreateOverlayWindow() {
     
     if (!m_overlayWindow) {
         DWORD error = GetLastError();
-        LogMessage(L"Failed to create overlay window, error: " + std::to_wstring(error));
+        LogMessage(std::wstring(L"Failed to create overlay window, error: ") + std::to_wstring(error));
         return false;
     }
     
@@ -529,7 +529,7 @@ void GpacPlayer::UpdateOverlay() {
 
 void GpacPlayer::LogMessage(const std::wstring& message) {
     if (m_logCallback) {
-        m_logCallback(L"[GPAC] " + message);
+        m_logCallback(std::wstring(L"[GPAC] ") + message);
     }
 }
 
@@ -540,7 +540,7 @@ void GpacPlayer::OnGpacLog(void* cbck, int level, int tool, const char* message)
         // Convert char* to wstring
         std::string str(message);
         std::wstring wstr(str.begin(), str.end());
-        player->LogMessage(L"GPAC: " + wstr);
+        player->LogMessage(std::wstring(L"GPAC: ") + wstr);
     }
 }
 

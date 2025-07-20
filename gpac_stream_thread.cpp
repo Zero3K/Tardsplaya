@@ -39,7 +39,7 @@ bool GpacStreamThread::Start() {
         return false;
     }
     
-    LogMessage(L"Starting GPAC streaming thread for " + m_channelName);
+    LogMessage(std::wstring(L"Starting GPAC streaming thread for ") + m_channelName);
     
     m_running = true;
     m_thread = std::thread(&GpacStreamThread::StreamingLoop, this);
@@ -52,7 +52,7 @@ void GpacStreamThread::Stop() {
         return;
     }
     
-    LogMessage(L"Stopping GPAC streaming thread for " + m_channelName);
+    LogMessage(std::wstring(L"Stopping GPAC streaming thread for ") + m_channelName);
     
     m_running = false;
     if (m_thread.joinable()) {
@@ -65,7 +65,7 @@ bool GpacStreamThread::IsRunning() const {
 }
 
 void GpacStreamThread::StreamingLoop() {
-    LogMessage(L"GPAC streaming loop started for " + m_channelName);
+    LogMessage(std::wstring(L"GPAC streaming loop started for ") + m_channelName);
     
     std::vector<std::wstring> currentSegments;
     std::vector<std::wstring> processedSegments;
@@ -73,7 +73,7 @@ void GpacStreamThread::StreamingLoop() {
     while (!m_cancelToken.load() && m_running.load()) {
         // Update playlist
         if (!UpdatePlaylist(currentSegments)) {
-            LogMessage(L"Failed to update playlist for " + m_channelName);
+            LogMessage(std::wstring(L"Failed to update playlist for ") + m_channelName);
             std::this_thread::sleep_for(std::chrono::seconds(5));
             continue;
         }
@@ -99,13 +99,13 @@ void GpacStreamThread::StreamingLoop() {
             // Download segment
             std::vector<uint8_t> segmentData;
             if (!DownloadSegment(segmentUrl, segmentData)) {
-                LogMessage(L"Failed to download segment: " + segmentUrl);
+                LogMessage(std::wstring(L"Failed to download segment: ") + segmentUrl);
                 continue;
             }
             
             // Check for ads and handle accordingly
             if (IsAdSegment(segmentUrl, segmentData)) {
-                LogMessage(L"Ad segment detected, skipping: " + segmentUrl);
+                LogMessage(std::wstring(L"Ad segment detected, skipping: ") + segmentUrl);
                 if (m_gpacPlayer) {
                     m_gpacPlayer->ShowAdSkippingMessage(true);
                 }
@@ -142,7 +142,7 @@ void GpacStreamThread::StreamingLoop() {
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
     
-    LogMessage(L"GPAC streaming loop ended for " + m_channelName);
+    LogMessage(std::wstring(L"GPAC streaming loop ended for ") + m_channelName);
     m_running = false;
 }
 
@@ -150,7 +150,7 @@ bool GpacStreamThread::UpdatePlaylist(std::vector<std::wstring>& segments) {
     segments.clear();
     
     std::string playlistData;
-    if (!HttpGetText(m_playlistUrl, playlistData, std::addressof(m_cancelToken))) {
+    if (!HttpGetText(m_playlistUrl, playlistData, &m_cancelToken)) {
         return false;
     }
     
@@ -166,7 +166,7 @@ bool GpacStreamThread::UpdatePlaylist(std::vector<std::wstring>& segments) {
         segments.push_back(segmentUrl);
     }
     
-    LogMessage(std::wstring(L"Updated playlist: ") + std::to_wstring(segments.size()) + L" segments for " + m_channelName);
+    LogMessage(std::wstring(L"Updated playlist: ") + std::to_wstring(segments.size()) + std::wstring(L" segments for ") + m_channelName);
     return !segments.empty();
 }
 
@@ -260,7 +260,7 @@ bool GpacStreamThread::FeedDataToGpac(const std::vector<uint8_t>& data) {
         return false;
     }
     
-    LogMessage(L"Feeding " + std::to_wstring(data.size()) + L" bytes of MPEG-TS data to GPAC decoders for " + m_channelName);
+    LogMessage(std::wstring(L"Feeding ") + std::to_wstring(data.size()) + std::wstring(L" bytes of MPEG-TS data to GPAC decoders for ") + m_channelName);
     
     // Use GPAC player's MPEG-TS processing method
     bool success = m_gpacPlayer->ProcessMpegTsData(data.data(), data.size());
@@ -293,7 +293,7 @@ bool GpacStreamThread::IsAdSegment(const std::wstring& segmentUrl, const std::ve
 }
 
 void GpacStreamThread::HandleDiscontinuity() {
-    LogMessage(L"Handling stream discontinuity for " + m_channelName);
+    LogMessage(std::wstring(L"Handling stream discontinuity for ") + m_channelName);
     
     if (m_gpacPlayer) {
         m_gpacPlayer->HandleDiscontinuity();
@@ -305,7 +305,7 @@ void GpacStreamThread::HandleDiscontinuity() {
 
 void GpacStreamThread::LogMessage(const std::wstring& message) {
     if (m_logCallback) {
-        m_logCallback(L"[GPAC_STREAM] " + message);
+        m_logCallback(std::wstring(L"[GPAC_STREAM] ") + message);
     }
 }
 
