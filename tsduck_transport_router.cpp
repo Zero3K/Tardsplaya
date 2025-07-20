@@ -725,9 +725,15 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     // Debug: Log ad switching configuration
     if (log_callback_ && current_config_.is_in_ad_mode && current_config_.quality_to_url_map) {
         log_callback_(L"[AD_SYSTEM] Ad-based quality switching initialized");
-        log_callback_(L"[AD_SYSTEM] Ad quality: " + current_config_.ad_mode_quality);
-        log_callback_(L"[AD_SYSTEM] User quality: " + current_config_.user_quality);
+        log_callback_(L"[AD_SYSTEM] Ad quality: '" + current_config_.ad_mode_quality + L"'");
+        log_callback_(L"[AD_SYSTEM] User quality: '" + current_config_.user_quality + L"'");
         log_callback_(L"[AD_SYSTEM] Available qualities: " + std::to_wstring(current_config_.quality_to_url_map->size()));
+        
+        // Debug: Show all available quality names in the map
+        log_callback_(L"[AD_SYSTEM] Quality map contents:");
+        for (const auto& pair : *current_config_.quality_to_url_map) {
+            log_callback_(L"[AD_SYSTEM]   '" + pair.first + L"' -> " + pair.second.substr(0, 50) + L"...");
+        }
     }
     
     // Start HLS fetcher thread

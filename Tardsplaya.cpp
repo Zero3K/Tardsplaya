@@ -977,13 +977,11 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     // Find a quality lower than the user's selected quality for ad mode
     std::wstring adQuality = FindLowerQuality(standardQuality, tab.qualities);
     
-    // Find original quality for ad mode
-    auto adMappingIt = tab.standardToOriginalQuality.find(adQuality);
-    if (adMappingIt != tab.standardToOriginalQuality.end()) {
-        tab.adModeQuality = adMappingIt->second;
-    } else {
-        tab.adModeQuality = adQuality;
-    }
+    // adQuality is already an original quality name (returned from tab.qualities)
+    // No need to look it up in standardToOriginalQuality mapping
+    tab.adModeQuality = adQuality;
+    
+    AddDebugLog(L"Quality mapping fix - standardQuality: '" + standardQuality + L"', originalQuality: '" + originalQuality + L"', adQuality: '" + adQuality + L"'");
     
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L") with Frame Number Tagging");
     AddDebugLog(L"Ad mode quality set to: " + tab.adModeQuality + L" (lower than user's " + standardQuality + L")");
