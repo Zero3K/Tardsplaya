@@ -867,22 +867,43 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             std::vector<std::wstring> segment_urls;
             bool has_discontinuities = false;
             
+            // Check for ad transitions using discontinuity detection
+            bool ad_start_detected = false;
+            bool ad_end_detected = false;
+            
+            // Check current time for ad end detection (do this regardless of segments)
+            auto now = std::chrono::steady_clock::now();
+            bool has_discontinuity_in_batch = false;
+            
+            // Always check for ad end timeout, even if no new segments
+            if (has_recent_discontinuity_) {
+                auto time_since_last_discontinuity = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_discontinuity_time_);
+                
+                if (log_callback_) {
+                    log_callback_(L"[AD_DEBUG] Checking ad end timeout: time_since_last=" + 
+                                std::to_wstring(time_since_last_discontinuity.count()) + 
+                                L"ms, timeout=" + std::to_wstring(discontinuity_timeout_.count()) + L"ms");
+                }
+                
+                if (time_since_last_discontinuity >= discontinuity_timeout_) {
+                    ad_end_detected = true;
+                    has_recent_discontinuity_ = false;
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[AD_DETECTION] Ad end detected - timeout reached (" + 
+                                    std::to_wstring(time_since_last_discontinuity.count()) + L"ms)");
+                    }
+                }
+            }
+            
             if (playlist_parser.ParsePlaylist(playlist_content)) {
                 // Extract segment URLs from parsed playlist
                 auto segments = playlist_parser.GetSegments();
-                
-                // Check for ad transitions using discontinuity detection
-                bool ad_start_detected = false;
-                bool ad_end_detected = false;
                 
                 // Debug: Log segment count and ad detection status
                 if (log_callback_ && segments.size() > 0) {
                     log_callback_(L"[AD_DEBUG] Checking " + std::to_wstring(segments.size()) + L" segments for discontinuities");
                 }
-                
-                // Check current time for ad end detection
-                auto now = std::chrono::steady_clock::now();
-                bool has_discontinuity_in_batch = false;
                 
                 for (const auto& segment : segments) {
                     if (playlist_parser.DetectAdStart(segment)) {
@@ -899,97 +920,12 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     segment_urls.push_back(segment.url);
                 }
                 
-                // Check if we should end ad mode (no discontinuities for timeout period)
-                if (has_recent_discontinuity_ && !has_discontinuity_in_batch) {
-                    auto time_since_last_discontinuity = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_discontinuity_time_);
-                    if (time_since_last_discontinuity >= discontinuity_timeout_) {
-                        ad_end_detected = true;
-                        has_recent_discontinuity_ = false;
-                        
-                        if (log_callback_) {
-                            log_callback_(L"[AD_DETECTION] Ad end detected - no discontinuities for " + 
-                                        std::to_wstring(time_since_last_discontinuity.count()) + L"ms");
-                        }
-                    }
-                }
-                
                 // Debug: Log overall ad detection result
                 if (log_callback_ && segments.size() > 0) {
                     log_callback_(L"[AD_DEBUG] Ad detection complete - Start: " + 
                                 std::wstring(ad_start_detected ? L"YES" : L"NO") + L", End: " + 
                                 std::wstring(ad_end_detected ? L"YES" : L"NO") + 
                                 L", Recent discontinuity: " + std::wstring(has_recent_discontinuity_ ? L"YES" : L"NO"));
-                }
-                
-                // Handle ad state transitions
-                if (current_config_.is_in_ad_mode && current_config_.needs_switch_to_ad && 
-                    current_config_.needs_switch_to_user && current_config_.quality_to_url_map &&
-                    !current_config_.ad_mode_quality.empty() && !current_config_.user_quality.empty()) {
-                    
-                    bool currently_in_ad = current_config_.is_in_ad_mode->load();
-                    
-                    if (ad_start_detected && !currently_in_ad) {
-                        // Switching to ad mode
-                        current_config_.is_in_ad_mode->store(true);
-                        current_config_.needs_switch_to_ad->store(true);
-                        
-                        if (log_callback_) {
-                            log_callback_(L"[AD_MODE] Switching to ad quality: " + current_config_.ad_mode_quality);
-                        }
-                        
-                        // Find the ad quality URL and switch to it
-                        auto ad_url_it = current_config_.quality_to_url_map->find(current_config_.ad_mode_quality);
-                        if (ad_url_it != current_config_.quality_to_url_map->end()) {
-                            // Actually switch to the ad quality URL
-                            SwitchPlaylistURL(ad_url_it->second);
-                            
-                            if (log_callback_) {
-                                log_callback_(L"[AD_MODE] Switched to ad URL: " + ad_url_it->second);
-                            }
-                        } else {
-                            if (log_callback_) {
-                                log_callback_(L"[AD_MODE] ERROR: Ad quality '" + current_config_.ad_mode_quality + L"' not found in quality map");
-                            }
-                        }
-                    }
-                    else if (ad_end_detected && currently_in_ad) {
-                        // Switching back to user quality
-                        current_config_.is_in_ad_mode->store(false);
-                        current_config_.needs_switch_to_user->store(true);
-                        
-                        if (log_callback_) {
-                            log_callback_(L"[AD_MODE] Switching back to user quality: " + current_config_.user_quality);
-                        }
-                        
-                        // Find the user quality URL and switch back to it
-                        auto user_url_it = current_config_.quality_to_url_map->find(current_config_.user_quality);
-                        if (user_url_it != current_config_.quality_to_url_map->end()) {
-                            // Actually switch back to the user quality URL
-                            SwitchPlaylistURL(user_url_it->second);
-                            
-                            if (log_callback_) {
-                                log_callback_(L"[AD_MODE] Switched back to user URL: " + user_url_it->second);
-                            }
-                        } else {
-                            if (log_callback_) {
-                                log_callback_(L"[AD_MODE] ERROR: User quality '" + current_config_.user_quality + L"' not found in quality map");
-                            }
-                        }
-                    }
-                } else if (ad_start_detected || ad_end_detected) {
-                    // Ad markers detected but quality switching not properly configured
-                    if (log_callback_) {
-                        std::wstring config_status = L"[AD_CONFIG_DEBUG] Quality switching configuration - ";
-                        config_status += L"is_in_ad_mode: " + std::wstring(current_config_.is_in_ad_mode ? L"SET" : L"NULL") + L", ";
-                        config_status += L"needs_switch_to_ad: " + std::wstring(current_config_.needs_switch_to_ad ? L"SET" : L"NULL") + L", ";
-                        config_status += L"needs_switch_to_user: " + std::wstring(current_config_.needs_switch_to_user ? L"SET" : L"NULL") + L", ";
-                        config_status += L"quality_to_url_map: " + std::wstring(current_config_.quality_to_url_map ? L"SET" : L"NULL") + L", ";
-                        config_status += L"ad_mode_quality: '" + current_config_.ad_mode_quality + L"', ";
-                        config_status += L"user_quality: '" + current_config_.user_quality + L"'";
-                        log_callback_(config_status);
-                        
-                        log_callback_(L"[AD_DETECTION] SCTE-35 markers detected but quality switching is not properly configured");
-                    }
                 }
                 
                 // Check for discontinuities that indicate ad transitions
@@ -1028,6 +964,84 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             } else {
                 // Fallback to basic parsing if enhanced parser fails
                 segment_urls = ParseHLSPlaylist(playlist_content, current_url);
+            }
+            
+            // Handle ad state transitions (must be outside parsing block to handle timeouts)
+            if (current_config_.is_in_ad_mode && current_config_.needs_switch_to_ad && 
+                current_config_.needs_switch_to_user && current_config_.quality_to_url_map &&
+                !current_config_.ad_mode_quality.empty() && !current_config_.user_quality.empty()) {
+                
+                bool currently_in_ad = current_config_.is_in_ad_mode->load();
+                
+                if (log_callback_ && (ad_start_detected || ad_end_detected)) {
+                    log_callback_(L"[AD_DEBUG] Quality switching check - currently_in_ad=" + 
+                                std::wstring(currently_in_ad ? L"YES" : L"NO") + 
+                                L", ad_start_detected=" + std::wstring(ad_start_detected ? L"YES" : L"NO") + 
+                                L", ad_end_detected=" + std::wstring(ad_end_detected ? L"YES" : L"NO"));
+                }
+                
+                if (ad_start_detected && !currently_in_ad) {
+                    // Switching to ad mode
+                    current_config_.is_in_ad_mode->store(true);
+                    current_config_.needs_switch_to_ad->store(true);
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[AD_MODE] Switching to ad quality: " + current_config_.ad_mode_quality);
+                    }
+                    
+                    // Find the ad quality URL and switch to it
+                    auto ad_url_it = current_config_.quality_to_url_map->find(current_config_.ad_mode_quality);
+                    if (ad_url_it != current_config_.quality_to_url_map->end()) {
+                        // Actually switch to the ad quality URL
+                        SwitchPlaylistURL(ad_url_it->second);
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[AD_MODE] Switched to ad URL: " + ad_url_it->second);
+                        }
+                    } else {
+                        if (log_callback_) {
+                            log_callback_(L"[AD_MODE] ERROR: Ad quality '" + current_config_.ad_mode_quality + L"' not found in quality map");
+                        }
+                    }
+                }
+                else if (ad_end_detected && currently_in_ad) {
+                    // Switching back to user quality
+                    current_config_.is_in_ad_mode->store(false);
+                    current_config_.needs_switch_to_user->store(true);
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[AD_MODE] Switching back to user quality: " + current_config_.user_quality);
+                    }
+                    
+                    // Find the user quality URL and switch back to it
+                    auto user_url_it = current_config_.quality_to_url_map->find(current_config_.user_quality);
+                    if (user_url_it != current_config_.quality_to_url_map->end()) {
+                        // Actually switch back to the user quality URL
+                        SwitchPlaylistURL(user_url_it->second);
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[AD_MODE] Switched back to user URL: " + user_url_it->second);
+                        }
+                    } else {
+                        if (log_callback_) {
+                            log_callback_(L"[AD_MODE] ERROR: User quality '" + current_config_.user_quality + L"' not found in quality map");
+                        }
+                    }
+                }
+            } else if (ad_start_detected || ad_end_detected) {
+                // Ad markers detected but quality switching not properly configured
+                if (log_callback_) {
+                    std::wstring config_status = L"[AD_CONFIG_DEBUG] Quality switching configuration - ";
+                    config_status += L"is_in_ad_mode: " + std::wstring(current_config_.is_in_ad_mode ? L"SET" : L"NULL") + L", ";
+                    config_status += L"needs_switch_to_ad: " + std::wstring(current_config_.needs_switch_to_ad ? L"SET" : L"NULL") + L", ";
+                    config_status += L"needs_switch_to_user: " + std::wstring(current_config_.needs_switch_to_user ? L"SET" : L"NULL") + L", ";
+                    config_status += L"quality_to_url_map: " + std::wstring(current_config_.quality_to_url_map ? L"SET" : L"NULL") + L", ";
+                    config_status += L"ad_mode_quality: '" + current_config_.ad_mode_quality + L"', ";
+                    config_status += L"user_quality: '" + current_config_.user_quality + L"'";
+                    log_callback_(config_status);
+                    
+                    log_callback_(L"[AD_DETECTION] Ad markers detected but quality switching is not properly configured");
+                }
             }
             
             if (segment_urls.empty()) {
