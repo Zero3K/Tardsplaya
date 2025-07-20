@@ -901,8 +901,8 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 // Debug: Log overall ad detection result
                 if (log_callback_ && segments.size() > 0) {
                     log_callback_(L"[AD_DEBUG] Ad detection complete - Start: " + 
-                                (ad_start_detected ? L"YES" : L"NO") + L", End: " + 
-                                (ad_end_detected ? L"YES" : L"NO"));
+                                std::wstring(ad_start_detected ? L"YES" : L"NO") + L", End: " + 
+                                std::wstring(ad_end_detected ? L"YES" : L"NO"));
                 }
                 
                 // Handle ad state transitions
