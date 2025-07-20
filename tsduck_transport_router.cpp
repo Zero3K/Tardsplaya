@@ -330,32 +330,32 @@ void HLSToTSConverter::Reset() {
 }
 
 void HLSToTSConverter::ResetForQualitySwitch(bool switching_to_audio_only) {
-    // Only reset PAT/PMT flags and continuity, preserve PID detection and timing
-    // This prevents video buffer issues when switching between qualities
+    // Reset PAT/PMT flags and continuity for new stream
     continuity_counter_ = 0;
     pat_sent_ = false;
     pmt_sent_ = false;
     
-    // DO NOT reset detected PIDs - they should remain the same across quality switches
-    // of the same content stream. Resetting them causes video buffer to show 0 samples.
-    // detected_video_pid_ = 0;  // KEEP EXISTING VALUE
-    // detected_audio_pid_ = 0;  // KEEP EXISTING VALUE
+    // Determine current stream type based on detected PIDs
+    bool was_audio_only = (detected_video_pid_ == 0 && detected_audio_pid_ != 0);
+    bool is_changing_stream_type = (was_audio_only != switching_to_audio_only);
+    
+    // Reset PIDs only when switching between different stream types
+    // This prevents timing/sync issues when switching video ↔ audio-only
+    if (is_changing_stream_type) {
+        detected_video_pid_ = 0;
+        detected_audio_pid_ = 0;
+    }
+    // Same stream type (e.g., 720p → 480p video) - preserve PIDs for continuity
     
     // Reset frame counters but preserve global counter continuity
-    // Keep global_frame_counter_ to maintain overall stream continuity
     segment_frame_counter_ = 0;
     last_frame_time_ = std::chrono::steady_clock::now();
     
-    // Only adjust frame duration if we don't already have a good estimate
-    // This prevents timing disruption when switching between qualities
-    if (estimated_frame_duration_.count() == 0) {
-        if (switching_to_audio_only) {
-            // Audio-only streams typically have longer frame intervals
-            estimated_frame_duration_ = std::chrono::milliseconds(100); // ~10fps equivalent for audio packets
-        } else {
-            // Video streams default to 30fps
-            estimated_frame_duration_ = std::chrono::milliseconds(33); // ~30fps
-        }
+    // Set appropriate frame duration for the target stream type
+    if (switching_to_audio_only) {
+        estimated_frame_duration_ = std::chrono::milliseconds(100); // ~10fps for audio packets
+    } else {
+        estimated_frame_duration_ = std::chrono::milliseconds(33);  // ~30fps for video
     }
 }
 
