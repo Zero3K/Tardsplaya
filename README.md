@@ -52,11 +52,29 @@ Frame Number Tagging enhances the existing TSDuck transport stream system:
 The TSDuck integration includes:
 
 - `tsduck_hls_wrapper.h/cpp` - Lightweight TSDuck-inspired HLS parser
-- `tsduck_transport_router.h/cpp` - **NEW** Transport stream re-routing engine
+- `tsduck_transport_router.h/cpp` - **NEW** Transport stream re-routing engine with **VirtualDub2-style discontinuity handling**
 - Enhanced playlist analysis with precise duration calculations  
 - Dynamic buffer optimization based on stream characteristics
 - Advanced ad detection using multiple detection patterns
 - SCTE-35 processing for professional-grade ad handling
+- **🎯 VirtualDub2 Discontinuity Handling** - Prevents black frame sticking after advertisement breaks
+
+### NEW: VirtualDub2-Style Discontinuity Handling
+
+**Advanced Ad Break Recovery** - Implements proven VirtualDub2 discontinuity handling methodology:
+
+- **Keyframe Waiting**: After detecting discontinuities (ad breaks), waits for keyframes before resuming playback
+- **Black Frame Prevention**: Skips non-keyframes that could cause black/corrupted frames in media players
+- **Timeout Protection**: Maximum 30-frame wait (VirtualDub2 standard) prevents indefinite blocking
+- **Dual Detection**: Handles both playlist-level (`#EXT-X-DISCONTINUITY`) and packet-level discontinuities
+- **Smooth Recovery**: Ensures clean visual transitions back to main content after advertisements
+
+**How It Works:**
+```
+[Normal Stream] → [Ad Break] → [Discontinuity] → [Skip non-keyframes] → [KEYFRAME FOUND] → [Resume Normal]
+                                      ↓                    ↓                    ↓
+                              Buffer cleared     Wait max 30 frames    Clean visual recovery
+```
 
 ### Performance Benefits
 
@@ -70,6 +88,8 @@ The TSDuck integration includes:
 | **Lag Analysis** | **Basic logging only** | **Detailed frame statistics and timing data** |
 | **Stream Format** | **HLS segments only** | **HLS segments + Transport Stream routing** |
 | **Player Compatibility** | **Basic stdin piping** | **Professional TS format support** |
+| **🎯 Ad Break Recovery** | **❌ Black frames/sticking** | **✅ VirtualDub2 keyframe waiting** |
+| **Discontinuity Handling** | **❌ No special handling** | **✅ Dual-level detection & recovery** |
 
 The integration works transparently:
 1. **Primary**: TSDuck-enhanced parsing for optimal performance
@@ -88,6 +108,26 @@ The integration works transparently:
 - **Reduced Latency**: Continuous stream instead of segment-based delivery
 
 TSDuck TS Mode provides superior performance and compatibility compared to traditional HLS segment streaming.
+
+## Troubleshooting Ad Breaks and Black Frames
+
+### Common Issues After Ad Breaks
+- **Black frames or frozen video**: Now prevented by VirtualDub2 discontinuity handling
+- **Audio continues but video stops**: Keyframe waiting ensures proper video restart
+- **Player crashes during ad transitions**: Buffer clearing and keyframe synchronization provides stability
+
+### Debug Logs to Monitor
+```
+[DISCONTINUITY] Detected ad transition - implementing fast restart
+[KEYFRAME_WAIT] Activated keyframe waiting mode (max 30 frames)  
+[KEYFRAME_WAIT] Found keyframe after 5 frames - resuming normal playback
+```
+
+### If Issues Persist
+1. Check that streams have regular keyframes (every 2-10 seconds)
+2. Verify media player supports TS format input
+3. Monitor for timeout messages (may indicate streams without keyframes)
+4. Check network stability during ad transitions
 
 ## TLS Client Integration
 

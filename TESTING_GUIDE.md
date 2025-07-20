@@ -116,13 +116,30 @@ wine Tardsplaya.exe
 5. Malformed API responses ✓
 ```
 
-### **Phase 4: Windows 7 Specific**
+### **Phase 4: Discontinuity Handling (NEW)**
+```
+1. Test streams with frequent advertisements ✓
+2. Monitor for black frame prevention during ad breaks ✓
+3. Verify keyframe waiting logs appear ✓
+4. Check smooth transitions back to main content ✓
+5. Test timeout protection (30-frame limit) ✓
+```
+
+**Expected Log Messages During Ad Breaks:**
+```
+[DISCONTINUITY] Detected ad transition - implementing fast restart
+[KEYFRAME_WAIT] Activated keyframe waiting mode (max 30 frames)
+[KEYFRAME_WAIT] Found keyframe after 5 frames - resuming normal playback
+```
+
+### **Phase 5: Windows 7 Specific**
 ```
 1. Run on clean Windows 7 VM ✓
 2. Test without updated certificates ✓
 3. Verify HTTPS bypass works ✓
 4. Check memory usage < 15MB per stream ✓
 5. Confirm no external dependencies ✓
+6. Test discontinuity handling with ad-heavy streams ✓
 ```
 
 ## 🔧 **Debugging Tools**
