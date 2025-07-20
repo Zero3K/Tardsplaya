@@ -478,10 +478,10 @@ static bool ValidatePlaylistMetadata(const std::string& playlist) {
 }
 
 // Parse media segment URLs from m3u8 playlist
-// Returns pair of (segments, should_clear_buffer)
+// Returns pair of (segments, has_discontinuity)
 static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::string& playlist) {
     std::vector<std::wstring> segs;
-    bool should_clear_buffer = false;
+    bool has_discontinuity = false;
     
     std::istringstream ss(playlist);
     std::string line;
@@ -491,10 +491,10 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
         if (line.empty()) continue;
         
         if (line[0] == '#') {
-            // Check for discontinuity tags that require buffer clearing and player recovery
+            // Check for discontinuity tags for web interface handling
             if (line.find("#EXT-X-DISCONTINUITY") == 0) {
-                should_clear_buffer = true;
-                AddDebugLog(L"[DISCONTINUITY] Found #EXT-X-DISCONTINUITY tag - buffer clear and player recovery needed");
+                has_discontinuity = true;
+                AddDebugLog(L"[DISCONTINUITY] Found #EXT-X-DISCONTINUITY tag - will use web interface recovery");
             }
             else if (line.find("#EXTINF:") == 0) {
                 expecting_segment_url = true;
@@ -511,7 +511,7 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegments(const std::strin
         }
     }
     
-    return std::make_pair(segs, should_clear_buffer);
+    return std::make_pair(segs, has_discontinuity);
 }
 
 
@@ -955,7 +955,7 @@ bool BufferAndPipeStreamToPlayer(
 
             auto parse_result = ParseSegments(playlist);
             auto segments = parse_result.first;
-            bool should_clear_buffer = parse_result.second;
+            bool has_discontinuity = parse_result.second;
             
             // TSDuck-enhanced analysis for dynamic buffer optimization - run on every playlist fetch
             static int tsduck_recommended_buffer = buffer_segments;
@@ -992,18 +992,8 @@ bool BufferAndPipeStreamToPlayer(
                            L", max=" + std::to_wstring(dynamic_max_buffer.load()) + L" for " + channel_name);
             }
             
-            // Clear buffer if we just started an ad block to prevent showing old content
-            if (should_clear_buffer) {
-                size_t cleared_segments;
-                {
-                    std::lock_guard<std::mutex> lock(buffer_mutex);
-                    cleared_segments = buffer_queue.size();
-                    std::queue<std::vector<char>> empty_queue;
-                    buffer_queue.swap(empty_queue); // Clear the queue efficiently
-                }
-                AddDebugLog(L"[DISCONTINUITY] Cleared " + std::to_wstring(cleared_segments) + 
-                           L" buffered segments due to discontinuity for " + channel_name);
-                
+            // Handle discontinuities using MPC-HC web interface if available
+            if (has_discontinuity) {
                 // Use MPC-HC web interface for discontinuity recovery if available
                 if (mpc_web_interface && mpc_web_interface->IsAvailable()) {
                     AddDebugLog(L"[DISCONTINUITY] Attempting MPC-HC web interface recovery for " + channel_name);
@@ -1012,10 +1002,10 @@ bool BufferAndPipeStreamToPlayer(
                     if (recovery_success) {
                         AddDebugLog(L"[DISCONTINUITY] MPC-HC web interface recovery successful for " + channel_name);
                     } else {
-                        AddDebugLog(L"[DISCONTINUITY] MPC-HC web interface recovery failed, continuing with buffer clear only for " + channel_name);
+                        AddDebugLog(L"[DISCONTINUITY] MPC-HC web interface recovery failed for " + channel_name);
                     }
                 } else {
-                    AddDebugLog(L"[DISCONTINUITY] No web interface available, using buffer clear only for " + channel_name);
+                    AddDebugLog(L"[DISCONTINUITY] No web interface available for " + channel_name);
                 }
             }
             

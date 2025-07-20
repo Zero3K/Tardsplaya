@@ -847,7 +847,7 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 
                 if (has_discontinuities) {
                     if (log_callback_) {
-                        log_callback_(L"[DISCONTINUITY] Detected ad transition - implementing fast restart");
+                        log_callback_(L"[DISCONTINUITY] Detected ad transition - using MPC-HC web interface recovery");
                     }
                     
                     // Use MPC-HC web interface for discontinuity recovery if available
@@ -863,37 +863,12 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                             }
                         } else {
                             if (log_callback_) {
-                                log_callback_(L"[DISCONTINUITY] MPC-HC web interface recovery failed, continuing with buffer clear");
+                                log_callback_(L"[DISCONTINUITY] MPC-HC web interface recovery failed");
                             }
                         }
                     } else {
                         if (log_callback_) {
-                            log_callback_(L"[DISCONTINUITY] No web interface available, using buffer clear only");
-                        }
-                    }
-                    
-                    // Clear buffer immediately for fast restart after ad break
-                    ts_buffer_->Clear();
-                    
-                    // Reset frame numbering to prevent frame drop false positives
-                    hls_converter_->Reset();
-                    
-                    // Reset frame statistics to prevent false drop alerts after discontinuity
-                    ResetFrameStatistics();
-                    
-                    if (log_callback_) {
-                        log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
-                    }
-                    
-                    // For fast restart, only process the newest segments
-                    if (segment_urls.size() > 1) {
-                        // Keep only the last segment for immediate restart
-                        std::vector<std::wstring> restart_segments;
-                        restart_segments.push_back(segment_urls.back());
-                        segment_urls = restart_segments;
-                        
-                        if (log_callback_) {
-                            log_callback_(L"[FAST_RESTART] Using only newest segment for immediate playback");
+                            log_callback_(L"[DISCONTINUITY] No web interface available");
                         }
                     }
                 }
@@ -963,18 +938,10 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Add to buffer with special handling for post-discontinuity segments
+                    // Set buffer watermarks based on latency mode
                     size_t buffer_high_watermark, buffer_low_watermark;
                     
-                    if (has_discontinuities) {
-                        // Immediately after discontinuity: minimal buffering for fastest restart
-                        buffer_high_watermark = current_config_.buffer_size_packets / 8; // 12.5% for immediate restart
-                        buffer_low_watermark = current_config_.buffer_size_packets / 16;  // 6.25% for fastest response
-                        
-                        if (log_callback_ && segments_processed == 0) {
-                            log_callback_(L"[FAST_RESTART] Using minimal buffering for immediate playback after ad");
-                        }
-                    } else if (current_config_.low_latency_mode) {
+                    if (current_config_.low_latency_mode) {
                         // For low-latency, use smaller buffers and more aggressive flow control
                         buffer_high_watermark = current_config_.buffer_size_packets * 6 / 10; // 60% full for low latency
                         buffer_low_watermark = current_config_.buffer_size_packets / 8;       // 12.5% full for faster response
