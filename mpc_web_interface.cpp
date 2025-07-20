@@ -258,7 +258,7 @@ bool MPCWebInterface::ResumePlayback() {
 
 bool MPCWebInterface::FrameStep() {
     AddDebugLog(L"[MPC-WEB] Sending frame step command");
-    return SendHTTPCommand(L"wm_command=921", std::wstring{}); // 921 is frame step command
+    return SendHTTPCommand(L"wm_command=891", std::wstring{}); // 891 is ID_PLAY_FRAMESTEP
 }
 
 bool MPCWebInterface::SeekToBeginning() {
