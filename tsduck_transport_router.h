@@ -117,6 +117,9 @@ namespace tsduck_transport {
         // Reset converter state for new stream
         void Reset();
         
+        // Reset converter state for quality switch (preserves timing)
+        void ResetForQualitySwitch();
+        
     private:
         uint16_t program_id_ = 1;
         uint16_t pmt_pid_ = 0x1000;

@@ -329,6 +329,25 @@ void HLSToTSConverter::Reset() {
     detected_audio_pid_ = 0;
 }
 
+void HLSToTSConverter::ResetForQualitySwitch() {
+    // Only reset PAT/PMT flags and continuity, preserve timing information
+    // This prevents playback timing issues when switching between qualities
+    continuity_counter_ = 0;
+    pat_sent_ = false;
+    pmt_sent_ = false;
+    
+    // Reset stream type detection for new quality stream
+    detected_video_pid_ = 0;
+    detected_audio_pid_ = 0;
+    
+    // DO NOT reset timing information:
+    // - Keep estimated_frame_duration_ to preserve playback timing
+    // - Keep global_frame_counter_ for continuity
+    // - Only reset segment_frame_counter_ for new segment numbering
+    segment_frame_counter_ = 0;
+    last_frame_time_ = std::chrono::steady_clock::now();
+}
+
 std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
     std::vector<TSPacket> ts_packets;
     
@@ -1745,11 +1764,11 @@ void TransportStreamRouter::SwitchPlaylistURL(const std::wstring& new_url) {
         }
     }
     
-    // Reset converter for clean stream restart
+    // Use lighter reset for quality switches to preserve timing
     if (hls_converter_) {
-        hls_converter_->Reset();
+        hls_converter_->ResetForQualitySwitch();
         if (log_callback_) {
-            log_callback_(L"[URL_SWITCH] Reset converter for new quality stream");
+            log_callback_(L"[URL_SWITCH] Reset converter for quality switch (preserved timing)");
         }
     }
     
