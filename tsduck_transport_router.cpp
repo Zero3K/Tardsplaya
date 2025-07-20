@@ -1139,49 +1139,57 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             
             // Frame Number Tagging: Track frame statistics
             if (packet.frame_number > 0) {
-                // Check for frame drops or duplicates
-                uint64_t current_frame = packet.frame_number;
-                uint64_t last_frame = last_frame_number_.load();
-                
-                if (current_frame > last_frame + 1) {
-                    // Frame drop detected
-                    uint32_t dropped = static_cast<uint32_t>(current_frame - last_frame - 1);
-                    frames_dropped_ += dropped;
+                // Only check for frame drops/duplicates on actual frame boundaries (new frames)
+                // to avoid false positives from continuation packets within the same frame
+                if (packet.payload_unit_start && packet.is_video_packet) {
+                    // Check for frame drops or duplicates only on new video frames
+                    uint64_t current_frame = packet.frame_number;
+                    uint64_t last_frame = last_frame_number_.load();
                     
-                    if (log_callback_) {
-                        log_callback_(L"[FRAME_TAG] Frame drop detected: " + std::to_wstring(dropped) + 
-                                     L" frames dropped between #" + std::to_wstring(last_frame) + 
-                                     L" and #" + std::to_wstring(current_frame));
+                    if (current_frame > last_frame + 1) {
+                        // Frame drop detected
+                        uint32_t dropped = static_cast<uint32_t>(current_frame - last_frame - 1);
+                        frames_dropped_ += dropped;
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[FRAME_TAG] Frame drop detected: " + std::to_wstring(dropped) + 
+                                         L" frames dropped between #" + std::to_wstring(last_frame) + 
+                                         L" and #" + std::to_wstring(current_frame));
+                        }
+                    } else if (current_frame <= last_frame && last_frame > 0) {
+                        // Potential duplicate or reordered frame
+                        frames_duplicated_++;
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[FRAME_TAG] Duplicate/reordered frame: #" + std::to_wstring(current_frame) + 
+                                         L" (last: #" + std::to_wstring(last_frame) + L")");
+                        }
                     }
-                } else if (current_frame <= last_frame && last_frame > 0) {
-                    // Potential duplicate or reordered frame
-                    frames_duplicated_++;
                     
-                    if (log_callback_) {
-                        log_callback_(L"[FRAME_TAG] Duplicate/reordered frame: #" + std::to_wstring(current_frame) + 
-                                     L" (last: #" + std::to_wstring(last_frame) + L")");
-                    }
+                    last_frame_number_ = current_frame;
+                    total_frames_processed_++;
                 }
-                
-                last_frame_number_ = current_frame;
-                total_frames_processed_++;
                 
                 // Video-specific frame tracking
                 if (packet.is_video_packet) {
-                    video_frames_processed_++;
-                    last_video_frame_number_ = packet.video_frame_number;
+                    // Only increment video frame counter on new frames
+                    if (packet.payload_unit_start) {
+                        video_frames_processed_++;
+                        last_video_frame_number_ = packet.video_frame_number;
+                    }
                     
                     // Check for video synchronization issues
                     if (packet.video_sync_lost) {
                         video_sync_loss_count_++;
                         if (log_callback_) {
-                            log_callback_(L"[VIDEO_SYNC] Video synchronization lost at frame #" + std::to_wstring(current_frame));
+                            log_callback_(L"[VIDEO_SYNC] Video synchronization lost at frame #" + std::to_wstring(packet.frame_number));
                         }
                     }
                 }
                 
-                // Log frame info for key frames or periodically
-                if (packet.is_key_frame || (current_frame % 300 == 0)) { // Every 300 frames or key frames
+                // Log frame info for key frames or periodically (only on new frames)
+                if (packet.payload_unit_start && packet.is_video_packet && 
+                    (packet.is_key_frame || (packet.frame_number % 300 == 0))) { // Every 300 frames or key frames
                     if (log_callback_) {
                         log_callback_(L"[FRAME_TAG] " + packet.GetFrameDebugInfo());
                     }
