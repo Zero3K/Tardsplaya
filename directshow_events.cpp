@@ -12,11 +12,7 @@ namespace directshow_events {
 
 // DirectShowController Implementation
 DirectShowController::DirectShowController() 
-    : graph_builder_(nullptr)
-    , media_control_(nullptr) 
-    , media_event_(nullptr)
-    , video_renderer_(nullptr)
-    , event_processing_active_(false)
+    : event_callback_(nullptr)
     , graph_ready_(false) {
     
     // Initialize COM for DirectShow
@@ -135,12 +131,8 @@ bool DirectShowController::NotifySegmentTransition() {
     
     LogEvent(MediaEvent::SEGMENT_STARTED, L"Notifying DirectShow of segment transition");
     
-    // Send custom event to prepare for segment transition
-    if (media_event_) {
-        // Fire custom event code for segment started
-        const long SEGMENT_TRANSITION_EVENT = EC_USER + 100;
-        media_event_->FreeEventParams(SEGMENT_TRANSITION_EVENT, 0, 0);
-    }
+    // For external players, we send window messages instead of DirectShow events
+    // This is handled through the SendPlayerCommand method
     
     return true;
 }
@@ -225,6 +217,8 @@ bool DirectShowController::SendPlayerCommand(const std::wstring& command) {
     }
     
     return false;
+}
+
 // Utility functions implementation
 namespace utils {
 
