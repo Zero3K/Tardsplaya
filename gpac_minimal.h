@@ -24,12 +24,14 @@
 class MpegTsParser;
 class SimpleVideoRenderer;
 class SimpleAudioRenderer;
+class H264Decoder;
 
 // Actual structure definitions
 struct GF_FilterSession {
     std::unique_ptr<MpegTsParser> ts_parser;
     std::unique_ptr<SimpleVideoRenderer> video_renderer;
     std::unique_ptr<SimpleAudioRenderer> audio_renderer;
+    std::unique_ptr<H264Decoder> h264_decoder;
     HWND video_window;
     bool has_video_output;
     bool has_audio_output;
@@ -158,6 +160,10 @@ public:
     void SetVideoCallback(VideoCallback callback);
     void SetAudioCallback(AudioCallback callback);
     
+    // Enhanced video processing
+    bool ProcessVideoStream(uint16_t pid, const uint8_t* data, size_t size);
+    bool ExtractH264NalUnits(const uint8_t* pes_data, size_t size, std::vector<std::vector<uint8_t>>& nal_units);
+    
 private:
     bool m_pat_parsed;
     bool m_pmt_parsed;
@@ -226,6 +232,50 @@ private:
     
     void CreateBitmap(uint32_t width, uint32_t height);
     void DestroyBitmap();
+};
+
+// Basic H.264 decoder implementation
+class H264Decoder {
+public:
+    H264Decoder();
+    ~H264Decoder();
+    
+    bool Initialize();
+    void Shutdown();
+    
+    struct DecodedFrame {
+        std::vector<uint8_t> yuv_data;
+        uint32_t width;
+        uint32_t height;
+        uint64_t timestamp;
+        bool is_key_frame;
+    };
+    
+    bool DecodeNalUnit(const uint8_t* nal_data, size_t nal_size, DecodedFrame& frame);
+    bool ConvertYuvToRgb(const DecodedFrame& yuv_frame, std::vector<uint8_t>& rgb_data);
+    
+private:
+    bool m_initialized;
+    uint32_t m_width;
+    uint32_t m_height;
+    
+    // H.264 decoder state
+    struct SPS {
+        uint32_t width;
+        uint32_t height;
+        bool valid;
+    } m_sps;
+    
+    struct PPS {
+        bool valid;
+    } m_pps;
+    
+    // Basic NAL unit parsing
+    bool ParseSPS(const uint8_t* data, size_t size);
+    bool ParsePPS(const uint8_t* data, size_t size);
+    bool DecodeSlice(const uint8_t* data, size_t size, DecodedFrame& frame);
+    void YuvToRgb(const uint8_t* y, const uint8_t* u, const uint8_t* v, 
+                  uint8_t* rgb, uint32_t width, uint32_t height);
 };
 
 #endif // _GPAC_MINIMAL_H_
