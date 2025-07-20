@@ -38,7 +38,28 @@ std::vector<PlaylistQuality> ParseM3U8MasterPlaylist(
                     auto end = rest.find_first_of(L",\r\n");
                     qual.name = rest.substr(0, end);
                 } else {
-                    qual.name = L"unknown";
+                    // No RESOLUTION attribute - likely audio-only stream
+                    // Check if CODECS contains only audio codecs or other indicators
+                    size_t codecs_pos = line.find(L"CODECS=\"");
+                    bool is_audio_only = false;
+                    if (codecs_pos != std::wstring::npos) {
+                        auto codecs_rest = line.substr(codecs_pos + 8);
+                        auto codecs_end = codecs_rest.find(L"\"");
+                        auto codecs = codecs_rest.substr(0, codecs_end);
+                        // Common audio-only codec patterns
+                        if (codecs.find(L"mp4a") != std::wstring::npos && 
+                            codecs.find(L"avc") == std::wstring::npos && 
+                            codecs.find(L"hev") == std::wstring::npos) {
+                            is_audio_only = true;
+                        }
+                    }
+                    
+                    if (is_audio_only || res_pos == std::wstring::npos) {
+                        // No resolution attribute typically means audio-only
+                        qual.name = L"audio_only";
+                    } else {
+                        qual.name = L"unknown";
+                    }
                 }
             }
             last_inf = line;
