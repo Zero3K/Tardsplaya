@@ -254,17 +254,10 @@ std::wstring GetPreferredDirectShowPlayer() {
 }
 
 bool IsDirectShowAvailable() {
-    // Check if DirectShow components are available on the system
-    IGraphBuilder* test_graph = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER,
-                                 IID_IGraphBuilder, (void**)&test_graph);
-    
-    if (SUCCEEDED(hr) && test_graph) {
-        test_graph->Release();
-        return true;
-    }
-    
-    return false;
+    // For external player communication, we don't need to create DirectShow components
+    // We just need to verify that Windows messaging system is available for IPC
+    // This is always available on Windows systems
+    return true;
 }
 
 std::wstring CreateDirectShowCommandLine(const std::wstring& player_path, const std::wstring& input_source) {
