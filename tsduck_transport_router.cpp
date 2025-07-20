@@ -1025,6 +1025,33 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     } else {
                         if (log_callback_) {
                             log_callback_(L"[AD_MODE] ERROR: User quality '" + current_config_.user_quality + L"' not found in quality map");
+                            
+                            // Debug: Show what's actually in the quality map
+                            log_callback_(L"[AD_MODE] DEBUG: Available qualities in map:");
+                            for (const auto& pair : *current_config_.quality_to_url_map) {
+                                log_callback_(L"[AD_MODE] DEBUG:   '" + pair.first + L"' -> " + pair.second);
+                            }
+                            
+                            // Try case-insensitive search for user quality
+                            std::wstring user_lower = current_config_.user_quality;
+                            std::transform(user_lower.begin(), user_lower.end(), user_lower.begin(), ::towlower);
+                            
+                            bool found_case_insensitive = false;
+                            for (const auto& pair : *current_config_.quality_to_url_map) {
+                                std::wstring map_lower = pair.first;
+                                std::transform(map_lower.begin(), map_lower.end(), map_lower.begin(), ::towlower);
+                                
+                                if (map_lower == user_lower) {
+                                    log_callback_(L"[AD_MODE] Found user quality with case-insensitive match: '" + pair.first + L"'");
+                                    SwitchPlaylistURL(pair.second);
+                                    found_case_insensitive = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (!found_case_insensitive) {
+                                log_callback_(L"[AD_MODE] No case-insensitive match found either - staying on current quality");
+                            }
                         }
                     }
                 }
