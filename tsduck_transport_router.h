@@ -118,7 +118,7 @@ namespace tsduck_transport {
         void Reset();
         
         // Reset converter state for quality switch (preserves timing)
-        void ResetForQualitySwitch();
+        void ResetForQualitySwitch(bool switching_to_audio_only = false);
         
     private:
         uint16_t program_id_ = 1;
@@ -270,7 +270,7 @@ namespace tsduck_transport {
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
         
         // Switch to a new playlist URL (for ad-based quality switching)
-        void SwitchPlaylistURL(const std::wstring& new_url);
+        void SwitchPlaylistURL(const std::wstring& new_url, bool switching_to_audio_only = false);
         
         // TS routing thread - sends TS packets to media player
         void TSRouterThread(std::atomic<bool>& cancel_token);

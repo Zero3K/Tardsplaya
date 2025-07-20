@@ -329,9 +329,9 @@ void HLSToTSConverter::Reset() {
     detected_audio_pid_ = 0;
 }
 
-void HLSToTSConverter::ResetForQualitySwitch() {
-    // Only reset PAT/PMT flags and continuity, preserve timing information
-    // This prevents playback timing issues when switching between qualities
+void HLSToTSConverter::ResetForQualitySwitch(bool switching_to_audio_only) {
+    // Reset all state but use appropriate frame duration based on stream type
+    // This ensures clean timing synchronization after quality switches
     continuity_counter_ = 0;
     pat_sent_ = false;
     pmt_sent_ = false;
@@ -340,12 +340,19 @@ void HLSToTSConverter::ResetForQualitySwitch() {
     detected_video_pid_ = 0;
     detected_audio_pid_ = 0;
     
-    // DO NOT reset timing information:
-    // - Keep estimated_frame_duration_ to preserve playback timing
-    // - Keep global_frame_counter_ for continuity
-    // - Only reset segment_frame_counter_ for new segment numbering
+    // Reset frame counters but preserve global counter continuity
+    // Keep global_frame_counter_ to maintain overall stream continuity
     segment_frame_counter_ = 0;
     last_frame_time_ = std::chrono::steady_clock::now();
+    
+    // Set appropriate initial frame duration based on stream type
+    if (switching_to_audio_only) {
+        // Audio-only streams typically have longer frame intervals
+        estimated_frame_duration_ = std::chrono::milliseconds(100); // ~10fps equivalent for audio packets
+    } else {
+        // Video streams default to 30fps
+        estimated_frame_duration_ = std::chrono::milliseconds(33); // ~30fps
+    }
 }
 
 std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
@@ -1017,11 +1024,16 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     // Find the ad quality URL and switch to it
                     auto ad_url_it = current_config_.quality_to_url_map->find(current_config_.ad_mode_quality);
                     if (ad_url_it != current_config_.quality_to_url_map->end()) {
+                        // Determine if we're switching to audio-only quality
+                        bool is_audio_only = (current_config_.ad_mode_quality == L"audio_only" || 
+                                            current_config_.ad_mode_quality.find(L"audio") != std::wstring::npos);
+                        
                         // Actually switch to the ad quality URL
-                        SwitchPlaylistURL(ad_url_it->second);
+                        SwitchPlaylistURL(ad_url_it->second, is_audio_only);
                         
                         if (log_callback_) {
-                            log_callback_(L"[AD_MODE] Switched to ad URL: " + ad_url_it->second);
+                            log_callback_(L"[AD_MODE] Switched to ad URL: " + ad_url_it->second + 
+                                        (is_audio_only ? L" (audio-only)" : L" (video)"));
                         }
                     } else {
                         if (log_callback_) {
@@ -1041,11 +1053,16 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     // Find the user quality URL and switch back to it
                     auto user_url_it = current_config_.quality_to_url_map->find(current_config_.user_quality);
                     if (user_url_it != current_config_.quality_to_url_map->end()) {
+                        // User quality is typically video (false for audio-only)
+                        bool is_audio_only = (current_config_.user_quality == L"audio_only" || 
+                                            current_config_.user_quality.find(L"audio") != std::wstring::npos);
+                        
                         // Actually switch back to the user quality URL
-                        SwitchPlaylistURL(user_url_it->second);
+                        SwitchPlaylistURL(user_url_it->second, is_audio_only);
                         
                         if (log_callback_) {
-                            log_callback_(L"[AD_MODE] Switched back to user URL: " + user_url_it->second);
+                            log_callback_(L"[AD_MODE] Switched back to user URL: " + user_url_it->second +
+                                        (is_audio_only ? L" (audio-only)" : L" (video)"));
                         }
                     } else {
                         if (log_callback_) {
@@ -1068,7 +1085,9 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                                 
                                 if (map_lower == user_lower) {
                                     log_callback_(L"[AD_MODE] Found user quality with case-insensitive match: '" + pair.first + L"'");
-                                    SwitchPlaylistURL(pair.second);
+                                    bool is_audio_only = (pair.first == L"audio_only" || 
+                                                        pair.first.find(L"audio") != std::wstring::npos);
+                                    SwitchPlaylistURL(pair.second, is_audio_only);
                                     found_case_insensitive = true;
                                     break;
                                 }
@@ -1747,7 +1766,7 @@ void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
     }
 }
 
-void TransportStreamRouter::SwitchPlaylistURL(const std::wstring& new_url) {
+void TransportStreamRouter::SwitchPlaylistURL(const std::wstring& new_url, bool switching_to_audio_only) {
     if (log_callback_) {
         log_callback_(L"[URL_SWITCH] Switching playlist URL to: " + new_url);
     }
@@ -1766,9 +1785,10 @@ void TransportStreamRouter::SwitchPlaylistURL(const std::wstring& new_url) {
     
     // Use lighter reset for quality switches to preserve timing
     if (hls_converter_) {
-        hls_converter_->ResetForQualitySwitch();
+        hls_converter_->ResetForQualitySwitch(switching_to_audio_only);
         if (log_callback_) {
-            log_callback_(L"[URL_SWITCH] Reset converter for quality switch (preserved timing)");
+            std::wstring stream_type = switching_to_audio_only ? L"audio-only" : L"video";
+            log_callback_(L"[URL_SWITCH] Reset converter for quality switch (" + stream_type + L" stream)");
         }
     }
     
