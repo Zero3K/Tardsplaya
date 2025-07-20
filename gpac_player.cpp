@@ -73,34 +73,52 @@ bool GpacPlayer::Initialize(HWND parentWindow, const std::wstring& channelName) 
     LogMessage(L"Video window created successfully");
     
     // Update GPAC terminal with video window
-    LogMessage(L"Step 3: Updating GPAC terminal with video window...");
+    LogMessage(L"Step 3: Updating GPAC terminal with video window and audio...");
     if (m_terminal && m_videoWindow) {
+        // Initialize video renderer
         m_terminal->renderer = std::make_unique<SimpleVideoRenderer>();
         if (!m_terminal->renderer->Initialize(m_videoWindow, 800, 600)) {
             LogMessage(L"Warning: Failed to initialize video renderer, but continuing");
         } else {
             LogMessage(L"Video renderer initialized successfully");
-            
-            // Set up video callback to trigger rendering
-            if (m_terminal->session->ts_parser) {
-                LogMessage(L"Setting up video and audio callbacks...");
-                m_terminal->session->ts_parser->SetVideoCallback(
-                    [this](const uint8_t* data, size_t size, uint32_t width, uint32_t height) {
-                        if (m_terminal->renderer) {
-                            m_terminal->renderer->RenderFrame(data, size, width, height);
-                        }
+        }
+        
+        // Initialize audio renderer
+        if (m_terminal->session->audio_renderer) {
+            if (!m_terminal->session->audio_renderer->Initialize(m_videoWindow, 48000, 2)) {
+                LogMessage(L"Warning: Failed to initialize audio renderer, but continuing");
+            } else {
+                LogMessage(L"Audio renderer initialized successfully");
+            }
+        }
+        
+        // Set up video and audio callbacks
+        if (m_terminal->session->ts_parser) {
+            LogMessage(L"Setting up video and audio callbacks...");
+            m_terminal->session->ts_parser->SetVideoCallback(
+                [this](const uint8_t* data, size_t size, uint32_t width, uint32_t height) {
+                    if (m_terminal->renderer) {
+                        m_terminal->renderer->RenderFrame(data, size, width, height);
                     }
-                );
-                
-                m_terminal->session->ts_parser->SetAudioCallback(
-                    [this](const uint8_t* data, size_t size, uint32_t sampleRate, uint32_t channels) {
-                        // Audio processing placeholder
-                        LogMessage(std::wstring(L"Audio frame received: ") + std::to_wstring(size) + std::wstring(L" bytes, ") + 
+                }
+            );
+            
+            m_terminal->session->ts_parser->SetAudioCallback(
+                [this](const uint8_t* data, size_t size, uint32_t sampleRate, uint32_t channels) {
+                    // Process audio through the audio renderer
+                    if (m_terminal->session->audio_renderer) {
+                        m_terminal->session->audio_renderer->PlayAudioData(data, size, sampleRate, channels);
+                    }
+                    
+                    static int audioCounter = 0;
+                    if (++audioCounter % 50 == 0) { // Log every 50th audio frame to avoid spam
+                        LogMessage(std::wstring(L"Audio frame #") + std::to_wstring(audioCounter / 50) + 
+                                  std::wstring(L": ") + std::to_wstring(size) + std::wstring(L" bytes, ") + 
                                   std::to_wstring(sampleRate) + std::wstring(L"Hz, ") + std::to_wstring(channels) + std::wstring(L" channels"));
                     }
-                );
-                LogMessage(L"Video and audio callbacks set up successfully");
-            }
+                }
+            );
+            LogMessage(L"Video and audio callbacks set up successfully");
         }
     }
     
@@ -365,7 +383,7 @@ bool GpacPlayer::InitializeGpac() {
         }
         LogMessage(L"MPEG-TS demux filter created");
         
-        // Note: Video renderer will be initialized after video window is created
+        // Note: Video and audio renderers will be initialized after video window is created
         
         m_terminal->initialized = true;
         
@@ -392,6 +410,12 @@ void GpacPlayer::CleanupGpac() {
         }
         
         if (m_terminal->session) {
+            // Clean up audio renderer
+            if (m_terminal->session->audio_renderer) {
+                m_terminal->session->audio_renderer->Shutdown();
+                m_terminal->session->audio_renderer.reset();
+            }
+            
             GpacMinimal::DeleteSession(m_terminal->session);
             m_terminal->session = nullptr;
         }

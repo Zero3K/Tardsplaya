@@ -13,15 +13,23 @@
 #include <memory>
 #include <functional>
 #include <map>
+#include <mmsystem.h>
+#include <dsound.h>
+
+#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "dsound.lib")
+#pragma comment(lib, "dxguid.lib")
 
 // Forward declarations for minimal GPAC types - actual definitions below
 class MpegTsParser;
 class SimpleVideoRenderer;
+class SimpleAudioRenderer;
 
 // Actual structure definitions
 struct GF_FilterSession {
     std::unique_ptr<MpegTsParser> ts_parser;
     std::unique_ptr<SimpleVideoRenderer> video_renderer;
+    std::unique_ptr<SimpleAudioRenderer> audio_renderer;
     HWND video_window;
     bool has_video_output;
     bool has_audio_output;
@@ -167,6 +175,32 @@ private:
     uint16_t GetPID(const uint8_t* packet);
     bool ValidatePacket(const uint8_t* packet);
     void ProcessPES(uint16_t pid, const uint8_t* data, size_t size);
+};
+
+// Simple audio renderer for Windows DirectSound
+class SimpleAudioRenderer {
+public:
+    SimpleAudioRenderer();
+    ~SimpleAudioRenderer();
+    
+    bool Initialize(HWND hwnd, uint32_t sampleRate = 48000, uint32_t channels = 2);
+    void Shutdown();
+    
+    bool PlayAudioData(const uint8_t* data, size_t size, uint32_t sampleRate, uint32_t channels);
+    void SetVolume(float volume); // 0.0 to 1.0
+    
+private:
+    LPDIRECTSOUND8 m_dsound;
+    LPDIRECTSOUNDBUFFER8 m_buffer;
+    HWND m_hwnd;
+    uint32_t m_sampleRate;
+    uint32_t m_channels;
+    uint32_t m_bufferSize;
+    uint32_t m_writePos;
+    bool m_initialized;
+    
+    bool CreateAudioBuffer();
+    void DestroyAudioBuffer();
 };
 
 // Simple video renderer for Windows
