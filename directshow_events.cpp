@@ -3,6 +3,7 @@
 #include <thread>
 #include <chrono>
 #include <algorithm>
+#include <vector>
 
 // External debug logging function
 extern void AddDebugLog(const std::wstring& msg);

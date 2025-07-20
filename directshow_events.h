@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <atomic>
+#include <thread>
 
 #pragma comment(lib, "strmiids.lib")
 #pragma comment(lib, "quartz.lib")
