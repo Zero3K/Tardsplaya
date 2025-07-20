@@ -50,6 +50,8 @@ namespace tsduck_hls {
         int64_t GetMediaSequence() const { return media_sequence_; }
         
         // Enhanced ad detection using TSDuck-style SCTE-35 analysis
+        bool DetectAdStart(const MediaSegment& segment) const;
+        bool DetectAdEnd(const MediaSegment& segment) const;
 
         
         // Calculate optimal buffer size based on segment analysis

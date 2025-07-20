@@ -228,4 +228,13 @@ bool BufferingOptimizer::ShouldFlushBuffer(const MediaSegment& current, const Me
     return next.has_discontinuity;
 }
 
+// Ad detection methods implementation
+bool PlaylistParser::DetectAdStart(const MediaSegment& segment) const {
+    return segment.has_scte35_out;
+}
+
+bool PlaylistParser::DetectAdEnd(const MediaSegment& segment) const {
+    return segment.has_scte35_in;
+}
+
 } // namespace tsduck_hls

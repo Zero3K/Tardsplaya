@@ -16,7 +16,13 @@ std::thread StartStreamThread(
     size_t tab_index,
     const std::wstring& selected_quality,
     StreamingMode mode,
-    HANDLE* player_process_handle
+    HANDLE* player_process_handle,
+    // Ad-based quality switching parameters
+    std::atomic<bool>* is_in_ad_mode,
+    const std::wstring& ad_mode_quality,
+    std::atomic<bool>* needs_switch_to_ad,
+    std::atomic<bool>* needs_switch_to_user,
+    const std::map<std::wstring, std::wstring>* quality_to_url_map
 ) {
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
@@ -35,7 +41,8 @@ std::thread StartStreamThread(
         }
         
         return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
-                                         base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle);
+                                         base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle,
+                                         is_in_ad_mode, ad_mode_quality, needs_switch_to_ad, needs_switch_to_user, quality_to_url_map);
     }
     
     // Use traditional HLS streaming
@@ -84,7 +91,13 @@ std::thread StartTransportStreamThread(
     std::atomic<int>* chunk_count,
     HWND main_window,
     size_t tab_index,
-    HANDLE* player_process_handle
+    HANDLE* player_process_handle,
+    // Ad-based quality switching parameters
+    std::atomic<bool>* is_in_ad_mode,
+    const std::wstring& ad_mode_quality,
+    std::atomic<bool>* needs_switch_to_ad,
+    std::atomic<bool>* needs_switch_to_user,
+    const std::map<std::wstring, std::wstring>* quality_to_url_map
 ) {
     return std::thread([=, &cancel_token]() mutable {
         if (log_callback)
@@ -114,6 +127,13 @@ std::thread StartTransportStreamThread(
             config.max_segments_to_buffer = 2;  // Only buffer latest 2 segments
             config.playlist_refresh_interval = std::chrono::milliseconds(500);  // Check every 500ms
             config.skip_old_segments = true;
+            
+            // Configure ad-based quality switching
+            config.is_in_ad_mode = is_in_ad_mode;
+            config.ad_mode_quality = ad_mode_quality;
+            config.needs_switch_to_ad = needs_switch_to_ad;
+            config.needs_switch_to_user = needs_switch_to_user;
+            config.quality_to_url_map = quality_to_url_map;
             
             if (log_callback) {
                 log_callback(L"[TS_MODE] Starting TSDuck transport stream routing");

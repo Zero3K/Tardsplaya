@@ -34,7 +34,13 @@ std::thread StartStreamThread(
     size_t tab_index = 0,
     const std::wstring& selected_quality = L"",
     StreamingMode mode = StreamingMode::TRANSPORT_STREAM,
-    HANDLE* player_process_handle = nullptr
+    HANDLE* player_process_handle = nullptr,
+    // Ad-based quality switching parameters
+    std::atomic<bool>* is_in_ad_mode = nullptr,
+    const std::wstring& ad_mode_quality = L"",
+    std::atomic<bool>* needs_switch_to_ad = nullptr,
+    std::atomic<bool>* needs_switch_to_user = nullptr,
+    const std::map<std::wstring, std::wstring>* quality_to_url_map = nullptr
 );
 
 // Start TSDuck transport stream routing (alternative to traditional HLS streaming)
@@ -48,5 +54,11 @@ std::thread StartTransportStreamThread(
     std::atomic<int>* chunk_count = nullptr,
     HWND main_window = nullptr,
     size_t tab_index = 0,
-    HANDLE* player_process_handle = nullptr
+    HANDLE* player_process_handle = nullptr,
+    // Ad-based quality switching parameters
+    std::atomic<bool>* is_in_ad_mode = nullptr,
+    const std::wstring& ad_mode_quality = L"",
+    std::atomic<bool>* needs_switch_to_ad = nullptr,
+    std::atomic<bool>* needs_switch_to_user = nullptr,
+    const std::map<std::wstring, std::wstring>* quality_to_url_map = nullptr
 );

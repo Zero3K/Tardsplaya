@@ -173,6 +173,13 @@ namespace tsduck_transport {
             size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
             std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
             bool skip_old_segments = true;  // Skip older segments when catching up
+            
+            // Ad-based quality switching parameters
+            std::atomic<bool>* is_in_ad_mode = nullptr;
+            std::wstring ad_mode_quality = L"";
+            std::atomic<bool>* needs_switch_to_ad = nullptr;
+            std::atomic<bool>* needs_switch_to_user = nullptr;
+            const std::map<std::wstring, std::wstring>* quality_to_url_map = nullptr;
         };
         
         // Start routing HLS stream to media player via transport stream

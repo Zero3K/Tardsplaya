@@ -46,6 +46,13 @@ struct StreamTab {
     bool playerStarted = false; // Track if player has started successfully
     HANDLE playerProcess = nullptr; // Store player process handle for cleanup
     std::atomic<int> chunkCount{0}; // Track actual chunk queue size
+    
+    // Ad-based quality switching fields
+    std::atomic<bool> isInAdMode{false}; // Track if currently playing ads
+    std::wstring userSelectedQuality; // User's original quality selection
+    std::wstring adModeQuality; // Quality to use during ads (lowest available)
+    std::atomic<bool> needsQualitySwitchToAd{false}; // Signal to switch to ad quality
+    std::atomic<bool> needsQualitySwitchToUser{false}; // Signal to switch back to user quality
 
     // Make the struct movable but not copyable
     StreamTab() : hChild(nullptr), hQualities(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr) {};
@@ -67,6 +74,11 @@ struct StreamTab {
         , playerStarted(other.playerStarted)
         , playerProcess(other.playerProcess)
         , chunkCount(other.chunkCount.load())
+        , isInAdMode(other.isInAdMode.load())
+        , userSelectedQuality(std::move(other.userSelectedQuality))
+        , adModeQuality(std::move(other.adModeQuality))
+        , needsQualitySwitchToAd(other.needsQualitySwitchToAd.load())
+        , needsQualitySwitchToUser(other.needsQualitySwitchToUser.load())
     {
         // Note: With vector capacity reservation, moves should not happen during normal operation
         // This move constructor exists for completeness but should not be called for active streams
@@ -105,6 +117,11 @@ struct StreamTab {
             playerStarted = other.playerStarted;
             playerProcess = other.playerProcess;
             chunkCount = other.chunkCount.load();
+            isInAdMode = other.isInAdMode.load();
+            userSelectedQuality = std::move(other.userSelectedQuality);
+            adModeQuality = std::move(other.adModeQuality);
+            needsQualitySwitchToAd = other.needsQualitySwitchToAd.load();
+            needsQualitySwitchToUser = other.needsQualitySwitchToUser.load();
             
             other.hChild = nullptr;
             other.hQualities = nullptr;
@@ -895,7 +912,36 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     }
     
     std::wstring url = it->second;
+    
+    // Store user's selected quality for ad switching
+    tab.userSelectedQuality = originalQuality;
+    tab.isInAdMode = false;
+    tab.needsQualitySwitchToAd = false;
+    tab.needsQualitySwitchToUser = false;
+    
+    // Find the lowest quality for ad mode (prefer audio_only, then lowest resolution)
+    std::wstring adQuality;
+    for (const auto& q : tab.qualities) {
+        if (q.find(L"audio") != std::wstring::npos || q.find(L"Audio") != std::wstring::npos) {
+            adQuality = q;
+            break;
+        }
+    }
+    if (adQuality.empty() && !tab.qualities.empty()) {
+        // If no audio-only, use the last quality (typically lowest)
+        adQuality = tab.qualities.back();
+    }
+    
+    // Find original quality for ad mode
+    auto adMappingIt = tab.standardToOriginalQuality.find(adQuality);
+    if (adMappingIt != tab.standardToOriginalQuality.end()) {
+        tab.adModeQuality = adMappingIt->second;
+    } else {
+        tab.adModeQuality = adQuality;
+    }
+    
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L") with Frame Number Tagging");
+    AddDebugLog(L"Ad mode quality set to: " + tab.adModeQuality);
     
     // Log current stream status for debugging multi-stream issues
     int active_streams = 0;
@@ -944,7 +990,13 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         tabIndex, // tab index for identifying which stream to auto-stop
         originalQuality, // selected quality for ad recovery
         mode, // streaming mode (HLS or Transport Stream)
-        &tab.playerProcess // player process handle for monitoring
+        &tab.playerProcess, // player process handle for monitoring
+        // Ad-based quality switching parameters
+        &tab.isInAdMode,
+        tab.adModeQuality,
+        &tab.needsQualitySwitchToAd,
+        &tab.needsQualitySwitchToUser,
+        &tab.qualityToUrl
     );
     
     AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));

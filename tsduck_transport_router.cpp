@@ -837,8 +837,61 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             if (playlist_parser.ParsePlaylist(playlist_content)) {
                 // Extract segment URLs from parsed playlist
                 auto segments = playlist_parser.GetSegments();
+                
+                // Check for ad transitions using SCTE-35 markers
+                bool ad_start_detected = false;
+                bool ad_end_detected = false;
+                
                 for (const auto& segment : segments) {
+                    if (playlist_parser.DetectAdStart(segment)) {
+                        ad_start_detected = true;
+                        if (log_callback_) {
+                            log_callback_(L"[AD_DETECTION] SCTE-35 ad start detected");
+                        }
+                    }
+                    if (playlist_parser.DetectAdEnd(segment)) {
+                        ad_end_detected = true;
+                        if (log_callback_) {
+                            log_callback_(L"[AD_DETECTION] SCTE-35 ad end detected");
+                        }
+                    }
                     segment_urls.push_back(segment.url);
+                }
+                
+                // Handle ad state transitions
+                if (current_config_.is_in_ad_mode && current_config_.needs_switch_to_ad && 
+                    current_config_.needs_switch_to_user && current_config_.quality_to_url_map) {
+                    
+                    bool currently_in_ad = current_config_.is_in_ad_mode->load();
+                    
+                    if (ad_start_detected && !currently_in_ad) {
+                        // Switching to ad mode
+                        current_config_.is_in_ad_mode->store(true);
+                        current_config_.needs_switch_to_ad->store(true);
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[AD_MODE] Switching to ad quality: " + current_config_.ad_mode_quality);
+                        }
+                        
+                        // Find the ad quality URL and switch to it
+                        auto ad_url_it = current_config_.quality_to_url_map->find(current_config_.ad_mode_quality);
+                        if (ad_url_it != current_config_.quality_to_url_map->end()) {
+                            // Here we would need to restart the stream with the ad quality URL
+                            // For now, we'll just log the action
+                            if (log_callback_) {
+                                log_callback_(L"[AD_MODE] Would switch to URL: " + ad_url_it->second);
+                            }
+                        }
+                    }
+                    else if (ad_end_detected && currently_in_ad) {
+                        // Switching back to user quality
+                        current_config_.is_in_ad_mode->store(false);
+                        current_config_.needs_switch_to_user->store(true);
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[AD_MODE] Switching back to user quality");
+                        }
+                    }
                 }
                 
                 // Check for discontinuities that indicate ad transitions
