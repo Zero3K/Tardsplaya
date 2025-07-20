@@ -65,14 +65,14 @@ public:
 private:
     WebConfig config_;
     std::atomic<bool> initialized_{false};
-    std::atomic<bool> available_{false};
+    mutable std::atomic<bool> available_{false};
     mutable std::chrono::steady_clock::time_point last_check_time_;
     mutable std::chrono::milliseconds check_interval_{5000}; // Check availability every 5 seconds
     
     // HTTP communication
     bool SendHTTPCommand(const std::wstring& command, std::wstring& response) const;
-    bool SendHTTPRequest(const std::wstring& path, const std::wstring& method = L"GET", 
-                        const std::wstring& data = L"", std::wstring& response) const;
+    bool SendHTTPRequest(const std::wstring& path, const std::wstring& method, 
+                        const std::wstring& data, std::wstring& response) const;
     
     // Response parsing
     PlayerState ParsePlayerState(const std::wstring& response) const;
