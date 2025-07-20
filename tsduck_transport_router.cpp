@@ -858,8 +858,12 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     // Reset frame statistics to prevent false drop alerts after discontinuity
                     ResetFrameStatistics();
                     
+                    // VirtualDub2-style discontinuity handling: wait for keyframe to prevent black frames
+                    SetWaitForKeyframe();
+                    
                     if (log_callback_) {
                         log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
+                        log_callback_(L"[KEYFRAME_WAIT] Waiting for keyframe after discontinuity to prevent black frames");
                     }
                     
                     // For fast restart, only process the newest segments
@@ -1110,6 +1114,14 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             std::chrono::milliseconds(50);    // Standard timeout
             
         if (ts_buffer_->GetNextPacket(packet, packet_timeout)) {
+            // Check for packet-level discontinuity flag (from TS packet headers)
+            if (packet.discontinuity) {
+                if (log_callback_) {
+                    log_callback_(L"[DISCONTINUITY] Packet-level discontinuity detected - waiting for keyframe");
+                }
+                SetWaitForKeyframe();
+            }
+            
             // Frame Number Tagging: Track frame statistics
             if (packet.frame_number > 0) {
                 // Check for frame drops or duplicates
@@ -1174,6 +1186,16 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                     
                     last_video_packet_time_ = now;
                 }
+            }
+            
+            // VirtualDub2-style discontinuity handling: check if we should skip this frame
+            if (ShouldSkipFrame(packet)) {
+                // Skip this frame - continue to next packet without sending to player
+                if (log_callback_ && keyframe_wait_counter_.load() <= 5) { // Only log first few skips
+                    log_callback_(L"[KEYFRAME_WAIT] Skipping non-keyframe packet (frame #" + 
+                                 std::to_wstring(packet.frame_number) + L")");
+                }
+                continue; // Skip sending this packet to the player
             }
             
             if (!SendTSPacketToPlayer(player_stdin, packet)) {
@@ -1528,6 +1550,60 @@ void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
         }
         last_health_check = now;
     }
+}
+
+// VirtualDub2-style discontinuity handling methods
+void TransportStreamRouter::SetWaitForKeyframe() {
+    wait_for_keyframe_ = true;
+    keyframe_wait_counter_ = 0;
+    
+    if (log_callback_) {
+        log_callback_(L"[KEYFRAME_WAIT] Activated keyframe waiting mode (max 30 frames)");
+    }
+}
+
+bool TransportStreamRouter::ShouldSkipFrame(const TSPacket& packet) {
+    // If we're not waiting for a keyframe, don't skip anything
+    if (!wait_for_keyframe_.load()) {
+        return false;
+    }
+    
+    // Increment the wait counter for this frame
+    int current_wait = keyframe_wait_counter_.fetch_add(1) + 1;
+    
+    // Check if this is a keyframe (I-frame)
+    if (packet.is_key_frame) {
+        // Found keyframe! Stop waiting
+        wait_for_keyframe_ = false;
+        keyframe_wait_counter_ = 0;
+        
+        if (log_callback_) {
+            log_callback_(L"[KEYFRAME_WAIT] Found keyframe after " + std::to_wstring(current_wait) + 
+                         L" frames - resuming normal playback");
+        }
+        
+        return false; // Don't skip this keyframe
+    }
+    
+    // Check timeout (30 frames max, like VirtualDub2)
+    if (current_wait >= 30) {
+        // Timeout reached, stop waiting and resume normal playback
+        wait_for_keyframe_ = false;
+        keyframe_wait_counter_ = 0;
+        
+        if (log_callback_) {
+            log_callback_(L"[KEYFRAME_WAIT] Timeout reached (30 frames) - resuming playback without keyframe");
+        }
+        
+        return false; // Don't skip this frame, resume normal playback
+    }
+    
+    // We're still waiting for a keyframe and haven't timed out
+    if (log_callback_ && (current_wait % 5 == 0)) { // Log every 5 frames to avoid spam
+        log_callback_(L"[KEYFRAME_WAIT] Still waiting for keyframe (" + std::to_wstring(current_wait) + L"/30 frames)");
+    }
+    
+    return true; // Skip this frame
 }
 
 

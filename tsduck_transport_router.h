@@ -244,6 +244,10 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_video_packet_time_;
         std::chrono::steady_clock::time_point last_audio_packet_time_;
         
+        // VirtualDub2-style discontinuity handling state
+        std::atomic<bool> wait_for_keyframe_{false};  // Flag to indicate we're waiting for a keyframe
+        std::atomic<int> keyframe_wait_counter_{0};   // Counter for frames waited (max 30)
+        
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
         
@@ -252,6 +256,10 @@ namespace tsduck_transport {
         
         // Reset frame statistics (for discontinuities)
         void ResetFrameStatistics();
+        
+        // VirtualDub2-style discontinuity handling methods
+        void SetWaitForKeyframe();         // Set waiting state after discontinuity
+        bool ShouldSkipFrame(const TSPacket& packet);  // Check if frame should be skipped
         
         // Video stream health monitoring
         bool IsVideoStreamHealthy() const;
