@@ -318,15 +318,21 @@ void HLSToTSConverter::Reset() {
     pat_sent_ = false;
     pmt_sent_ = false;
     
-    // Frame Number Tagging: Reset frame counters
-    global_frame_counter_ = 0;
+    // Frame Number Tagging: Only reset segment counter, preserve global counter for continuity
+    // Global frame counter should persist across segments to maintain frame numbering consistency
     segment_frame_counter_ = 0;
     last_frame_time_ = std::chrono::steady_clock::now();
-    estimated_frame_duration_ = std::chrono::milliseconds(33); // Reset to default ~30fps
+    estimated_frame_duration_ = std::chrono::milliseconds(33); // Default ~30fps
     
     // Reset stream type detection
     detected_video_pid_ = 0;
     detected_audio_pid_ = 0;
+}
+
+void HLSToTSConverter::ResetGlobalFrameCounter() {
+    // Reset global frame counter only for completely new streams
+    global_frame_counter_ = 0;
+    segment_frame_counter_ = 0;
 }
 
 std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
@@ -386,23 +392,23 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         // Detect and classify stream types (video/audio)
         DetectStreamTypes(packet);
         
-        // Frame Number Tagging: Assign frame numbers for video packets
-        if (packet.is_video_packet || packet.payload_unit_start) {
-            // Increment frame counters for video packets or new payload units
+        // Frame Number Tagging: Assign frame numbers only for new video frames
+        // Only count actual frame boundaries, not every video packet
+        bool is_new_frame = false;
+        if (packet.payload_unit_start && packet.is_video_packet) {
+            // This is the start of a new video frame
             global_frame_counter_++;
             segment_frame_counter_++;
+            is_new_frame = true;
             
-            // Estimate frame duration based on timing
-            auto now = std::chrono::steady_clock::now();
-            auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_frame_time_);
-            if (time_since_last.count() > 0 && segment_frame_counter_ > 1) {
-                estimated_frame_duration_ = time_since_last;
-            }
-            last_frame_time_ = now;
+            // Use consistent frame duration instead of wall clock time
+            // HLS streams typically use 30fps or 60fps, but wall clock timing is unreliable
+            // during segment processing which can take variable time due to network/processing delays
+            estimated_frame_duration_ = std::chrono::milliseconds(33); // Stable 30fps timing
             
             // Check for key frame indicators in the payload
             bool is_key_frame = false;
-            if (packet.payload_unit_start && packet.is_video_packet && packet.data[4] == 0x00) {
+            if (packet.data[4] == 0x00) {
                 // Look for MPEG start codes that might indicate I-frames
                 if (offset + TS_PACKET_SIZE + 8 < data_size) {
                     const uint8_t* payload = data_ptr + offset + 4;
@@ -425,15 +431,18 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
                 }
             }
             
-            // Set frame information
+            // Set frame information for new frames
             packet.SetFrameInfo(global_frame_counter_, segment_frame_counter_, is_key_frame, estimated_frame_duration_);
-            
-            // Set video-specific information for video packets
-            if (packet.is_video_packet) {
-                packet.SetVideoInfo(global_frame_counter_, true, false);
-            } else if (packet.is_audio_packet) {
-                packet.SetVideoInfo(0, false, true);
-            }
+        } else {
+            // For non-frame-start packets, use current frame number
+            packet.SetFrameInfo(global_frame_counter_, segment_frame_counter_, false, estimated_frame_duration_);
+        }
+        
+        // Set video-specific information for all packets
+        if (packet.is_video_packet) {
+            packet.SetVideoInfo(global_frame_counter_, true, false);
+        } else if (packet.is_audio_packet) {
+            packet.SetVideoInfo(0, false, true);
         }
         
         // Don't modify continuity counters - preserve original TS packet timing and sequencing
@@ -698,6 +707,7 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     routing_active_ = true;
     
     // Reset converter and buffer
+    hls_converter_->ResetGlobalFrameCounter(); // Reset global counter for new stream
     hls_converter_->Reset();
     ts_buffer_->Reset(); // This will clear packets and reset producer_active
     ts_buffer_->SetLowLatencyMode(config.low_latency_mode); // Configure buffer for latency mode
@@ -852,7 +862,8 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     // Clear buffer immediately for fast restart after ad break
                     ts_buffer_->Clear();
                     
-                    // Reset frame numbering to prevent frame drop false positives
+                    // Reset segment numbering but preserve global frame counter for continuity
+                    // Don't reset global frame counter during discontinuities - only reset segment state
                     hls_converter_->Reset();
                     
                     // Reset frame statistics to prevent false drop alerts after discontinuity

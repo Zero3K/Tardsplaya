@@ -116,6 +116,9 @@ namespace tsduck_transport {
         // Reset converter state for new stream
         void Reset();
         
+        // Reset global frame counter for completely new streams (not discontinuities)
+        void ResetGlobalFrameCounter();
+        
     private:
         uint16_t program_id_ = 1;
         uint16_t pmt_pid_ = 0x1000;
