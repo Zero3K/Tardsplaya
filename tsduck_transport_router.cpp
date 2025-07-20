@@ -850,6 +850,28 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         log_callback_(L"[DISCONTINUITY] Detected ad transition - implementing fast restart");
                     }
                     
+                    // Use MPC-HC web interface for discontinuity recovery if available
+                    if (mpc_web_interface_ && mpc_web_interface_->IsAvailable()) {
+                        if (log_callback_) {
+                            log_callback_(L"[DISCONTINUITY] Attempting MPC-HC web interface recovery");
+                        }
+                        
+                        bool recovery_success = mpc_web_interface_->HandleDiscontinuity();
+                        if (recovery_success) {
+                            if (log_callback_) {
+                                log_callback_(L"[DISCONTINUITY] MPC-HC web interface recovery successful");
+                            }
+                        } else {
+                            if (log_callback_) {
+                                log_callback_(L"[DISCONTINUITY] MPC-HC web interface recovery failed, continuing with buffer clear");
+                            }
+                        }
+                    } else {
+                        if (log_callback_) {
+                            log_callback_(L"[DISCONTINUITY] No web interface available, using buffer clear only");
+                        }
+                    }
+                    
                     // Clear buffer immediately for fast restart after ad break
                     ts_buffer_->Clear();
                     
@@ -1308,6 +1330,28 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
         }
         log_callback_(L"[TS_ROUTER] Set " + priority_name + L" priority for media player, active streams: " + 
                      std::to_wstring(resource_manager.GetActiveStreamCount()));
+    }
+    
+    // Initialize MPC-HC web interface for discontinuity handling if applicable
+    if (IsMPCHC(config.player_path)) {
+        if (log_callback_) {
+            log_callback_(L"[TS_ROUTER] Initializing MPC-HC web interface for discontinuity recovery");
+        }
+        
+        // Give MPC-HC time to start up and enable web interface
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        
+        mpc_web_interface_ = CreateMPCWebInterface(config.player_path);
+        if (mpc_web_interface_ && mpc_web_interface_->IsAvailable()) {
+            if (log_callback_) {
+                log_callback_(L"[TS_ROUTER] MPC-HC web interface successfully initialized");
+            }
+        } else {
+            if (log_callback_) {
+                log_callback_(L"[TS_ROUTER] MPC-HC web interface not available, using traditional streaming");
+            }
+            mpc_web_interface_.reset(); // Clear the pointer if not available
+        }
     }
     
     // Cleanup
