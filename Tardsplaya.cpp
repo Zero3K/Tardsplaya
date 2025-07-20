@@ -397,6 +397,12 @@ void CheckVersion() {
     MessageBoxW(g_hMainWnd, L"Tardsplaya Version 1.0\nTwitch Stream Player", L"Version", MB_OK);
 }
 
+void UpdateStatusBar(const std::wstring& text) {
+    if (g_hStatusBar) {
+        SetWindowTextW(g_hStatusBar, text.c_str());
+    }
+}
+
 void OnAdSkippingToggle() {
     // Get the current checkbox state
     bool adSkippingEnabled = (SendMessage(g_hAdSkippingCheck, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -412,12 +418,6 @@ void OnAdSkippingToggle() {
     
     // The actual ad skipping configuration will be applied when starting a stream
     // This is handled in the StartStream function when creating the TransportStreamRouter config
-}
-
-void UpdateStatusBar(const std::wstring& text) {
-    if (g_hStatusBar) {
-        SetWindowTextW(g_hStatusBar, text.c_str());
-    }
 }
 
 std::string WideToUtf8(const std::wstring& w) {
