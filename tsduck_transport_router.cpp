@@ -655,6 +655,10 @@ TransportStreamRouter::TransportStreamRouter() {
     last_frame_time_ = std::chrono::steady_clock::now();
     stream_start_time_ = std::chrono::steady_clock::now();
     
+    // Initialize discontinuity-based ad detection state
+    last_discontinuity_time_ = std::chrono::steady_clock::now();
+    has_recent_discontinuity_ = false;
+    
     // Initialize video/audio stream tracking
     video_packets_processed_ = 0;
     audio_packets_processed_ = 0;
@@ -867,42 +871,54 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 // Extract segment URLs from parsed playlist
                 auto segments = playlist_parser.GetSegments();
                 
-                // Check for ad transitions using SCTE-35 markers
+                // Check for ad transitions using discontinuity detection
                 bool ad_start_detected = false;
                 bool ad_end_detected = false;
                 
                 // Debug: Log segment count and ad detection status
                 if (log_callback_ && segments.size() > 0) {
-                    log_callback_(L"[AD_DEBUG] Checking " + std::to_wstring(segments.size()) + L" segments for SCTE-35 markers");
+                    log_callback_(L"[AD_DEBUG] Checking " + std::to_wstring(segments.size()) + L" segments for discontinuities");
                 }
+                
+                // Check current time for ad end detection
+                auto now = std::chrono::steady_clock::now();
+                bool has_discontinuity_in_batch = false;
                 
                 for (const auto& segment : segments) {
                     if (playlist_parser.DetectAdStart(segment)) {
                         ad_start_detected = true;
+                        has_discontinuity_in_batch = true;
+                        last_discontinuity_time_ = now;
+                        has_recent_discontinuity_ = true;
+                        
                         if (log_callback_) {
-                            log_callback_(L"[AD_DETECTION] SCTE-35 ad start detected in segment: " + segment.url);
+                            log_callback_(L"[AD_DETECTION] Discontinuity detected in segment: " + segment.url);
                         }
-                    }
-                    if (playlist_parser.DetectAdEnd(segment)) {
-                        ad_end_detected = true;
-                        if (log_callback_) {
-                            log_callback_(L"[AD_DETECTION] SCTE-35 ad end detected in segment: " + segment.url);
-                        }
-                    }
-                    
-                    // Debug: Log if segment has discontinuity but no SCTE-35 markers
-                    if (segment.has_discontinuity && !segment.has_scte35_out && !segment.has_scte35_in && log_callback_) {
-                        log_callback_(L"[AD_DEBUG] Discontinuity without SCTE-35 markers in segment: " + segment.url);
                     }
                     
                     segment_urls.push_back(segment.url);
+                }
+                
+                // Check if we should end ad mode (no discontinuities for timeout period)
+                if (has_recent_discontinuity_ && !has_discontinuity_in_batch) {
+                    auto time_since_last_discontinuity = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_discontinuity_time_);
+                    if (time_since_last_discontinuity >= discontinuity_timeout_) {
+                        ad_end_detected = true;
+                        has_recent_discontinuity_ = false;
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[AD_DETECTION] Ad end detected - no discontinuities for " + 
+                                        std::to_wstring(time_since_last_discontinuity.count()) + L"ms");
+                        }
+                    }
                 }
                 
                 // Debug: Log overall ad detection result
                 if (log_callback_ && segments.size() > 0) {
                     log_callback_(L"[AD_DEBUG] Ad detection complete - Start: " + 
                                 std::wstring(ad_start_detected ? L"YES" : L"NO") + L", End: " + 
-                                std::wstring(ad_end_detected ? L"YES" : L"NO"));
+                                std::wstring(ad_end_detected ? L"YES" : L"NO") + 
+                                L", Recent discontinuity: " + std::wstring(has_recent_discontinuity_ ? L"YES" : L"NO"));
                 }
                 
                 // Handle ad state transitions

@@ -720,6 +720,61 @@ std::vector<std::wstring> SortQualities(const std::vector<std::wstring>& qualiti
     return sorted;
 }
 
+// Find a quality that is lower than the specified user quality
+std::wstring FindLowerQuality(const std::wstring& userQuality, const std::vector<std::wstring>& availableQualities) {
+    // Define quality order (highest to lowest)
+    std::vector<std::wstring> order = {
+        L"1080p60", L"720p60", L"720p", L"480p", L"360p", L"160p", L"audio_only"
+    };
+    
+    // Standardize the user quality
+    std::wstring standardUserQuality = StandardizeQualityName(userQuality);
+    
+    // Find the index of user's quality in the order
+    int userQualityIndex = -1;
+    for (int i = 0; i < order.size(); i++) {
+        if (order[i] == standardUserQuality) {
+            userQualityIndex = i;
+            break;
+        }
+    }
+    
+    // If user quality not found in standard order, fall back to lowest available
+    if (userQualityIndex == -1) {
+        // Find the lowest quality available
+        for (int i = order.size() - 1; i >= 0; i--) {
+            for (const auto& quality : availableQualities) {
+                if (StandardizeQualityName(quality) == order[i]) {
+                    return quality;
+                }
+            }
+        }
+        // If no standard quality found, return first available
+        return availableQualities.empty() ? L"" : availableQualities[0];
+    }
+    
+    // Find the next lower quality that is available
+    for (int i = userQualityIndex + 1; i < order.size(); i++) {
+        for (const auto& quality : availableQualities) {
+            if (StandardizeQualityName(quality) == order[i]) {
+                return quality;
+            }
+        }
+    }
+    
+    // If no lower quality found, return the lowest available
+    for (int i = order.size() - 1; i >= 0; i--) {
+        for (const auto& quality : availableQualities) {
+            if (StandardizeQualityName(quality) == order[i]) {
+                return quality;
+            }
+        }
+    }
+    
+    // Final fallback
+    return availableQualities.empty() ? L"" : availableQualities[0];
+}
+
 void RefreshQualities(StreamTab& tab) {
     SendMessage(tab.hQualities, LB_RESETCONTENT, 0, 0);
     tab.standardToOriginalQuality.clear();
@@ -919,18 +974,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     tab.needsQualitySwitchToAd = false;
     tab.needsQualitySwitchToUser = false;
     
-    // Find the lowest quality for ad mode (prefer audio_only, then lowest resolution)
-    std::wstring adQuality;
-    for (const auto& q : tab.qualities) {
-        if (q.find(L"audio") != std::wstring::npos || q.find(L"Audio") != std::wstring::npos) {
-            adQuality = q;
-            break;
-        }
-    }
-    if (adQuality.empty() && !tab.qualities.empty()) {
-        // If no audio-only, use the last quality (typically lowest)
-        adQuality = tab.qualities.back();
-    }
+    // Find a quality lower than the user's selected quality for ad mode
+    std::wstring adQuality = FindLowerQuality(standardQuality, tab.qualities);
     
     // Find original quality for ad mode
     auto adMappingIt = tab.standardToOriginalQuality.find(adQuality);
@@ -941,8 +986,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     }
     
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L") with Frame Number Tagging");
-    AddDebugLog(L"Ad mode quality set to: " + tab.adModeQuality);
-    AddLog(L"[AD_SYSTEM] Ad detection enabled - will switch to '" + tab.adModeQuality + L"' during ads");
+    AddDebugLog(L"Ad mode quality set to: " + tab.adModeQuality + L" (lower than user's " + standardQuality + L")");
+    AddLog(L"[AD_SYSTEM] Discontinuity-based ad detection enabled - will switch to '" + tab.adModeQuality + L"' during ads");
     
     // Log current stream status for debugging multi-stream issues
     int active_streams = 0;

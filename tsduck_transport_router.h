@@ -249,6 +249,11 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_frame_time_;
         std::chrono::steady_clock::time_point stream_start_time_;
         
+        // Discontinuity-based ad detection state
+        std::chrono::steady_clock::time_point last_discontinuity_time_;
+        bool has_recent_discontinuity_{false};
+        std::chrono::milliseconds discontinuity_timeout_{5000}; // 5 seconds without discontinuity = ad end
+        
         // Video/Audio stream health tracking
         std::atomic<uint64_t> video_packets_processed_{0};
         std::atomic<uint64_t> audio_packets_processed_{0};
