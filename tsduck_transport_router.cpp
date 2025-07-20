@@ -1254,13 +1254,28 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     
     PROCESS_INFORMATION pi = {};
     
+    // Initialize MPC-HC web interface first to get assigned port
+    int assigned_port = 13579; // Default fallback port
+    if (IsMPCHC(config.player_path)) {
+        if (log_callback_) {
+            log_callback_(L"[TS_ROUTER] Detected MPC-HC, assigning unique web interface port");
+        }
+        mpc_web_interface_ = CreateMPCWebInterface(config.player_path);
+        if (mpc_web_interface_) {
+            assigned_port = mpc_web_interface_->GetPort();
+            if (log_callback_) {
+                log_callback_(L"[TS_ROUTER] Assigned port " + std::to_wstring(assigned_port) + L" for this instance");
+            }
+        }
+    }
+    
     // Build command line using the configured player arguments
     std::wstring cmd_line;
     if (IsMPCHC(config.player_path)) {
         // MPC-HC: Enable web interface for discontinuity handling
-        cmd_line = L"\"" + config.player_path + L"\" " + config.player_args + L" /webport 13579";
+        cmd_line = L"\"" + config.player_path + L"\" " + config.player_args + L" /webport " + std::to_wstring(assigned_port);
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Launching MPC-HC with web interface enabled");
+            log_callback_(L"[TS_ROUTER] Launching MPC-HC with web interface enabled on port " + std::to_wstring(assigned_port));
         }
     } else {
         // Other players: use standard arguments
@@ -1299,17 +1314,16 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
                      std::to_wstring(resource_manager.GetActiveStreamCount()));
     }
     
-    // Initialize MPC-HC web interface for discontinuity handling if applicable
-    if (IsMPCHC(config.player_path)) {
+    // Wait for MPC-HC web interface to be ready if applicable
+    if (mpc_web_interface_) {
         if (log_callback_) {
-            log_callback_(L"[TS_ROUTER] Initializing MPC-HC web interface for discontinuity recovery");
+            log_callback_(L"[TS_ROUTER] Waiting for MPC-HC web interface to be ready on port " + std::to_wstring(assigned_port));
         }
         
         // Give MPC-HC time to start up and enable web interface
         std::this_thread::sleep_for(std::chrono::milliseconds(2000));
         
-        mpc_web_interface_ = CreateMPCWebInterface(config.player_path);
-        if (mpc_web_interface_ && mpc_web_interface_->IsAvailable()) {
+        if (mpc_web_interface_->IsAvailable()) {
             if (log_callback_) {
                 log_callback_(L"[TS_ROUTER] MPC-HC web interface successfully initialized");
             }

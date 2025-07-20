@@ -5,16 +5,65 @@
 #include <cctype>
 #include <thread>
 #include <vector>
+#include <mutex>
 
 // Forward declaration for debug logging from main application
 extern void AddDebugLog(const std::wstring& msg);
+
+// Static members for port management
+std::vector<int> MPCPortManager::used_ports_;
+int MPCPortManager::next_port_ = 13579;  // Start from MPC-HC default port
+std::mutex MPCPortManager::port_mutex_;
+
+// Port management implementation
+int MPCPortManager::AssignPort() {
+    std::lock_guard<std::mutex> lock(port_mutex_);
+    
+    int assigned_port = next_port_;
+    
+    // Find next available port
+    while (IsPortInUse(assigned_port)) {
+        assigned_port++;
+        // Avoid well-known ports and stay in reasonable range
+        if (assigned_port > 13600) {
+            assigned_port = 13579;  // Wrap around to start
+        }
+    }
+    
+    used_ports_.push_back(assigned_port);
+    next_port_ = assigned_port + 1;
+    
+    AddDebugLog(L"[MPC-PORT] Assigned port " + std::to_wstring(assigned_port) + 
+                L" (total used ports: " + std::to_wstring(used_ports_.size()) + L")");
+    
+    return assigned_port;
+}
+
+void MPCPortManager::ReleasePort(int port) {
+    std::lock_guard<std::mutex> lock(port_mutex_);
+    
+    auto it = std::find(used_ports_.begin(), used_ports_.end(), port);
+    if (it != used_ports_.end()) {
+        used_ports_.erase(it);
+        AddDebugLog(L"[MPC-PORT] Released port " + std::to_wstring(port) + 
+                    L" (remaining used ports: " + std::to_wstring(used_ports_.size()) + L")");
+    }
+}
+
+bool MPCPortManager::IsPortInUse(int port) {
+    // No lock needed here as this is called from within locked context
+    return std::find(used_ports_.begin(), used_ports_.end(), port) != used_ports_.end();
+}
 
 MPCWebInterface::MPCWebInterface() {
     // Initialize default configuration
 }
 
 MPCWebInterface::~MPCWebInterface() {
-    // Cleanup is automatic with smart pointers and RAII
+    // Release the assigned port when instance is destroyed
+    if (initialized_) {
+        MPCPortManager::ReleasePort(config_.port);
+    }
 }
 
 bool MPCWebInterface::Initialize(const WebConfig& config) {
@@ -408,19 +457,31 @@ bool MPCWebInterface::IsValidResponse(const std::wstring& response) const {
 }
 
 // Factory function implementation
-std::unique_ptr<MPCWebInterface> CreateMPCWebInterface(const std::wstring& player_path) {
+std::unique_ptr<MPCWebInterface> CreateMPCWebInterface(const std::wstring& player_path, int port) {
     if (!IsMPCHC(player_path)) {
         return nullptr;
     }
     
     auto web_interface = std::make_unique<MPCWebInterface>();
     
-    // Try to initialize with default settings
-    if (web_interface->Initialize()) {
-        AddDebugLog(L"[MPC-WEB] Successfully created and initialized MPC-HC web interface");
+    // Assign port if not specified
+    int assigned_port = (port > 0) ? port : MPCPortManager::AssignPort();
+    
+    // Configure with assigned port
+    MPCWebInterface::WebConfig config;
+    config.port = assigned_port;
+    
+    AddDebugLog(L"[MPC-WEB] Creating web interface for port " + std::to_wstring(assigned_port));
+    
+    // Try to initialize with assigned port
+    if (web_interface->Initialize(config)) {
+        AddDebugLog(L"[MPC-WEB] Successfully created and initialized MPC-HC web interface on port " + 
+                    std::to_wstring(assigned_port));
         return web_interface;
     } else {
-        AddDebugLog(L"[MPC-WEB] Failed to initialize MPC-HC web interface");
+        AddDebugLog(L"[MPC-WEB] Failed to initialize MPC-HC web interface on port " + 
+                    std::to_wstring(assigned_port));
+        // Port will be released by destructor
         return nullptr;
     }
 }

@@ -6,6 +6,8 @@
 #include <chrono>
 #include <atomic>
 #include <memory>
+#include <vector>
+#include <mutex>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winhttp.h>
@@ -61,6 +63,7 @@ public:
     // Configuration
     void SetConfig(const WebConfig& config) { config_ = config; }
     const WebConfig& GetConfig() const { return config_; }
+    int GetPort() const { return config_.port; }       // Get assigned port
     
 private:
     WebConfig config_;
@@ -88,8 +91,21 @@ private:
     bool TestConnection() const;
 };
 
+// Port management for multiple MPC-HC instances
+class MPCPortManager {
+public:
+    static int AssignPort();                    // Assign next available port
+    static void ReleasePort(int port);          // Release port when instance closes
+    static bool IsPortInUse(int port);         // Check if port is currently assigned
+    
+private:
+    static std::vector<int> used_ports_;        // Track used ports
+    static int next_port_;                      // Next port to try
+    static std::mutex port_mutex_;              // Thread safety for port management
+};
+
 // Factory function to create MPC-HC web interface if MPC-HC is detected
-std::unique_ptr<MPCWebInterface> CreateMPCWebInterface(const std::wstring& player_path);
+std::unique_ptr<MPCWebInterface> CreateMPCWebInterface(const std::wstring& player_path, int port = 0);
 
 // Utility function to check if player path is MPC-HC
 bool IsMPCHC(const std::wstring& player_path);

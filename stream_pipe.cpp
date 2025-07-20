@@ -750,12 +750,25 @@ bool BufferAndPipeStreamToPlayer(
         return false;
     }
     
+    // Create web interface first to get the assigned port
+    std::unique_ptr<MPCWebInterface> mpc_web_interface = nullptr;
+    int assigned_port = 13579; // Default fallback port
+    
+    if (player_path.find(L"mpc-hc") != std::wstring::npos) {
+        AddDebugLog(L"[MPC-HC] Detected MPC-HC player, assigning unique web interface port");
+        mpc_web_interface = CreateMPCWebInterface(player_path);
+        if (mpc_web_interface) {
+            assigned_port = mpc_web_interface->GetPort();
+            AddDebugLog(L"[MPC-HC] Assigned port " + std::to_wstring(assigned_port) + L" for this instance");
+        }
+    }
+    
     // Build command with media player configured to read from stdin
     std::wstring cmd;
     if (player_path.find(L"mpc-hc") != std::wstring::npos) {
         // MPC-HC: read from stdin and enable web interface for discontinuity handling
-        cmd = L"\"" + player_path + L"\" - /new /nofocus /webport 13579";
-        AddDebugLog(L"[MPC-HC] Launching with web interface enabled for discontinuity recovery");
+        cmd = L"\"" + player_path + L"\" - /new /nofocus /webport " + std::to_wstring(assigned_port);
+        AddDebugLog(L"[MPC-HC] Launching with web interface enabled on port " + std::to_wstring(assigned_port));
     } else if (player_path.find(L"vlc") != std::wstring::npos) {
         // VLC: read from stdin
         cmd = L"\"" + player_path + L"\" - --intf dummy --no-one-instance";
@@ -826,16 +839,14 @@ bool BufferAndPipeStreamToPlayer(
     bool initial_check = ProcessStillRunning(pi.hProcess, channel_name + L" initial_verification", pi.dwProcessId);
     AddDebugLog(L"[PROCESS] Initial verification after 100ms: " + std::to_wstring(initial_check) + L" for " + channel_name);
 
-    // Initialize MPC-HC web interface for discontinuity handling if applicable
-    std::unique_ptr<MPCWebInterface> mpc_web_interface = nullptr;
-    if (IsMPCHC(player_path)) {
-        AddDebugLog(L"[MPC-HC] Detected MPC-HC player, attempting to initialize web interface");
+    // Wait for MPC-HC web interface to be ready if applicable
+    if (mpc_web_interface) {
+        AddDebugLog(L"[MPC-HC] Waiting for web interface to be ready on port " + std::to_wstring(assigned_port));
         
         // Give MPC-HC additional time to start up and enable web interface
         std::this_thread::sleep_for(std::chrono::milliseconds(2000));
         
-        mpc_web_interface = CreateMPCWebInterface(player_path);
-        if (mpc_web_interface && mpc_web_interface->IsAvailable()) {
+        if (mpc_web_interface->IsAvailable()) {
             AddDebugLog(L"[MPC-HC] Web interface successfully initialized for discontinuity recovery");
         } else {
             AddDebugLog(L"[MPC-HC] Web interface not available, will use traditional streaming without discontinuity recovery");
