@@ -54,20 +54,8 @@ namespace directshow_events {
         // Get last error message
         std::wstring GetLastError() const { return last_error_; }
         
-        // Event processing thread management
-        void StartEventProcessing();
-        void StopEventProcessing();
-        
     private:
-        // DirectShow COM interfaces
-        IGraphBuilder* graph_builder_;
-        IMediaControl* media_control_;
-        IMediaEventEx* media_event_;
-        IBaseFilter* video_renderer_;
-        
-        // Event processing
-        std::atomic<bool> event_processing_active_;
-        std::thread event_thread_;
+        // Event processing (simplified for external player communication)
         MediaEventCallback event_callback_;
         
         // State tracking
@@ -76,14 +64,11 @@ namespace directshow_events {
         std::wstring player_name_;
         
         // Internal methods
-        bool CreateFilterGraph();
-        bool FindVideoRenderer();
-        void ProcessMediaEvents();
         void LogEvent(MediaEvent event, const std::wstring& description);
         
-        // Buffer control methods
-        bool FlushVideoRenderer();
-        bool ResetRendererState();
+        // External player communication methods
+        HWND FindPlayerWindow();
+        bool SendPlayerCommand(const std::wstring& command);
     };
 
     // Utility functions for DirectShow integration

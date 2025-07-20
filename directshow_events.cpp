@@ -24,26 +24,7 @@ DirectShowController::DirectShowController()
 }
 
 DirectShowController::~DirectShowController() {
-    StopEventProcessing();
-    
-    // Release DirectShow interfaces
-    if (video_renderer_) {
-        video_renderer_->Release();
-        video_renderer_ = nullptr;
-    }
-    if (media_event_) {
-        media_event_->Release();
-        media_event_ = nullptr;
-    }
-    if (media_control_) {
-        media_control_->Release();
-        media_control_ = nullptr;
-    }
-    if (graph_builder_) {
-        graph_builder_->Release();
-        graph_builder_ = nullptr;
-    }
-    
+    // For external player communication, we just need to cleanup COM
     CoUninitialize();
 }
 
@@ -51,25 +32,25 @@ bool DirectShowController::Initialize(const std::wstring& player_name, MediaEven
     player_name_ = player_name;
     event_callback_ = callback;
     
-    LogEvent(MediaEvent::GRAPH_READY, L"Initializing DirectShow controller for " + player_name);
+    LogEvent(MediaEvent::GRAPH_READY, L"Initializing DirectShow event sender for " + player_name);
     
-    if (!CreateFilterGraph()) {
-        last_error_ = L"Failed to create DirectShow filter graph";
+    // For external media players, we don't create our own DirectShow graph
+    // Instead, we prepare to send events to the external player
+    if (!utils::IsDirectShowAvailable()) {
+        last_error_ = L"DirectShow components not available on system";
         LogEvent(MediaEvent::ERROR_OCCURRED, last_error_);
         return false;
     }
     
-    if (!FindVideoRenderer()) {
-        last_error_ = L"Failed to find video renderer in DirectShow graph";
+    // Register custom buffer clear event for inter-process communication
+    if (!utils::RegisterCustomBufferClearEvent()) {
+        last_error_ = L"Failed to register custom buffer clear event";
         LogEvent(MediaEvent::ERROR_OCCURRED, last_error_);
         return false;
     }
     
     graph_ready_ = true;
-    LogEvent(MediaEvent::GRAPH_READY, L"DirectShow controller initialized successfully");
-    
-    // Start event processing thread
-    StartEventProcessing();
+    LogEvent(MediaEvent::GRAPH_READY, L"DirectShow event sender initialized successfully");
     
     return true;
 }
@@ -106,25 +87,45 @@ bool DirectShowController::IsDirectShowCompatible(const std::wstring& player_pat
 }
 
 bool DirectShowController::ClearVideoBuffers() {
-    if (!graph_ready_ || !video_renderer_) {
-        last_error_ = L"DirectShow graph not ready for buffer clearing";
+    if (!graph_ready_) {
+        last_error_ = L"DirectShow event sender not ready for buffer clearing";
         return false;
     }
     
-    LogEvent(MediaEvent::BUFFER_CLEAR_REQUEST, L"Clearing video buffers via DirectShow");
+    LogEvent(MediaEvent::BUFFER_CLEAR_REQUEST, L"Sending buffer clear request to external media player");
     
-    // Method 1: Flush video renderer
-    if (!FlushVideoRenderer()) {
-        LogEvent(MediaEvent::ERROR_OCCURRED, L"Failed to flush video renderer");
+    // For external media players, we send buffer clear events rather than controlling our own graph
+    bool success = false;
+    
+    // Method 1: Try to find the media player window and send custom message
+    HWND player_window = FindPlayerWindow();
+    if (player_window) {
+        success = utils::SendBufferClearMessage(player_window);
+        if (success) {
+            LogEvent(MediaEvent::BUFFER_CLEAR_REQUEST, L"Buffer clear message sent via Windows message");
+        }
     }
     
-    // Method 2: Reset renderer state
-    if (!ResetRendererState()) {
-        LogEvent(MediaEvent::ERROR_OCCURRED, L"Failed to reset renderer state");
+    // Method 2: For MPC-HC, we can also try sending keyboard shortcuts
+    if (!success && player_name_.find(L"mpc-hc") != std::wstring::npos) {
+        // Send Ctrl+R (refresh) to MPC-HC to clear buffers
+        if (player_window) {
+            PostMessage(player_window, WM_KEYDOWN, VK_CONTROL, 0);
+            PostMessage(player_window, WM_KEYDOWN, 'R', 0);
+            PostMessage(player_window, WM_KEYUP, 'R', 0);
+            PostMessage(player_window, WM_KEYUP, VK_CONTROL, 0);
+            success = true;
+            LogEvent(MediaEvent::BUFFER_CLEAR_REQUEST, L"Buffer clear sent via MPC-HC refresh shortcut");
+        }
     }
     
-    LogEvent(MediaEvent::BUFFER_CLEAR_REQUEST, L"Video buffer clear operation completed");
-    return true;
+    if (success) {
+        LogEvent(MediaEvent::BUFFER_CLEAR_REQUEST, L"Video buffer clear operation completed");
+    } else {
+        LogEvent(MediaEvent::ERROR_OCCURRED, L"Failed to send buffer clear request to media player");
+    }
+    
+    return success;
 }
 
 bool DirectShowController::NotifySegmentTransition() {
@@ -145,206 +146,33 @@ bool DirectShowController::NotifySegmentTransition() {
 }
 
 bool DirectShowController::ResetVideoRenderer() {
-    if (!video_renderer_) {
-        return false;
-    }
+    LogEvent(MediaEvent::PLAYBACK_RESUMED, L"Requesting video renderer reset for external player");
     
-    LogEvent(MediaEvent::PLAYBACK_RESUMED, L"Resetting video renderer for clean restart");
+    // For external players, we can't directly reset their renderers
+    // But we can request a refresh or restart
+    bool success = false;
     
-    // Stop and restart the video renderer
-    HRESULT hr = S_OK;
-    
-    // Try to reset the renderer state
-    IMediaFilter* media_filter = nullptr;
-    hr = video_renderer_->QueryInterface(IID_IMediaFilter, (void**)&media_filter);
-    if (SUCCEEDED(hr) && media_filter) {
-        // Stop and start the filter to reset state
-        media_filter->Stop();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        media_filter->Run(0);
-        media_filter->Release();
-        
-        LogEvent(MediaEvent::PLAYBACK_RESUMED, L"Video renderer reset completed");
-        return true;
-    }
-    
-    return false;
-}
-
-bool DirectShowController::CreateFilterGraph() {
-    HRESULT hr = CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER,
-                                 IID_IGraphBuilder, (void**)&graph_builder_);
-    if (FAILED(hr)) {
-        return false;
-    }
-    
-    // Get media control interface
-    hr = graph_builder_->QueryInterface(IID_IMediaControl, (void**)&media_control_);
-    if (FAILED(hr)) {
-        return false;
-    }
-    
-    // Get media event interface
-    hr = graph_builder_->QueryInterface(IID_IMediaEventEx, (void**)&media_event_);
-    if (FAILED(hr)) {
-        return false;
-    }
-    
-    return true;
-}
-
-bool DirectShowController::FindVideoRenderer() {
-    if (!graph_builder_) {
-        return false;
-    }
-    
-    // Try to find an existing video renderer in the graph
-    IEnumFilters* enum_filters = nullptr;
-    HRESULT hr = graph_builder_->EnumFilters(&enum_filters);
-    if (FAILED(hr)) {
-        return false;
-    }
-    
-    IBaseFilter* filter = nullptr;
-    while (enum_filters->Next(1, &filter, nullptr) == S_OK) {
-        FILTER_INFO filter_info;
-        if (SUCCEEDED(filter->QueryFilterInfo(&filter_info))) {
-            // Look for video renderer filters
-            std::wstring filter_name = filter_info.achName;
-            std::transform(filter_name.begin(), filter_name.end(), filter_name.begin(), ::towlower);
-            
-            if (filter_name.find(L"video") != std::wstring::npos && 
-                filter_name.find(L"render") != std::wstring::npos) {
-                video_renderer_ = filter;
-                video_renderer_->AddRef();
-                
-                if (filter_info.pGraph) {
-                    filter_info.pGraph->Release();
-                }
-                filter->Release();
-                enum_filters->Release();
-                return true;
-            }
-            
-            if (filter_info.pGraph) {
-                filter_info.pGraph->Release();
-            }
+    // Try to send refresh command to player
+    HWND player_window = FindPlayerWindow();
+    if (player_window) {
+        if (player_name_.find(L"mpc-hc") != std::wstring::npos) {
+            // MPC-HC: Send F5 (refresh)
+            PostMessage(player_window, WM_KEYDOWN, VK_F5, 0);
+            PostMessage(player_window, WM_KEYUP, VK_F5, 0);
+            success = true;
+            LogEvent(MediaEvent::PLAYBACK_RESUMED, L"MPC-HC refresh command sent");
+        } else if (player_name_.find(L"vlc") != std::wstring::npos) {
+            // VLC: Send Ctrl+R (refresh)
+            PostMessage(player_window, WM_KEYDOWN, VK_CONTROL, 0);
+            PostMessage(player_window, WM_KEYDOWN, 'R', 0);
+            PostMessage(player_window, WM_KEYUP, 'R', 0);
+            PostMessage(player_window, WM_KEYUP, VK_CONTROL, 0);
+            success = true;
+            LogEvent(MediaEvent::PLAYBACK_RESUMED, L"VLC refresh command sent");
         }
-        filter->Release();
     }
     
-    enum_filters->Release();
-    
-    // If no video renderer found, create a default one
-    hr = CoCreateInstance(CLSID_VideoRenderer, nullptr, CLSCTX_INPROC_SERVER,
-                         IID_IBaseFilter, (void**)&video_renderer_);
-    if (SUCCEEDED(hr)) {
-        graph_builder_->AddFilter(video_renderer_, L"Video Renderer");
-        return true;
-    }
-    
-    return false;
-}
-
-void DirectShowController::StartEventProcessing() {
-    if (event_processing_active_) {
-        return;
-    }
-    
-    event_processing_active_ = true;
-    event_thread_ = std::thread([this]() {
-        ProcessMediaEvents();
-    });
-}
-
-void DirectShowController::StopEventProcessing() {
-    if (!event_processing_active_) {
-        return;
-    }
-    
-    event_processing_active_ = false;
-    if (event_thread_.joinable()) {
-        event_thread_.join();
-    }
-}
-
-void DirectShowController::ProcessMediaEvents() {
-    while (event_processing_active_) {
-        if (!media_event_) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
-        }
-        
-        long event_code, param1, param2;
-        HRESULT hr = media_event_->GetEvent(&event_code, &param1, &param2, 10);
-        
-        if (SUCCEEDED(hr)) {
-            // Process relevant DirectShow events
-            switch (event_code) {
-                case EC_COMPLETE:
-                    LogEvent(MediaEvent::PLAYBACK_RESUMED, L"DirectShow playback completed");
-                    break;
-                    
-                case EC_USERABORT:
-                    LogEvent(MediaEvent::ERROR_OCCURRED, L"DirectShow playback aborted by user");
-                    break;
-                    
-                case EC_ERRORABORT:
-                    LogEvent(MediaEvent::ERROR_OCCURRED, L"DirectShow playback error occurred");
-                    break;
-                    
-                case EC_SEGMENT_STARTED:
-                    LogEvent(MediaEvent::SEGMENT_STARTED, L"DirectShow segment started event");
-                    break;
-                    
-                default:
-                    // Handle custom events
-                    if (event_code >= EC_USER) {
-                        LogEvent(MediaEvent::SEGMENT_STARTED, 
-                               L"Custom DirectShow event: " + std::to_wstring(event_code));
-                    }
-                    break;
-            }
-            
-            // Free event parameters
-            media_event_->FreeEventParams(event_code, param1, param2);
-        }
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-}
-
-bool DirectShowController::FlushVideoRenderer() {
-    if (!video_renderer_) {
-        return false;
-    }
-    
-    // Try multiple approaches to flush video buffers
-    
-    // Approach 1: Query for IVideoWindow and refresh
-    IVideoWindow* video_window = nullptr;
-    HRESULT hr = video_renderer_->QueryInterface(IID_IVideoWindow, (void**)&video_window);
-    if (SUCCEEDED(hr) && video_window) {
-        video_window->SetWindowPosition(0, 0, 0, 0); // Force refresh
-        video_window->Release();
-    }
-    
-    // Approach 2: Query for custom buffer control interfaces
-    // This would be specific to the renderer implementation
-    
-    return true;
-}
-
-bool DirectShowController::ResetRendererState() {
-    if (!video_renderer_) {
-        return false;
-    }
-    
-    // Reset the renderer's internal state
-    IMediaSample* sample = nullptr;
-    // Implementation would depend on accessing renderer's internal interfaces
-    
-    return true;
+    return success;
 }
 
 void DirectShowController::LogEvent(MediaEvent event, const std::wstring& description) {
@@ -352,20 +180,51 @@ void DirectShowController::LogEvent(MediaEvent event, const std::wstring& descri
         event_callback_(event, description);
     }
     
-    // Also log to debug output
-    std::wstring event_name;
-    switch (event) {
-        case MediaEvent::SEGMENT_STARTED: event_name = L"SEGMENT_STARTED"; break;
-        case MediaEvent::BUFFER_CLEAR_REQUEST: event_name = L"BUFFER_CLEAR"; break;
-        case MediaEvent::PLAYBACK_RESUMED: event_name = L"PLAYBACK_RESUMED"; break;
-        case MediaEvent::GRAPH_READY: event_name = L"GRAPH_READY"; break;
-        case MediaEvent::ERROR_OCCURRED: event_name = L"ERROR"; break;
-        default: event_name = L"UNKNOWN"; break;
-    }
-    
-    AddDebugLog(L"[DIRECTSHOW_" + event_name + L"] " + description);
+    // Also log to debug system
+    AddDebugLog(L"[DIRECTSHOW_EVENT] " + description);
 }
 
+HWND DirectShowController::FindPlayerWindow() {
+    // Find the media player window by process name
+    HWND player_window = nullptr;
+    
+    if (player_name_.find(L"mpc-hc") != std::wstring::npos) {
+        player_window = FindWindow(L"MediaPlayerClassicW", nullptr);
+        if (!player_window) {
+            player_window = FindWindow(L"MPC-HC", nullptr);
+        }
+    } else if (player_name_.find(L"vlc") != std::wstring::npos) {
+        player_window = FindWindow(L"Qt5QWindowIcon", nullptr);
+        if (!player_window) {
+            player_window = FindWindow(L"VLC media player", nullptr);
+        }
+    }
+    
+    return player_window;
+}
+
+bool DirectShowController::SendPlayerCommand(const std::wstring& command) {
+    HWND player_window = FindPlayerWindow();
+    if (!player_window) {
+        return false;
+    }
+    
+    // Send command based on player type
+    if (command == L"refresh") {
+        if (player_name_.find(L"mpc-hc") != std::wstring::npos) {
+            PostMessage(player_window, WM_KEYDOWN, VK_F5, 0);
+            PostMessage(player_window, WM_KEYUP, VK_F5, 0);
+            return true;
+        } else if (player_name_.find(L"vlc") != std::wstring::npos) {
+            PostMessage(player_window, WM_KEYDOWN, VK_CONTROL, 0);
+            PostMessage(player_window, WM_KEYDOWN, 'R', 0);
+            PostMessage(player_window, WM_KEYUP, 'R', 0);
+            PostMessage(player_window, WM_KEYUP, VK_CONTROL, 0);
+            return true;
+        }
+    }
+    
+    return false;
 // Utility functions implementation
 namespace utils {
 
