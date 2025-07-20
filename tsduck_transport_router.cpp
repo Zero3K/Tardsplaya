@@ -318,6 +318,12 @@ void HLSToTSConverter::Reset() {
     pat_sent_ = false;
     pmt_sent_ = false;
     
+    // CRITICAL: Reset continuity counter tracking for discontinuity-free streams
+    pid_continuity_counters_.clear();
+    last_pcr_value_ = 0;
+    pcr_correction_needed_ = false;
+    pcr_base_time_ = std::chrono::steady_clock::now();
+    
     // Frame Number Tagging: Reset frame counters
     global_frame_counter_ = 0;
     segment_frame_counter_ = 0;
@@ -329,7 +335,7 @@ void HLSToTSConverter::Reset() {
     detected_audio_pid_ = 0;
 }
 
-std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
+std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment, uint64_t ad_duration_skipped_ms) {
     std::vector<TSPacket> ts_packets;
     
     if (hls_data.empty()) {
@@ -386,6 +392,15 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         // Detect and classify stream types (video/audio)
         DetectStreamTypes(packet);
         
+        // Fix continuity counters for seamless stream processing when ad skipping is enabled
+        FixContinuityCounters(packet);
+        
+        // Re-parse header after continuity counter fix to update discontinuity flag
+        packet.ParseHeader();
+        
+        // Adjust PCR values to eliminate timing gaps when ads are skipped
+        AdjustPCRValues(packet, ad_duration_skipped_ms);
+        
         // Frame Number Tagging: Assign frame numbers for video packets
         if (packet.is_video_packet || packet.payload_unit_start) {
             // Increment frame counters for video packets or new payload units
@@ -436,8 +451,9 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
             }
         }
         
-        // Don't modify continuity counters - preserve original TS packet timing and sequencing
-        // The original HLS TS segments should have correct continuity counters
+        // CRITICAL FIX: Fix continuity counters to ensure seamless stream playback
+        // This prevents discontinuities that cause player freezes during ad skipping
+        FixContinuityCounters(packet);
         
         ts_packets.push_back(packet);
     }
@@ -901,20 +917,21 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 
                 if (has_discontinuities) {
                     if (log_callback_) {
-                        log_callback_(L"[DISCONTINUITY] Detected ad transition - implementing fast restart");
+                        log_callback_(L"[DISCONTINUITY] Detected stream transition - implementing seamless restart");
                     }
                     
-                    // Clear buffer immediately for fast restart after ad break
-                    ts_buffer_->Clear();
+                    // Less aggressive buffer management for smoother transitions
+                    // Instead of clearing everything, just mark for faster processing
+                    ts_buffer_->SetLowLatencyMode(true);
                     
-                    // Reset frame numbering to prevent frame drop false positives
+                    // Reset converter state to fix continuity counters
                     hls_converter_->Reset();
                     
                     // Reset frame statistics to prevent false drop alerts after discontinuity
                     ResetFrameStatistics();
                     
                     if (log_callback_) {
-                        log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
+                        log_callback_(L"[SEAMLESS_RESTART] Continuity tracking reset for smooth ad transition");
                     }
                     
                     // For fast restart, only process the newest segments
@@ -984,8 +1001,14 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Convert to TS packets
-                    auto ts_packets = hls_converter_->ConvertSegment(segment_data, first_segment);
+                    // Convert to TS packets with ad duration offset for PCR correction
+                    uint64_t ad_duration_skipped_ms = 0;
+                    if (current_config_.enable_ad_skipping) {
+                        auto total_ad_duration = playlist_parser.GetTotalAdDuration();
+                        ad_duration_skipped_ms = static_cast<uint64_t>(total_ad_duration.count());
+                    }
+                    
+                    auto ts_packets = hls_converter_->ConvertSegment(segment_data, first_segment, ad_duration_skipped_ms);
                     first_segment = false;
                     
                     if (ts_packets.empty()) {
@@ -999,12 +1022,12 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     size_t buffer_high_watermark, buffer_low_watermark;
                     
                     if (has_discontinuities) {
-                        // Immediately after discontinuity: minimal buffering for fastest restart
-                        buffer_high_watermark = current_config_.buffer_size_packets / 8; // 12.5% for immediate restart
-                        buffer_low_watermark = current_config_.buffer_size_packets / 16;  // 6.25% for fastest response
+                        // After discontinuity: use moderate buffering for smooth restart
+                        buffer_high_watermark = current_config_.buffer_size_packets / 4; // 25% for smooth restart
+                        buffer_low_watermark = current_config_.buffer_size_packets / 8;  // 12.5% for responsive flow
                         
                         if (log_callback_ && segments_processed == 0) {
-                            log_callback_(L"[FAST_RESTART] Using minimal buffering for immediate playback after ad");
+                            log_callback_(L"[SEAMLESS_RESTART] Using moderate buffering for smooth playback after stream transition");
                         }
                     } else if (current_config_.low_latency_mode) {
                         // For low-latency, use smaller buffers and more aggressive flow control
@@ -1585,6 +1608,108 @@ void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
     }
 }
 
+}
 
+// CRITICAL DISCONTINUITY FIX METHODS
+// These methods ensure seamless stream continuity when ad segments are skipped
+
+void HLSToTSConverter::FixContinuityCounters(TSPacket& packet) {
+    if (!packet.IsValid()) return;
+    
+    uint16_t pid = packet.pid;
+    
+    // Initialize continuity counter for new PIDs
+    if (pid_continuity_counters_.find(pid) == pid_continuity_counters_.end()) {
+        pid_continuity_counters_[pid] = 0;
+    }
+    
+    // Check if this packet has a payload (adaptation field control bits 01 or 11)
+    uint8_t adaptation_field_control = (packet.data[3] >> 4) & 0x03;
+    bool has_payload = (adaptation_field_control == 0x01) || (adaptation_field_control == 0x03);
+    
+    if (has_payload) {
+        // Set continuity counter in the packet
+        packet.data[3] = (packet.data[3] & 0xF0) | (pid_continuity_counters_[pid] & 0x0F);
+        
+        // CRITICAL: Clear discontinuity flag to ensure seamless stream
+        // This prevents player freezes when transitioning between segments
+        uint8_t adaptation_field_control = (packet.data[3] >> 4) & 0x03;
+        if (adaptation_field_control == 0x02 || adaptation_field_control == 0x03) {
+            // Has adaptation field - clear discontinuity indicator
+            if (packet.data[4] > 0) {
+                packet.data[5] &= 0x7F; // Clear discontinuity flag (bit 7)
+            }
+        }
+        
+        // Increment for next packet with payload on this PID
+        pid_continuity_counters_[pid] = (pid_continuity_counters_[pid] + 1) & 0x0F;
+    } else {
+        // For packets without payload, maintain the same continuity counter
+        packet.data[3] = (packet.data[3] & 0xF0) | (pid_continuity_counters_[pid] & 0x0F);
+    }
+}
+
+void HLSToTSConverter::AdjustPCRValues(TSPacket& packet, uint64_t time_offset_ms) {
+    if (!packet.IsValid()) return;
+    
+    // Check if this packet contains PCR (Program Clock Reference)
+    uint8_t adaptation_field_control = (packet.data[3] >> 4) & 0x03;
+    if (adaptation_field_control != 0x02 && adaptation_field_control != 0x03) {
+        return; // No adaptation field
+    }
+    
+    uint8_t adaptation_field_length = packet.data[4];
+    if (adaptation_field_length < 7) {
+        return; // Adaptation field too short for PCR
+    }
+    
+    uint8_t pcr_flag = packet.data[5] & 0x10;
+    if (!pcr_flag) {
+        return; // No PCR in this packet
+    }
+    
+    // Extract current PCR value (33-bit base + 9-bit extension)
+    uint64_t pcr_base = 0;
+    pcr_base |= ((uint64_t)packet.data[6] << 25);
+    pcr_base |= ((uint64_t)packet.data[7] << 17);
+    pcr_base |= ((uint64_t)packet.data[8] << 9);
+    pcr_base |= ((uint64_t)packet.data[9] << 1);
+    pcr_base |= ((uint64_t)packet.data[10] >> 7);
+    
+    uint16_t pcr_ext = 0;
+    pcr_ext |= ((uint16_t)(packet.data[10] & 0x01) << 8);
+    pcr_ext |= ((uint16_t)packet.data[11]);
+    
+    uint64_t current_pcr = pcr_base * 300 + pcr_ext;
+    
+    // Initialize PCR correction if this is the first PCR after a reset
+    if (pcr_correction_needed_) {
+        // Calculate time since PCR base was established
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - pcr_base_time_);
+        
+        // Adjust PCR to maintain continuity (27MHz clock)
+        uint64_t adjusted_pcr = last_pcr_value_ + (elapsed.count() * 27000) - (time_offset_ms * 27000);
+        
+        // Update PCR in packet
+        pcr_base = adjusted_pcr / 300;
+        pcr_ext = adjusted_pcr % 300;
+        
+        // Write back adjusted PCR
+        packet.data[6] = (pcr_base >> 25) & 0xFF;
+        packet.data[7] = (pcr_base >> 17) & 0xFF;
+        packet.data[8] = (pcr_base >> 9) & 0xFF;
+        packet.data[9] = (pcr_base >> 1) & 0xFF;
+        packet.data[10] = ((pcr_base & 0x01) << 7) | 0x7E | ((pcr_ext >> 8) & 0x01);
+        packet.data[11] = pcr_ext & 0xFF;
+        
+        last_pcr_value_ = adjusted_pcr;
+    } else {
+        // First PCR in stream, establish base
+        last_pcr_value_ = current_pcr;
+        pcr_base_time_ = std::chrono::steady_clock::now();
+        pcr_correction_needed_ = true;
+    }
+}
 
 } // namespace tsduck_transport

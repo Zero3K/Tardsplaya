@@ -107,7 +107,7 @@ namespace tsduck_transport {
         HLSToTSConverter();
         
         // Convert HLS segment data to TS packets
-        std::vector<TSPacket> ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment = false);
+        std::vector<TSPacket> ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment = false, uint64_t ad_duration_skipped_ms = 0);
         
         // Set conversion parameters
         void SetProgramID(uint16_t program_id) { program_id_ = program_id; }
@@ -124,6 +124,12 @@ namespace tsduck_transport {
         uint8_t continuity_counter_ = 0;
         bool pat_sent_ = false;
         bool pmt_sent_ = false;
+        
+        // Continuity counter management for seamless stream processing
+        std::map<uint16_t, uint8_t> pid_continuity_counters_;  // Per-PID continuity tracking
+        uint64_t last_pcr_value_ = 0;                          // Last PCR value for gap correction
+        bool pcr_correction_needed_ = false;                   // Flag for PCR adjustment
+        std::chrono::steady_clock::time_point pcr_base_time_;  // Base time for PCR calculation
         
         // Frame Number Tagging state
         uint64_t global_frame_counter_ = 0;     // Total frames processed across all segments
@@ -149,6 +155,12 @@ namespace tsduck_transport {
         
         // Detect and classify stream types (video/audio)
         void DetectStreamTypes(TSPacket& packet);
+        
+        // Fix continuity counters for seamless stream processing
+        void FixContinuityCounters(TSPacket& packet);
+        
+        // Adjust PCR values to eliminate timing gaps during ad skips
+        void AdjustPCRValues(TSPacket& packet, uint64_t time_offset_ms = 0);
     };
     
     // Transport Stream Router - main component for re-routing streams to media players
