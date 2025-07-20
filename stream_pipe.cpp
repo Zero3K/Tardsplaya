@@ -754,7 +754,7 @@ bool BufferAndPipeStreamToPlayer(
     std::wstring cmd;
     if (player_path.find(L"mpc-hc") != std::wstring::npos) {
         // MPC-HC: read from stdin and enable web interface for discontinuity handling
-        cmd = L"\"" + player_path + L"\" - /new /nofocus /webroot";
+        cmd = L"\"" + player_path + L"\" - /new /nofocus /webport 13579";
         AddDebugLog(L"[MPC-HC] Launching with web interface enabled for discontinuity recovery");
     } else if (player_path.find(L"vlc") != std::wstring::npos) {
         // VLC: read from stdin

@@ -1291,7 +1291,7 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
     std::wstring cmd_line;
     if (IsMPCHC(config.player_path)) {
         // MPC-HC: Enable web interface for discontinuity handling
-        cmd_line = L"\"" + config.player_path + L"\" " + config.player_args + L" /webroot";
+        cmd_line = L"\"" + config.player_path + L"\" " + config.player_args + L" /webport 13579";
         if (log_callback_) {
             log_callback_(L"[TS_ROUTER] Launching MPC-HC with web interface enabled");
         }
