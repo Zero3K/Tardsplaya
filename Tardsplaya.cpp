@@ -721,6 +721,32 @@ std::vector<std::wstring> SortQualities(const std::vector<std::wstring>& qualiti
 }
 
 // Find a quality that is lower than the specified user quality
+std::wstring FindAdQuality(const std::vector<std::wstring>& availableQualities) {
+    // For ad mode, prefer audio_only if available, otherwise use the lowest quality
+    std::vector<std::wstring> order = {
+        L"audio_only", L"160p", L"360p", L"480p", L"720p", L"720p60", L"1080p60"
+    };
+    
+    // First, try to find audio_only quality
+    for (const auto& quality : availableQualities) {
+        if (StandardizeQualityName(quality) == L"audio_only") {
+            return quality;
+        }
+    }
+    
+    // If no audio_only, find the lowest quality available
+    for (const auto& targetQuality : order) {
+        for (const auto& quality : availableQualities) {
+            if (StandardizeQualityName(quality) == targetQuality) {
+                return quality;
+            }
+        }
+    }
+    
+    // Final fallback
+    return availableQualities.empty() ? L"" : availableQualities[0];
+}
+
 std::wstring FindLowerQuality(const std::wstring& userQuality, const std::vector<std::wstring>& availableQualities) {
     // Define quality order (highest to lowest)
     std::vector<std::wstring> order = {
@@ -974,8 +1000,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     tab.needsQualitySwitchToAd = false;
     tab.needsQualitySwitchToUser = false;
     
-    // Find a quality lower than the user's selected quality for ad mode
-    std::wstring adQuality = FindLowerQuality(standardQuality, tab.qualities);
+    // Find the best ad quality (prefer audio_only, then lowest available)
+    std::wstring adQuality = FindAdQuality(tab.qualities);
     
     // adQuality is already an original quality name (returned from tab.qualities)
     // No need to look it up in standardToOriginalQuality mapping
@@ -984,7 +1010,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"Quality mapping fix - standardQuality: '" + standardQuality + L"', originalQuality: '" + originalQuality + L"', adQuality: '" + adQuality + L"'");
     
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L") with Frame Number Tagging");
-    AddDebugLog(L"Ad mode quality set to: " + tab.adModeQuality + L" (lower than user's " + standardQuality + L")");
+    AddDebugLog(L"Ad mode quality set to: " + tab.adModeQuality + L" (preferring audio_only for ads)");
     AddLog(L"[AD_SYSTEM] Discontinuity-based ad detection enabled - will switch to '" + tab.adModeQuality + L"' during ads");
     
     // Log current stream status for debugging multi-stream issues
