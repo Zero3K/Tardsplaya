@@ -131,6 +131,7 @@ A C++ application that buffers Twitch streams to media players like MPC-HC, MPC-
 - **Windows 7 Compatibility**: Includes certificate validation workarounds for older Windows versions
 - **Real-time Logging**: Shows detailed logs of streaming operations
 - **Modern C++ Implementation**: Clean, efficient C++17 code with minimal dependencies
+- **Ad-Based Quality Switching**: Automatically switches to lower quality during ads and restores user quality when ads end
 
 ## Requirements
 

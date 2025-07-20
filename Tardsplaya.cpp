@@ -942,6 +942,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     
     AddLog(L"Starting buffered stream for " + tab.channel + L" (" + standardQuality + L") with Frame Number Tagging");
     AddDebugLog(L"Ad mode quality set to: " + tab.adModeQuality);
+    AddLog(L"[AD_SYSTEM] Ad detection enabled - will switch to '" + tab.adModeQuality + L"' during ads");
     
     // Log current stream status for debugging multi-stream issues
     int active_streams = 0;
@@ -1593,6 +1594,21 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (hasActiveStream) {
                 // Show actual chunk queue count and frame statistics from streaming threads
                 std::wstring status = L"Buffer: " + std::to_wstring(totalChunkCount) + L" packets";
+                
+                // Check if any stream is in ad mode
+                bool anyStreamInAdMode = false;
+                std::wstring adModeChannel;
+                for (const auto& tab : g_streams) {
+                    if (tab.isStreaming && tab.isInAdMode.load()) {
+                        anyStreamInAdMode = true;
+                        adModeChannel = tab.channel;
+                        break;
+                    }
+                }
+                
+                if (anyStreamInAdMode) {
+                    status += L" | [AD MODE] " + adModeChannel + L" - Lower quality active";
+                }
                 
                 // Add frame information if available (for transport stream mode)
                 // This would require accessing transport stream router stats, which we'll add as needed
