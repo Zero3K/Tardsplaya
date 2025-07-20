@@ -849,8 +849,8 @@ bool BufferAndPipeStreamToPlayer(
         if (mpc_web_interface->IsAvailable()) {
             AddDebugLog(L"[MPC-HC] Web interface successfully initialized for discontinuity recovery");
         } else {
-            AddDebugLog(L"[MPC-HC] Web interface not available, will use traditional streaming without discontinuity recovery");
-            mpc_web_interface.reset(); // Clear the pointer if not available
+            AddDebugLog(L"[MPC-HC] Web interface not yet available, will retry during streaming");
+            // Don't reset the pointer - keep trying during discontinuity handling
         }
     }
 
@@ -1006,17 +1006,21 @@ bool BufferAndPipeStreamToPlayer(
             // Handle discontinuities using MPC-HC web interface if available
             if (has_discontinuity) {
                 // Use MPC-HC web interface for discontinuity recovery if available
-                if (mpc_web_interface && mpc_web_interface->IsAvailable()) {
-                    AddDebugLog(L"[DISCONTINUITY] Attempting MPC-HC web interface recovery for " + channel_name);
-                    
-                    bool recovery_success = mpc_web_interface->HandleDiscontinuity();
-                    if (recovery_success) {
-                        AddDebugLog(L"[DISCONTINUITY] MPC-HC web interface recovery successful for " + channel_name);
+                if (mpc_web_interface) {
+                    if (mpc_web_interface->IsAvailable()) {
+                        AddDebugLog(L"[DISCONTINUITY] Attempting MPC-HC web interface recovery for " + channel_name);
+                        
+                        bool recovery_success = mpc_web_interface->HandleDiscontinuity();
+                        if (recovery_success) {
+                            AddDebugLog(L"[DISCONTINUITY] MPC-HC web interface recovery successful for " + channel_name);
+                        } else {
+                            AddDebugLog(L"[DISCONTINUITY] MPC-HC web interface recovery failed for " + channel_name);
+                        }
                     } else {
-                        AddDebugLog(L"[DISCONTINUITY] MPC-HC web interface recovery failed for " + channel_name);
+                        AddDebugLog(L"[DISCONTINUITY] Web interface not responding on port " + std::to_wstring(assigned_port) + L" for " + channel_name);
                     }
                 } else {
-                    AddDebugLog(L"[DISCONTINUITY] No web interface available for " + channel_name);
+                    AddDebugLog(L"[DISCONTINUITY] No web interface object created for " + channel_name);
                 }
             }
             

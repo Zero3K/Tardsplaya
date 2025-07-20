@@ -851,24 +851,30 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     }
                     
                     // Use MPC-HC web interface for discontinuity recovery if available
-                    if (mpc_web_interface_ && mpc_web_interface_->IsAvailable()) {
-                        if (log_callback_) {
-                            log_callback_(L"[DISCONTINUITY] Attempting MPC-HC web interface recovery");
-                        }
-                        
-                        bool recovery_success = mpc_web_interface_->HandleDiscontinuity();
-                        if (recovery_success) {
+                    if (mpc_web_interface_) {
+                        if (mpc_web_interface_->IsAvailable()) {
                             if (log_callback_) {
-                                log_callback_(L"[DISCONTINUITY] MPC-HC web interface recovery successful");
+                                log_callback_(L"[DISCONTINUITY] Attempting MPC-HC web interface recovery");
+                            }
+                            
+                            bool recovery_success = mpc_web_interface_->HandleDiscontinuity();
+                            if (recovery_success) {
+                                if (log_callback_) {
+                                    log_callback_(L"[DISCONTINUITY] MPC-HC web interface recovery successful");
+                                }
+                            } else {
+                                if (log_callback_) {
+                                    log_callback_(L"[DISCONTINUITY] MPC-HC web interface recovery failed");
+                                }
                             }
                         } else {
                             if (log_callback_) {
-                                log_callback_(L"[DISCONTINUITY] MPC-HC web interface recovery failed");
+                                log_callback_(L"[DISCONTINUITY] Web interface not responding on port " + std::to_wstring(mpc_web_interface_->GetPort()));
                             }
                         }
                     } else {
                         if (log_callback_) {
-                            log_callback_(L"[DISCONTINUITY] No web interface available");
+                            log_callback_(L"[DISCONTINUITY] No web interface object created");
                         }
                     }
                 }
@@ -1329,9 +1335,9 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
             }
         } else {
             if (log_callback_) {
-                log_callback_(L"[TS_ROUTER] MPC-HC web interface not available, using traditional streaming");
+                log_callback_(L"[TS_ROUTER] MPC-HC web interface not yet available, will retry during streaming");
             }
-            mpc_web_interface_.reset(); // Clear the pointer if not available
+            // Don't reset the pointer - keep trying during discontinuity handling
         }
     }
     
