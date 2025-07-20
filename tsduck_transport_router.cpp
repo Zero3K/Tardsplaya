@@ -930,21 +930,12 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     // Reset frame statistics to prevent false drop alerts after discontinuity
                     ResetFrameStatistics();
                     
-                    // VirtualDub2-style discontinuity handling: wait for keyframe to prevent black frames
+                    // Combined VirtualDub2+DirectShow approach: wait for keyframe, then trigger DirectShow events
                     SetWaitForKeyframe();
                     
-                    // Try DirectShow events approach first if enabled
-                    if (current_config_.enable_directshow_events && directshow_active_) {
-                        if (TryDirectShowDiscontinuityHandling()) {
-                            if (log_callback_) {
-                                log_callback_(L"[DIRECTSHOW] DirectShow discontinuity handling activated");
-                            }
-                        } else {
-                            if (log_callback_) {
-                                log_callback_(L"[DIRECTSHOW] DirectShow handling failed, falling back to keyframe waiting");
-                            }
-                            directshow_fallback_ = true;
-                        }
+                    // DirectShow events will be triggered when keyframe is found (combined approach)
+                    if (current_config_.enable_directshow_events && directshow_active_ && log_callback_) {
+                        log_callback_(L"[DISCONTINUITY] Combined VirtualDub2+DirectShow approach activated - waiting for keyframe to trigger buffer clear");
                     }
                     
                     if (log_callback_) {
@@ -1207,23 +1198,11 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                     log_callback_(L"[DISCONTINUITY] Video packet discontinuity detected");
                 }
                 
-                // Try DirectShow approach first
-                if (current_config_.enable_directshow_events && directshow_active_ && !directshow_fallback_) {
-                    if (TryDirectShowDiscontinuityHandling()) {
-                        if (log_callback_) {
-                            log_callback_(L"[DIRECTSHOW] Packet-level discontinuity handled via DirectShow");
-                        }
-                    } else {
-                        if (log_callback_) {
-                            log_callback_(L"[DIRECTSHOW] Packet-level DirectShow handling failed, using keyframe waiting");
-                        }
-                        SetWaitForKeyframe();
-                    }
-                } else {
-                    if (log_callback_) {
-                        log_callback_(L"[DISCONTINUITY] Using VirtualDub2-style keyframe waiting");
-                    }
-                    SetWaitForKeyframe();
+                // Combined VirtualDub2+DirectShow approach for packet-level discontinuities
+                SetWaitForKeyframe();
+                
+                if (current_config_.enable_directshow_events && directshow_active_ && log_callback_) {
+                    log_callback_(L"[DISCONTINUITY] Packet-level combined approach - waiting for keyframe to trigger DirectShow buffer clear");
                 }
             }
             
@@ -1779,14 +1758,30 @@ bool TransportStreamRouter::ShouldSkipFrame(const TSPacket& packet) {
     
     // Check if this is a keyframe (I-frame)
     if (packet.is_key_frame) {
-        // Found keyframe! Stop waiting
+        // Found keyframe! Trigger DirectShow buffer clear for optimal timing
+        if (current_config_.enable_directshow_events && directshow_active_) {
+            bool directshow_success = TryDirectShowDiscontinuityHandling();
+            if (log_callback_) {
+                if (directshow_success) {
+                    log_callback_(L"[COMBINED] Found keyframe after " + std::to_wstring(current_wait) + 
+                                 L" video frames (" + std::to_wstring(wait_duration.count()) + 
+                                 L"ms) - triggered DirectShow buffer clear");
+                } else {
+                    log_callback_(L"[COMBINED] Found keyframe after " + std::to_wstring(current_wait) + 
+                                 L" video frames (" + std::to_wstring(wait_duration.count()) + 
+                                 L"ms) - DirectShow clear failed, resuming anyway");
+                }
+            }
+        } else {
+            if (log_callback_) {
+                log_callback_(L"[KEYFRAME_WAIT] Found keyframe after " + std::to_wstring(current_wait) + 
+                             L" video frames (" + std::to_wstring(wait_duration.count()) + L"ms) - resuming normal playback");
+            }
+        }
+        
+        // Stop waiting regardless of DirectShow success
         wait_for_keyframe_ = false;
         keyframe_wait_counter_ = 0;
-        
-        if (log_callback_) {
-            log_callback_(L"[KEYFRAME_WAIT] Found keyframe after " + std::to_wstring(current_wait) + 
-                         L" video frames (" + std::to_wstring(wait_duration.count()) + L"ms) - resuming normal playback");
-        }
         
         return false; // Don't skip this keyframe
     }
@@ -1835,14 +1830,13 @@ bool TransportStreamRouter::TryDirectShowDiscontinuityHandling() {
             log_callback_(L"[DIRECTSHOW] Successfully sent buffer clear event to media player");
         }
         
-        // DirectShow handled it, so we don't need keyframe waiting
-        wait_for_keyframe_ = false;
-        keyframe_wait_counter_ = 0;
+        // Note: We don't disable keyframe waiting here anymore in combined mode
+        // Keyframe waiting logic will handle stopping the wait state
         
         return true;
     } else {
         if (log_callback_) {
-            log_callback_(L"[DIRECTSHOW] Failed to handle discontinuity, will fallback to keyframe waiting");
+            log_callback_(L"[DIRECTSHOW] Failed to send buffer clear event");
         }
         return false;
     }
@@ -1864,9 +1858,8 @@ void TransportStreamRouter::OnDirectShowEvent(directshow_events::MediaEvent even
             
         case directshow_events::MediaEvent::PLAYBACK_RESUMED:
             log_callback_(L"[DIRECTSHOW_EVENT] " + description);
-            // Clear any pending keyframe waiting since DirectShow handled the transition
-            wait_for_keyframe_ = false;
-            keyframe_wait_counter_ = 0;
+            // Note: In combined mode, keyframe waiting logic handles stopping wait state
+            // DirectShow events complement keyframe detection timing
             break;
             
         case directshow_events::MediaEvent::GRAPH_READY:

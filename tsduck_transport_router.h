@@ -184,9 +184,9 @@ namespace tsduck_transport {
             bool skip_old_segments = true;  // Skip older segments when catching up
             
             // DirectShow Events support for enhanced discontinuity handling
-            bool enable_directshow_events = true;  // Use DirectShow events when available
+            bool enable_directshow_events = true;  // Use combined VirtualDub2+DirectShow approach
             bool prefer_directshow_player = false; // Automatically switch to DirectShow-compatible player
-            bool fallback_to_keyframe_wait = true; // Fall back to VirtualDub2 method if DirectShow fails
+            bool fallback_to_keyframe_wait = true; // Fall back to VirtualDub2-only method if DirectShow fails
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -278,12 +278,12 @@ namespace tsduck_transport {
         // Reset frame statistics (for discontinuities)
         void ResetFrameStatistics();
         
-        // VirtualDub2-style discontinuity handling methods
+        // Combined VirtualDub2+DirectShow discontinuity handling methods
         void SetWaitForKeyframe();         // Set waiting state after discontinuity
-        bool ShouldSkipFrame(const TSPacket& packet);  // Check if frame should be skipped
+        bool ShouldSkipFrame(const TSPacket& packet);  // Check if frame should be skipped (triggers DirectShow when keyframe found)
         
         // DirectShow events discontinuity handling methods
-        bool TryDirectShowDiscontinuityHandling();  // Try DirectShow approach first
+        bool TryDirectShowDiscontinuityHandling();  // Send DirectShow buffer clear events (triggered by keyframe detection)
         void OnDirectShowEvent(directshow_events::MediaEvent event, const std::wstring& description); // DirectShow event callback
         std::wstring GetOptimalDirectShowPlayer() const; // Get best DirectShow-compatible player
         

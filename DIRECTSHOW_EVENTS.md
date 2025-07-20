@@ -1,21 +1,30 @@
-# DirectShow Events Support for Enhanced Discontinuity Handling
+# Combined VirtualDub2+DirectShow Events for Enhanced Discontinuity Handling
 
 ## Overview
 
-This document describes the DirectShow events implementation that provides superior discontinuity handling for HLS streams with advertisements, addressing the persistent video sticking issues reported by users.
+This document describes the combined VirtualDub2+DirectShow events implementation that provides optimal discontinuity handling for HLS streams with advertisements. This approach combines the best of both worlds: VirtualDub2's intelligent keyframe detection with DirectShow's powerful buffer control capabilities.
 
 ## Problem Statement
 
-Despite implementing VirtualDub2-style keyframe waiting, users continued to experience video freezing after ad breaks while audio played normally. The issue was that the existing implementation only cleared the transport stream buffer but couldn't clear the media player's internal video buffers.
+Previous approaches used either VirtualDub2-style keyframe waiting OR DirectShow events as alternatives. However, the optimal solution is to **combine both approaches** to achieve precise timing and effective buffer clearing.
 
-## DirectShow Events Solution
+## Combined Approach Solution
 
-### Key Advantages
+### Key Innovation
 
-1. **Direct Media Player Buffer Control**: Can send buffer clear events directly to the media player
-2. **Immediate Response**: No waiting for keyframes - immediate buffer clearing on discontinuities  
-3. **Targeted Video Handling**: Clears only video buffers while preserving audio continuity
-4. **Platform Integration**: Uses native Windows DirectShow APIs for optimal compatibility
+Instead of using DirectShow events immediately upon discontinuity detection, the system now:
+
+1. **Starts VirtualDub2 keyframe waiting** when discontinuity is detected
+2. **Waits for optimal keyframe** to ensure clean video data is available  
+3. **Triggers DirectShow buffer clear** precisely when keyframe is found
+4. **Resumes normal playback** with clean video transition
+
+### Advantages of Combined Approach
+
+1. **Optimal Timing**: DirectShow buffer clearing happens only when clean keyframe data is available
+2. **Prevents Premature Clearing**: Avoids clearing buffers before good video data arrives
+3. **Enhanced Reliability**: Works even if DirectShow events fail (graceful degradation)
+4. **Improved User Experience**: Smoother transitions with minimal black frame exposure
 
 ### Supported Media Players
 
@@ -24,17 +33,13 @@ Despite implementing VirtualDub2-style keyframe waiting, users continued to expe
 - **VLC** - Partial DirectShow support
 - **Windows Media Player** - Full DirectShow support (legacy)
 
-### Fallback Mechanism
-
-For non-DirectShow players (mpv, ffplay), the system automatically falls back to the existing VirtualDub2-style keyframe waiting method.
-
 ## Implementation Details
 
 ### Core Components
 
 #### 1. DirectShowController Class
 - Manages DirectShow filter graph
-- Sends buffer clear events
+- Sends buffer clear events when triggered by keyframe detection
 - Handles video renderer reset
 - Processes DirectShow events
 
@@ -42,78 +47,79 @@ For non-DirectShow players (mpv, ffplay), the system automatically falls back to
 - Launches DirectShow-compatible media players
 - Integrates with transport stream router
 - Provides health monitoring
-- Handles discontinuity events
+- Handles discontinuity events triggered by keyframe detection
 
-#### 3. Enhanced TransportStreamRouter
-- Auto-detects DirectShow compatibility
-- Chooses optimal discontinuity handling method
-- Provides fallback to keyframe waiting
-- Integrated event logging
+#### 3. Enhanced TransportStreamRouter with Combined Logic
+- Starts VirtualDub2 keyframe waiting on discontinuity detection
+- Triggers DirectShow events when keyframes are found
+- Provides fallback to keyframe-only waiting if DirectShow fails
+- Integrated event logging for both approaches
 
 ### Configuration Options
 
 ```cpp
 RouterConfig config;
-config.enable_directshow_events = true;      // Enable DirectShow events
-config.prefer_directshow_player = false;     // Auto-switch to DS player
-config.fallback_to_keyframe_wait = true;     // Fallback if DS fails
+config.enable_directshow_events = true;      // Enable combined VirtualDub2+DirectShow approach
+config.prefer_directshow_player = false;     // Auto-switch to DS player  
+config.fallback_to_keyframe_wait = true;     // Fallback to VirtualDub2-only if DS fails
 ```
 
-### Event Types
+### Event Flow
 
-- **SEGMENT_STARTED**: New segment/discontinuity detected
-- **BUFFER_CLEAR_REQUEST**: Video buffer clear operation
-- **PLAYBACK_RESUMED**: Normal playback resumed after discontinuity
-- **GRAPH_READY**: DirectShow graph initialized
-- **ERROR_OCCURRED**: DirectShow error requiring fallback
+1. **Discontinuity Detected** → Start VirtualDub2 keyframe waiting
+2. **Keyframe Found** → Trigger DirectShow buffer clear events  
+3. **Buffer Cleared** → Resume normal playback with clean video
+4. **DirectShow Fails** → Continue with VirtualDub2-only approach
 
 ## Usage Examples
 
-### Automatic Mode (Recommended)
+### Combined Approach Mode (Recommended)
 ```cpp
 RouterConfig config;
 config.player_path = L"mpc-hc64.exe";
-config.enable_directshow_events = true;
-config.prefer_directshow_player = true;    // Auto-find best DS player
+config.enable_directshow_events = true;      // Enable combined approach
+config.prefer_directshow_player = true;      // Auto-find best DS player
 ```
 
-### Manual Mode
+### Manual Player Selection
 ```cpp
 RouterConfig config;
 config.player_path = L"C:\\Program Files\\MPC-HC\\mpc-hc64.exe";
-config.enable_directshow_events = true;
-config.prefer_directshow_player = false;   // Use specified player
+config.enable_directshow_events = true;      // Use combined approach
+config.prefer_directshow_player = false;     // Use specified player
 ```
 
-### Fallback Mode
+### VirtualDub2-Only Fallback
 ```cpp
 RouterConfig config;
-config.player_path = L"mpv.exe";            // Non-DirectShow player
-config.enable_directshow_events = true;     // Will auto-fallback
-config.fallback_to_keyframe_wait = true;    // Use VirtualDub2 method
+config.player_path = L"mpv.exe";              // Non-DirectShow player
+config.enable_directshow_events = false;      // Disable combined approach
+config.fallback_to_keyframe_wait = true;      // Use VirtualDub2-only method
 ```
 
 ## Expected Benefits
 
 ### Performance Improvements
-- **Instant Buffer Clearing**: No waiting for keyframes (0ms vs 2000ms timeout)
-- **Reduced Video Sticking**: Direct buffer control prevents corruption
-- **Maintained Audio**: Audio flows normally during video buffer operations
-- **Faster Recovery**: Immediate resume after ad breaks
+- **Optimal Timing**: DirectShow buffer clearing happens exactly when keyframe arrives
+- **Prevented Premature Clearing**: No buffer clearing until clean video data is ready
+- **Enhanced Reliability**: Graceful degradation if DirectShow fails
+- **Faster Recovery**: Clean transitions with minimal latency
 
 ### User Experience
-- **Seamless Ad Transitions**: Clean video switches without black frames
-- **No Audio Interruption**: Audio continues during video buffer clearing
-- **Automatic Optimization**: System chooses best available method
-- **Robust Error Handling**: Falls back gracefully on any issues
+- **Seamless Ad Transitions**: Clean video switches with optimal timing
+- **No Audio Interruption**: Audio continues during video operations
+- **Enhanced Robustness**: Works even if DirectShow fails
+- **Improved Debugging**: Clear logging of combined approach steps
 
 ## Debug Logging
 
 Monitor these log messages during ad breaks:
 
 ```
-[DIRECTSHOW] Player supports DirectShow events: mpc-hc64.exe
-[DIRECTSHOW] Enhanced discontinuity handling will be used for ad breaks
+[DISCONTINUITY] Combined VirtualDub2+DirectShow approach activated - waiting for keyframe to trigger buffer clear
+[KEYFRAME_WAIT] Activated aggressive keyframe waiting mode for VIDEO ONLY (max 10 video frames OR 2 seconds)
+[COMBINED] Found keyframe after 3 video frames (126ms) - triggered DirectShow buffer clear
+[DIRECTSHOW] Successfully sent buffer clear event to media player
 [DISCONTINUITY] Detected ad transition - implementing fast restart  
 [DIRECTSHOW] Successfully sent buffer clear event to media player
 [DIRECTSHOW_EVENT] Video buffer clear operation completed
