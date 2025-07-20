@@ -151,7 +151,7 @@ bool MPCWebInterface::HandleDiscontinuity() {
         return false;
     }
     
-    AddDebugLog(L"[MPC-WEB] Handling discontinuity - trying step forward approach");
+    AddDebugLog(L"[MPC-WEB] Handling discontinuity - trying frame step approach");
     
     // Get current state
     PlayerState current_state = GetPlayerState();
@@ -160,22 +160,22 @@ bool MPCWebInterface::HandleDiscontinuity() {
     bool success = false;
     
     if (current_state == PlayerState::Playing) {
-        // Method 1: Try step forward approach first (less disruptive)
-        AddDebugLog(L"[MPC-WEB] Attempting step forward for discontinuity recovery");
+        // Method 1: Try frame step approach first (most precise and least disruptive)
+        AddDebugLog(L"[MPC-WEB] Attempting frame step for discontinuity recovery");
         
-        if (StepForward()) {
-            // Brief delay to let step complete
+        if (FrameStep()) {
+            // Brief delay to let frame step complete
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             
             // Check if player is still responsive and playing
             PlayerState step_state = GetPlayerState();
             if (step_state == PlayerState::Playing || step_state == PlayerState::Paused) {
                 success = true;
-                AddDebugLog(L"[MPC-WEB] Discontinuity handled successfully with step forward");
+                AddDebugLog(L"[MPC-WEB] Discontinuity handled successfully with frame step");
             } else {
-                AddDebugLog(L"[MPC-WEB] Step forward didn't resolve discontinuity, trying pause/resume");
+                AddDebugLog(L"[MPC-WEB] Frame step didn't resolve discontinuity, trying pause/resume");
                 
-                // Fallback to pause/resume if step didn't work
+                // Fallback to pause/resume if frame step didn't work
                 if (PausePlayback()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     
@@ -190,9 +190,9 @@ bool MPCWebInterface::HandleDiscontinuity() {
                 }
             }
         } else {
-            AddDebugLog(L"[MPC-WEB] Step forward failed, trying pause/resume fallback");
+            AddDebugLog(L"[MPC-WEB] Frame step failed, trying pause/resume fallback");
             
-            // Fallback to pause/resume if step command failed
+            // Fallback to pause/resume if frame step command failed
             if (PausePlayback()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 
@@ -256,9 +256,9 @@ bool MPCWebInterface::ResumePlayback() {
     return SendHTTPCommand(L"wm_command=887", std::wstring{}); // 887 is play command
 }
 
-bool MPCWebInterface::StepForward() {
-    AddDebugLog(L"[MPC-WEB] Sending step forward command");
-    return SendHTTPCommand(L"wm_command=922", std::wstring{}); // 922 is step forward command
+bool MPCWebInterface::FrameStep() {
+    AddDebugLog(L"[MPC-WEB] Sending frame step command");
+    return SendHTTPCommand(L"wm_command=921", std::wstring{}); // 921 is frame step command
 }
 
 bool MPCWebInterface::SeekToBeginning() {
