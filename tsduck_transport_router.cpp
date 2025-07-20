@@ -871,20 +871,38 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 bool ad_start_detected = false;
                 bool ad_end_detected = false;
                 
+                // Debug: Log segment count and ad detection status
+                if (log_callback_ && segments.size() > 0) {
+                    log_callback_(L"[AD_DEBUG] Checking " + std::to_wstring(segments.size()) + L" segments for SCTE-35 markers");
+                }
+                
                 for (const auto& segment : segments) {
                     if (playlist_parser.DetectAdStart(segment)) {
                         ad_start_detected = true;
                         if (log_callback_) {
-                            log_callback_(L"[AD_DETECTION] SCTE-35 ad start detected");
+                            log_callback_(L"[AD_DETECTION] SCTE-35 ad start detected in segment: " + segment.url);
                         }
                     }
                     if (playlist_parser.DetectAdEnd(segment)) {
                         ad_end_detected = true;
                         if (log_callback_) {
-                            log_callback_(L"[AD_DETECTION] SCTE-35 ad end detected");
+                            log_callback_(L"[AD_DETECTION] SCTE-35 ad end detected in segment: " + segment.url);
                         }
                     }
+                    
+                    // Debug: Log if segment has discontinuity but no SCTE-35 markers
+                    if (segment.has_discontinuity && !segment.has_scte35_out && !segment.has_scte35_in && log_callback_) {
+                        log_callback_(L"[AD_DEBUG] Discontinuity without SCTE-35 markers in segment: " + segment.url);
+                    }
+                    
                     segment_urls.push_back(segment.url);
+                }
+                
+                // Debug: Log overall ad detection result
+                if (log_callback_ && segments.size() > 0) {
+                    log_callback_(L"[AD_DEBUG] Ad detection complete - Start: " + 
+                                (ad_start_detected ? L"YES" : L"NO") + L", End: " + 
+                                (ad_end_detected ? L"YES" : L"NO"));
                 }
                 
                 // Handle ad state transitions
@@ -945,6 +963,15 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 } else if (ad_start_detected || ad_end_detected) {
                     // Ad markers detected but quality switching not properly configured
                     if (log_callback_) {
+                        std::wstring config_status = L"[AD_CONFIG_DEBUG] Quality switching configuration - ";
+                        config_status += L"is_in_ad_mode: " + std::wstring(current_config_.is_in_ad_mode ? L"SET" : L"NULL") + L", ";
+                        config_status += L"needs_switch_to_ad: " + std::wstring(current_config_.needs_switch_to_ad ? L"SET" : L"NULL") + L", ";
+                        config_status += L"needs_switch_to_user: " + std::wstring(current_config_.needs_switch_to_user ? L"SET" : L"NULL") + L", ";
+                        config_status += L"quality_to_url_map: " + std::wstring(current_config_.quality_to_url_map ? L"SET" : L"NULL") + L", ";
+                        config_status += L"ad_mode_quality: '" + current_config_.ad_mode_quality + L"', ";
+                        config_status += L"user_quality: '" + current_config_.user_quality + L"'";
+                        log_callback_(config_status);
+                        
                         log_callback_(L"[AD_DETECTION] SCTE-35 markers detected but quality switching is not properly configured");
                     }
                 }

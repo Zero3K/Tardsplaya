@@ -15,6 +15,25 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
     segments_.clear();
     has_discontinuities_ = false;
     
+    // Debug: Check if playlist contains any SCTE-35 markers at all
+    #ifdef _DEBUG
+    bool has_scte35_out = m3u8_content.find("#EXT-X-SCTE35-OUT") != std::string::npos;
+    bool has_scte35_in = m3u8_content.find("#EXT-X-SCTE35-IN") != std::string::npos;
+    bool has_scte35_cue = m3u8_content.find("SCTE35-CUE") != std::string::npos;
+    bool has_scte35_any = m3u8_content.find("SCTE35") != std::string::npos || m3u8_content.find("scte35") != std::string::npos;
+    
+    if (has_scte35_out || has_scte35_in || has_scte35_cue || has_scte35_any) {
+        std::string debug_msg = "[SCTE35_DEBUG] Found SCTE-35 content in playlist - OUT:" + 
+                               std::string(has_scte35_out ? "YES" : "NO") + " IN:" + 
+                               std::string(has_scte35_in ? "YES" : "NO") + " CUE:" + 
+                               std::string(has_scte35_cue ? "YES" : "NO") + " ANY:" + 
+                               std::string(has_scte35_any ? "YES" : "NO");
+        OutputDebugStringA((debug_msg + "\n").c_str());
+    } else {
+        OutputDebugStringA("[SCTE35_DEBUG] No SCTE-35 markers found in playlist content\n");
+    }
+    #endif
+    
     std::istringstream stream(m3u8_content);
     std::string line;
     MediaSegment current_segment;
@@ -57,9 +76,17 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
             }
             else if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 current_segment.has_scte35_out = true;
+                // Debug: Log when SCTE-35 OUT marker is found
+                #ifdef _DEBUG
+                OutputDebugStringA(("[SCTE35_DEBUG] Found #EXT-X-SCTE35-OUT marker: " + line + "\n").c_str());
+                #endif
             }
             else if (line.find("#EXT-X-SCTE35-IN") == 0) {
                 current_segment.has_scte35_in = true;
+                // Debug: Log when SCTE-35 IN marker is found
+                #ifdef _DEBUG
+                OutputDebugStringA(("[SCTE35_DEBUG] Found #EXT-X-SCTE35-IN marker: " + line + "\n").c_str());
+                #endif
             }
             else if (line.find("#EXT-X-DATERANGE") == 0) {
                 ParseDateRangeLine(line, current_segment);
