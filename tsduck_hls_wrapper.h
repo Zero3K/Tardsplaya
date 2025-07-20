@@ -60,7 +60,8 @@ namespace tsduck_hls {
         PlaylistParser();
         
         // Parse M3U8 playlist with enhanced timing analysis and ad detection
-        bool ParsePlaylist(const std::string& m3u8_content, const AdSkippingConfig& config = AdSkippingConfig{});
+        bool ParsePlaylist(const std::string& m3u8_content);
+        bool ParsePlaylist(const std::string& m3u8_content, const AdSkippingConfig& config);
         
         // Get segments with ad skipping applied (if enabled)
         std::vector<MediaSegment> GetSegments() const { return segments_; }

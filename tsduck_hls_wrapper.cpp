@@ -12,6 +12,12 @@ PlaylistParser::PlaylistParser() {
     // Initialize with defaults
 }
 
+bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
+    // Use default ad skipping configuration
+    AdSkippingConfig default_config;
+    return ParsePlaylist(m3u8_content, default_config);
+}
+
 bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content, const AdSkippingConfig& config) {
     segments_.clear();
     has_discontinuities_ = false;
@@ -298,48 +304,20 @@ void PlaylistParser::AnalyzeAdSegments() {
 }
 
 void PlaylistParser::ApplyAdSkippingLogic() {
-    bool in_ad_break = false;
-    std::chrono::milliseconds current_ad_break_duration{0};
-    
     for (auto& segment : segments_) {
-        // Check if we're entering an ad break
-        if (!in_ad_break && segment.IsAdSegment()) {
-            in_ad_break = true;
-            current_ad_break_duration = std::chrono::milliseconds{0};
-            segment.is_ad_break_start = true;
+        // Apply skipping logic based on configuration
+        if (segment.has_scte35_out && ad_config_.skip_scte35_segments) {
+            segment.should_skip = true;
+            segment.is_ad_segment = true;
         }
         
-        // If we're in an ad break, accumulate duration
-        if (in_ad_break) {
-            current_ad_break_duration += segment.precise_duration;
-            
-            // Check if ad break exceeds maximum duration
-            if (current_ad_break_duration > ad_config_.max_ad_break_duration) {
-                // Stop skipping - this might not be an ad break
-                in_ad_break = false;
-                // Retroactively mark previous segments as non-ad
-                for (auto& prev_seg : segments_) {
-                    if (prev_seg.sequence_number >= segment.sequence_number - 10) { // Last 10 segments
-                        prev_seg.should_skip = false;
-                    }
-                }
-                continue;
-            }
-            
-            // Apply skipping logic based on configuration
-            if ((ad_config_.skip_scte35_segments && segment.has_scte35_out) ||
-                (ad_config_.skip_pattern_detected_ads && segment.is_ad_segment)) {
-                segment.should_skip = true;
-            }
-        }
-        
-        // Check if we're exiting an ad break
-        if (in_ad_break && (segment.has_scte35_in || !segment.IsAdSegment())) {
-            in_ad_break = false;
-            segment.is_ad_break_end = true;
-            current_ad_break_duration = std::chrono::milliseconds{0};
+        if (segment.is_ad_segment && ad_config_.skip_pattern_detected_ads) {
+            segment.should_skip = true;
         }
     }
+    
+    // Mark ad break boundaries for better continuity
+    MarkAdBreakBoundaries();
 }
 
 bool PlaylistParser::DetectAdPatternsInSegment(const MediaSegment& segment) const {
