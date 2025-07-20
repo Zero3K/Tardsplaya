@@ -478,7 +478,8 @@ bool SimpleVideoRenderer::RenderFrame(const uint8_t* data, size_t size, uint32_t
             // Add data activity indicators
             if (size > 188) { // Minimum TS packet size
                 // Show green overlay when processing valid MPEG-TS data
-                base_g = std::min(255, (int)base_g + 50);
+                int temp_g = (int)base_g + 50;
+                base_g = (temp_g > 255) ? 255 : temp_g;
                 
                 // Create data flow visualization
                 if ((x + frame_counter / 2) % 100 < 3) {
