@@ -306,7 +306,8 @@ bool SendBufferClearMessage(HWND player_window) {
 DirectShowMediaPlayer::DirectShowMediaPlayer() 
     : ds_controller_(std::make_unique<DirectShowController>())
     , player_window_(nullptr)
-    , directshow_enabled_(false) {
+    , directshow_enabled_(false)
+    , player_process_(INVALID_HANDLE_VALUE) {
 }
 
 DirectShowMediaPlayer::~DirectShowMediaPlayer() {
@@ -407,10 +408,6 @@ bool DirectShowMediaPlayer::FindPlayerWindow() {
 BOOL CALLBACK DirectShowMediaPlayer::FindWindowProc(HWND hwnd, LPARAM lParam) {
     // This method is no longer used since we find windows by class name
     return TRUE;
-}
-    }
-    
-    return TRUE; // Continue enumeration
 }
 
 } // namespace directshow_events

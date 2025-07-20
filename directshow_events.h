@@ -116,6 +116,7 @@ namespace directshow_events {
         HWND player_window_;
         std::wstring player_path_;
         std::atomic<bool> directshow_enabled_;
+        HANDLE player_process_;
         
         // Player window detection for existing player
         bool FindPlayerWindow();
