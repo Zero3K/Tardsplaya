@@ -305,7 +305,6 @@ bool SendBufferClearMessage(HWND player_window) {
 // DirectShowMediaPlayer Implementation
 DirectShowMediaPlayer::DirectShowMediaPlayer() 
     : ds_controller_(std::make_unique<DirectShowController>())
-    , player_process_(INVALID_HANDLE_VALUE)
     , player_window_(nullptr)
     , directshow_enabled_(false) {
 }
@@ -314,48 +313,26 @@ DirectShowMediaPlayer::~DirectShowMediaPlayer() {
     Stop();
 }
 
-bool DirectShowMediaPlayer::Launch(const std::wstring& player_path, 
-                                  const std::wstring& input_source,
-                                  MediaEventCallback event_callback) {
+bool DirectShowMediaPlayer::Initialize(const std::wstring& player_path,
+                                     MediaEventCallback event_callback) {
     player_path_ = player_path;
     
     // Check if player supports DirectShow
     if (!DirectShowController::IsDirectShowCompatible(player_path)) {
         AddDebugLog(L"[DIRECTSHOW] Player not DirectShow compatible: " + player_path);
-        return false; // Fall back to regular player launch
+        return false; // Fall back to regular approach
     }
     
-    AddDebugLog(L"[DIRECTSHOW] Launching DirectShow-compatible player: " + player_path);
+    AddDebugLog(L"[DIRECTSHOW] Initializing DirectShow buffer clear events for: " + player_path);
     
-    // Initialize DirectShow controller
+    // Initialize DirectShow controller for buffer clearing only
     if (!ds_controller_->Initialize(player_path, event_callback)) {
         AddDebugLog(L"[DIRECTSHOW] Failed to initialize DirectShow controller");
         return false;
     }
     
-    // Create DirectShow-optimized command line
-    std::wstring cmd_line = utils::CreateDirectShowCommandLine(player_path, input_source);
-    
-    // Launch the player process
-    STARTUPINFOW si = {};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    
-    if (!CreateProcessW(nullptr, &cmd_line[0], nullptr, nullptr, FALSE, 
-                        CREATE_NEW_CONSOLE, nullptr, nullptr, &si, &pi)) {
-        AddDebugLog(L"[DIRECTSHOW] Failed to launch player process");
-        return false;
-    }
-    
-    player_process_ = pi.hProcess;
-    CloseHandle(pi.hThread);
-    
-    // Try to find the player window for message-based communication
-    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Wait for window creation
-    FindPlayerWindow();
-    
     directshow_enabled_ = true;
-    AddDebugLog(L"[DIRECTSHOW] Player launched successfully with DirectShow support");
+    AddDebugLog(L"[DIRECTSHOW] DirectShow buffer clear events initialized successfully");
     
     return true;
 }
@@ -405,42 +382,32 @@ void DirectShowMediaPlayer::Stop() {
         directshow_enabled_ = false;
     }
     
-    if (player_process_ != INVALID_HANDLE_VALUE) {
-        TerminateProcess(player_process_, 0);
-        CloseHandle(player_process_);
-        player_process_ = INVALID_HANDLE_VALUE;
-    }
-    
     player_window_ = nullptr;
 }
 
 bool DirectShowMediaPlayer::FindPlayerWindow() {
-    if (player_process_ == INVALID_HANDLE_VALUE) {
-        return false;
-    }
+    // Find player window by process name pattern matching
+    player_window_ = nullptr;
     
-    DWORD process_id = GetProcessId(player_process_);
-    if (process_id == 0) {
-        return false;
+    if (player_path_.find(L"mpc-hc") != std::wstring::npos) {
+        player_window_ = FindWindow(L"MediaPlayerClassicW", nullptr);
+        if (!player_window_) {
+            player_window_ = FindWindow(L"MPC-HC", nullptr);
+        }
+    } else if (player_path_.find(L"vlc") != std::wstring::npos) {
+        player_window_ = FindWindow(L"Qt5QWindowIcon", nullptr);
+        if (!player_window_) {
+            player_window_ = FindWindow(L"VLC media player", nullptr);
+        }
     }
-    
-    // Enumerate windows to find the player window
-    EnumWindows(FindWindowProc, reinterpret_cast<LPARAM>(this));
     
     return player_window_ != nullptr;
 }
 
 BOOL CALLBACK DirectShowMediaPlayer::FindWindowProc(HWND hwnd, LPARAM lParam) {
-    DirectShowMediaPlayer* player = reinterpret_cast<DirectShowMediaPlayer*>(lParam);
-    
-    DWORD window_process_id;
-    GetWindowThreadProcessId(hwnd, &window_process_id);
-    
-    DWORD player_process_id = GetProcessId(player->player_process_);
-    
-    if (window_process_id == player_process_id && IsWindowVisible(hwnd)) {
-        player->player_window_ = hwnd;
-        return FALSE; // Stop enumeration
+    // This method is no longer used since we find windows by class name
+    return TRUE;
+}
     }
     
     return TRUE; // Continue enumeration

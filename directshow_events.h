@@ -97,10 +97,9 @@ namespace directshow_events {
         DirectShowMediaPlayer();
         ~DirectShowMediaPlayer();
         
-        // Launch media player with DirectShow integration
-        bool Launch(const std::wstring& player_path, 
-                   const std::wstring& input_source,
-                   MediaEventCallback event_callback = nullptr);
+        // Initialize DirectShow buffer clear events for existing player
+        bool Initialize(const std::wstring& player_path,
+                       MediaEventCallback event_callback = nullptr);
         
         // Send discontinuity event to clear buffers
         bool HandleDiscontinuity();
@@ -108,20 +107,17 @@ namespace directshow_events {
         // Check if player is running and responsive
         bool IsPlayerHealthy() const;
         
-        // Get player process handle
-        HANDLE GetPlayerProcess() const { return player_process_; }
         
-        // Stop player and cleanup DirectShow resources
+        // Stop DirectShow events and cleanup resources
         void Stop();
         
     private:
         std::unique_ptr<DirectShowController> ds_controller_;
-        HANDLE player_process_;
         HWND player_window_;
         std::wstring player_path_;
         std::atomic<bool> directshow_enabled_;
         
-        // Player window detection
+        // Player window detection for existing player
         bool FindPlayerWindow();
         static BOOL CALLBACK FindWindowProc(HWND hwnd, LPARAM lParam);
     };

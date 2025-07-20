@@ -1358,41 +1358,10 @@ cleanup_and_exit:
 }
 
 bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE& process_handle, HANDLE& stdin_handle) {
-    // Try DirectShow player launch first if enabled and compatible
-    if (config.enable_directshow_events && directshow_active_ && directshow_player_) {
-        if (log_callback_) {
-            log_callback_(L"[DIRECTSHOW] Attempting to launch DirectShow-compatible media player");
-        }
-        
-        // Create DirectShow event callback
-        auto ds_callback = [this](directshow_events::MediaEvent event, const std::wstring& description) {
-            OnDirectShowEvent(event, description);
-        };
-        
-        // Try to launch with DirectShow support
-        bool ds_launch_success = directshow_player_->Launch(config.player_path, L"-", ds_callback);
-        
-        if (ds_launch_success) {
-            // Get the process handle from DirectShow player
-            process_handle = directshow_player_->GetPlayerProcess();
-            stdin_handle = INVALID_HANDLE_VALUE; // DirectShow doesn't use stdin pipe
-            
-            if (log_callback_) {
-                log_callback_(L"[DIRECTSHOW] Media player launched successfully with DirectShow events support");
-            }
-            
-            return true;
-        } else {
-            if (log_callback_) {
-                log_callback_(L"[DIRECTSHOW] DirectShow launch failed, falling back to standard pipe method");
-            }
-            directshow_fallback_ = true;
-        }
-    }
-    
-    // Standard pipe-based player launch (original implementation)
+    // Always use standard pipe-based player launch for actual player process
     SECURITY_ATTRIBUTES sa = {};
     sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
     sa.bInheritHandle = TRUE;
     
     // Create pipe for stdin with larger buffer for TS data to prevent frame drops
@@ -1466,17 +1435,37 @@ bool TransportStreamRouter::LaunchMediaPlayer(const RouterConfig& config, HANDLE
         log_callback_(L"[TS_ROUTER] Media player process launched successfully");
     }
     
+    // Initialize DirectShow buffer clear events if enabled
+    if (config.enable_directshow_events && directshow_active_ && directshow_player_) {
+        if (log_callback_) {
+            log_callback_(L"[DIRECTSHOW] Initializing DirectShow buffer clear events for launched player");
+        }
+        
+        // Create DirectShow event callback
+        auto ds_callback = [this](directshow_events::MediaEvent event, const std::wstring& description) {
+            OnDirectShowEvent(event, description);
+        };
+        
+        // Initialize DirectShow events for the launched player
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // Wait for player window to be ready
+        bool ds_init_success = directshow_player_->Initialize(config.player_path, ds_callback);
+        
+        if (ds_init_success) {
+            if (log_callback_) {
+                log_callback_(L"[DIRECTSHOW] DirectShow buffer clear events initialized successfully");
+            }
+        } else {
+            if (log_callback_) {
+                log_callback_(L"[DIRECTSHOW] DirectShow initialization failed, using keyframe-only approach");
+            }
+            directshow_fallback_ = true;
+        }
+    }
+    
     return true;
 }
 
 bool TransportStreamRouter::SendTSPacketToPlayer(HANDLE stdin_handle, const TSPacket& packet) {
-    // If using DirectShow mode, we don't send via stdin pipe
-    if (directshow_active_ && !directshow_fallback_ && stdin_handle == INVALID_HANDLE_VALUE) {
-        // DirectShow mode - packets are handled internally by DirectShow player
-        // Just return success since the packet routing is handled differently
-        return true;
-    }
-    
     // Standard pipe mode
     if (stdin_handle == INVALID_HANDLE_VALUE) {
         return false;
