@@ -235,7 +235,7 @@ bool SimpleAudioRenderer::PlayAudioData(const uint8_t* data, size_t size, uint32
     AudioFrame frame;
     frame.sample_rate = sampleRate;
     frame.channels = channels;
-    frame.sample_count = size / (2 * channels); // Assuming 16-bit samples
+    frame.samples = size / (2 * channels); // Assuming 16-bit samples
     
     // Convert raw data to PCM samples
     frame.pcm_data.resize(size / 2); // 16-bit samples

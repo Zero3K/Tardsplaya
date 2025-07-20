@@ -113,7 +113,7 @@ bool GpacPlayer::Initialize(HWND parentWindow, const std::wstring& channelName) 
                     static int audioCounter = 0;
                     if (++audioCounter % 50 == 0) { // Log every 50th audio frame to avoid spam
                         LogMessage(std::wstring(L"Audio frame #") + std::to_wstring(audioCounter / 50) + 
-                                  std::wstring(L": ") + std::to_wstring(frame.sample_count) + std::wstring(L" samples, ") + 
+                                  std::wstring(L": ") + std::to_wstring(frame.samples) + std::wstring(L" samples, ") + 
                                   std::to_wstring(frame.sample_rate) + std::wstring(L"Hz, ") + std::to_wstring(frame.channels) + std::wstring(L" channels"));
                     }
                 }
