@@ -15,6 +15,7 @@ public:
     ~RealMpegTsParser();
     
     bool Initialize();
+    bool IsInitialized() const { return m_initialized; }
     void Shutdown();
     
     // Process MPEG-TS packets
@@ -34,6 +35,7 @@ private:
     GF_M2TS_Demuxer m_demux;
     H264_DecodeContext m_h264_ctx;
     AAC_DecodeContext m_aac_ctx;
+    bool m_initialized;
     
     std::function<void(const VideoFrame&)> m_video_callback;
     std::function<void(const AudioFrame&)> m_audio_callback;

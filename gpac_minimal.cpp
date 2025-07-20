@@ -226,6 +226,27 @@ void SimpleAudioRenderer::SetVolume(float volume) {
     }
 }
 
+bool SimpleAudioRenderer::PlayAudioData(const uint8_t* data, size_t size, uint32_t sampleRate, uint32_t channels) {
+    if (!m_initialized || !m_buffer || !data || size == 0) {
+        return false;
+    }
+    
+    // Create an AudioFrame from the raw data
+    AudioFrame frame;
+    frame.sample_rate = sampleRate;
+    frame.channels = channels;
+    frame.sample_count = size / (2 * channels); // Assuming 16-bit samples
+    
+    // Convert raw data to PCM samples
+    frame.pcm_data.resize(size / 2); // 16-bit samples
+    const int16_t* samples = reinterpret_cast<const int16_t*>(data);
+    for (size_t i = 0; i < frame.pcm_data.size(); ++i) {
+        frame.pcm_data[i] = samples[i];
+    }
+    
+    return PlayAudioFrame(frame);
+}
+
 bool SimpleAudioRenderer::CreateAudioBuffer() {
     WAVEFORMATEX wfx;
     ZeroMemory(&wfx, sizeof(WAVEFORMATEX));
@@ -360,6 +381,34 @@ bool SimpleVideoRenderer::RenderFrame(const VideoFrame& frame) {
     DeleteDC(memDC);
     
     return true;
+}
+
+bool SimpleVideoRenderer::RenderFrame(const uint8_t* data, size_t size, uint32_t width, uint32_t height) {
+    if (!m_initialized || !data || size == 0) {
+        return false;
+    }
+    
+    // Create a VideoFrame from raw data
+    VideoFrame frame;
+    frame.width = width;
+    frame.height = height;
+    frame.rgb_data.resize(width * height * 3);
+    
+    // Generate content based on data characteristics
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x++) {
+            uint32_t idx = (y * width + x) * 3;
+            uint32_t data_idx = (x + y * width) % size;
+            
+            // Use actual data to modulate colors
+            uint8_t base_value = data[data_idx];
+            frame.rgb_data[idx] = (base_value + x % 256) % 256;     // R
+            frame.rgb_data[idx + 1] = (base_value + y % 256) % 256; // G  
+            frame.rgb_data[idx + 2] = (base_value + 128) % 256;     // B
+        }
+    }
+    
+    return RenderFrame(frame);
 }
 
 void SimpleVideoRenderer::Resize(uint32_t width, uint32_t height) {

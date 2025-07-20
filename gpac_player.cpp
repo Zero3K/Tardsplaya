@@ -96,25 +96,25 @@ bool GpacPlayer::Initialize(HWND parentWindow, const std::wstring& channelName) 
         if (m_terminal->session->ts_parser) {
             LogMessage(L"Setting up video and audio callbacks...");
             m_terminal->session->ts_parser->SetVideoCallback(
-                [this](const uint8_t* data, size_t size, uint32_t width, uint32_t height) {
+                [this](const VideoFrame& frame) {
                     if (m_terminal->renderer) {
-                        m_terminal->renderer->RenderFrame(data, size, width, height);
+                        m_terminal->renderer->RenderFrame(frame);
                     }
                 }
             );
             
             m_terminal->session->ts_parser->SetAudioCallback(
-                [this](const uint8_t* data, size_t size, uint32_t sampleRate, uint32_t channels) {
+                [this](const AudioFrame& frame) {
                     // Process audio through the audio renderer
                     if (m_terminal->session->audio_renderer) {
-                        m_terminal->session->audio_renderer->PlayAudioData(data, size, sampleRate, channels);
+                        m_terminal->session->audio_renderer->PlayAudioFrame(frame);
                     }
                     
                     static int audioCounter = 0;
                     if (++audioCounter % 50 == 0) { // Log every 50th audio frame to avoid spam
                         LogMessage(std::wstring(L"Audio frame #") + std::to_wstring(audioCounter / 50) + 
-                                  std::wstring(L": ") + std::to_wstring(size) + std::wstring(L" bytes, ") + 
-                                  std::to_wstring(sampleRate) + std::wstring(L"Hz, ") + std::to_wstring(channels) + std::wstring(L" channels"));
+                                  std::wstring(L": ") + std::to_wstring(frame.sample_count) + std::wstring(L" samples, ") + 
+                                  std::to_wstring(frame.sample_rate) + std::wstring(L"Hz, ") + std::to_wstring(frame.channels) + std::wstring(L" channels"));
                     }
                 }
             );

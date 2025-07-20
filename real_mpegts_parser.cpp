@@ -10,7 +10,7 @@
 
 
 
-RealMpegTsParser::RealMpegTsParser() {
+RealMpegTsParser::RealMpegTsParser() : m_initialized(false) {
     memset(&m_demux, 0, sizeof(m_demux));
     memset(&m_h264_ctx, 0, sizeof(m_h264_ctx));
     memset(&m_aac_ctx, 0, sizeof(m_aac_ctx));
@@ -38,6 +38,7 @@ bool RealMpegTsParser::Initialize() {
     m_aac_ctx.has_config = false;
     m_aac_ctx.config.valid = false;
     
+    m_initialized = true;
     LogMessage(L"[RealMpegTsParser] Initialized for actual MPEG-TS decoding");
     return true;
 }
@@ -58,6 +59,8 @@ void RealMpegTsParser::Shutdown() {
         delete prog;
     }
     m_demux.programs.clear();
+    
+    m_initialized = false;
 }
 
 bool RealMpegTsParser::ProcessTSPackets(const u8* data, u32 size) {

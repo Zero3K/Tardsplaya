@@ -84,6 +84,7 @@ public:
     void Shutdown();
     
     bool PlayAudioFrame(const AudioFrame& frame);
+    bool PlayAudioData(const uint8_t* data, size_t size, uint32_t sampleRate, uint32_t channels);
     void SetVolume(float volume); // 0.0 to 1.0
     
 private:
@@ -110,6 +111,7 @@ public:
     void Shutdown();
     
     bool RenderFrame(const VideoFrame& frame);
+    bool RenderFrame(const uint8_t* data, size_t size, uint32_t width, uint32_t height);
     void Resize(uint32_t width, uint32_t height);
     
 private:
