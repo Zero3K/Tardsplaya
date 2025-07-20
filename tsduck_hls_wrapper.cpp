@@ -68,7 +68,7 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
         else if (expecting_segment_url) {
             // This is a segment URL
             current_segment.url = std::wstring(line.begin(), line.end());
-            current_segment.sequence_number = media_sequence_ + segments_.size();
+            current_segment.sequence_number = static_cast<double>(media_sequence_ + segments_.size());
             
             segments_.push_back(current_segment);
             

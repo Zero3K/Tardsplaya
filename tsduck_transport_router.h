@@ -11,6 +11,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <map>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX

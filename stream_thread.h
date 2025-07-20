@@ -3,6 +3,7 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <map>
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCKAPI_
 #define NOMINMAX  // Prevent min/max macro conflicts
