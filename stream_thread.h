@@ -39,6 +39,7 @@ std::thread StartStreamThread(
     // Ad-based quality switching parameters
     std::atomic<bool>* is_in_ad_mode = nullptr,
     const std::wstring& ad_mode_quality = L"",
+    const std::wstring& user_quality = L"",
     std::atomic<bool>* needs_switch_to_ad = nullptr,
     std::atomic<bool>* needs_switch_to_user = nullptr,
     const std::map<std::wstring, std::wstring>* quality_to_url_map = nullptr
@@ -59,6 +60,7 @@ std::thread StartTransportStreamThread(
     // Ad-based quality switching parameters
     std::atomic<bool>* is_in_ad_mode = nullptr,
     const std::wstring& ad_mode_quality = L"",
+    const std::wstring& user_quality = L"",
     std::atomic<bool>* needs_switch_to_ad = nullptr,
     std::atomic<bool>* needs_switch_to_user = nullptr,
     const std::map<std::wstring, std::wstring>* quality_to_url_map = nullptr

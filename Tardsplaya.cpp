@@ -995,6 +995,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         // Ad-based quality switching parameters
         &tab.isInAdMode,
         tab.adModeQuality,
+        originalQuality, // user's selected quality for restoration
         &tab.needsQualitySwitchToAd,
         &tab.needsQualitySwitchToUser,
         &tab.qualityToUrl

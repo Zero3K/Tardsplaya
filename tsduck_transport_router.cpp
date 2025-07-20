@@ -714,6 +714,10 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
         }
     }
     
+    // Initialize current URL for dynamic switching
+    current_playlist_url_ = hls_playlist_url;
+    url_switch_pending_ = false;
+    
     // Start HLS fetcher thread
     hls_fetcher_thread_ = std::thread([this, hls_playlist_url, &cancel_token]() {
         HLSFetcherThread(hls_playlist_url, cancel_token);
@@ -804,9 +808,26 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
     
     while (routing_active_ && !cancel_token && consecutive_failures < max_consecutive_failures) {
         try {
+            // Check for URL switch
+            std::wstring current_url;
+            {
+                std::lock_guard<std::mutex> lock(url_switch_mutex_);
+                current_url = current_playlist_url_;
+                if (url_switch_pending_) {
+                    // Clear processed segments when switching URLs to force reprocessing
+                    processed_segments.clear();
+                    first_segment = true;
+                    url_switch_pending_ = false;
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[URL_SWITCH] Applied URL switch to: " + current_url);
+                    }
+                }
+            }
+            
             // Fetch playlist
             std::string playlist_content;
-            if (!HttpGetText(playlist_url, playlist_content, &cancel_token)) {
+            if (!HttpGetText(current_url, playlist_content, &cancel_token)) {
                 consecutive_failures++;
                 if (log_callback_) {
                     log_callback_(L"[TS_ROUTER] Failed to fetch playlist (attempt " + std::to_wstring(consecutive_failures) + L"/" + std::to_wstring(max_consecutive_failures) + L")");
@@ -876,10 +897,15 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         // Find the ad quality URL and switch to it
                         auto ad_url_it = current_config_.quality_to_url_map->find(current_config_.ad_mode_quality);
                         if (ad_url_it != current_config_.quality_to_url_map->end()) {
-                            // Here we would need to restart the stream with the ad quality URL
-                            // For now, we'll just log the action
+                            // Actually switch to the ad quality URL
+                            SwitchPlaylistURL(ad_url_it->second);
+                            
                             if (log_callback_) {
-                                log_callback_(L"[AD_MODE] Would switch to URL: " + ad_url_it->second);
+                                log_callback_(L"[AD_MODE] Switched to ad URL: " + ad_url_it->second);
+                            }
+                        } else {
+                            if (log_callback_) {
+                                log_callback_(L"[AD_MODE] ERROR: Ad quality '" + current_config_.ad_mode_quality + L"' not found in quality map");
                             }
                         }
                     }
@@ -889,7 +915,22 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         current_config_.needs_switch_to_user->store(true);
                         
                         if (log_callback_) {
-                            log_callback_(L"[AD_MODE] Switching back to user quality");
+                            log_callback_(L"[AD_MODE] Switching back to user quality: " + current_config_.user_quality);
+                        }
+                        
+                        // Find the user quality URL and switch back to it
+                        auto user_url_it = current_config_.quality_to_url_map->find(current_config_.user_quality);
+                        if (user_url_it != current_config_.quality_to_url_map->end()) {
+                            // Actually switch back to the user quality URL
+                            SwitchPlaylistURL(user_url_it->second);
+                            
+                            if (log_callback_) {
+                                log_callback_(L"[AD_MODE] Switched back to user URL: " + user_url_it->second);
+                            }
+                        } else {
+                            if (log_callback_) {
+                                log_callback_(L"[AD_MODE] ERROR: User quality '" + current_config_.user_quality + L"' not found in quality map");
+                            }
                         }
                     }
                 }
@@ -929,7 +970,7 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 }
             } else {
                 // Fallback to basic parsing if enhanced parser fails
-                segment_urls = ParseHLSPlaylist(playlist_content, playlist_url);
+                segment_urls = ParseHLSPlaylist(playlist_content, current_url);
             }
             
             if (segment_urls.empty()) {
@@ -1583,6 +1624,18 @@ void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
     }
 }
 
-
+void TransportStreamRouter::SwitchPlaylistURL(const std::wstring& new_url) {
+    if (log_callback_) {
+        log_callback_(L"[URL_SWITCH] Switching playlist URL to: " + new_url);
+    }
+    
+    std::lock_guard<std::mutex> lock(url_switch_mutex_);
+    current_playlist_url_ = new_url;
+    url_switch_pending_ = true;
+    
+    if (log_callback_) {
+        log_callback_(L"[URL_SWITCH] URL switch queued, will take effect on next playlist fetch");
+    }
+}
 
 } // namespace tsduck_transport

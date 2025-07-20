@@ -20,6 +20,7 @@ std::thread StartStreamThread(
     // Ad-based quality switching parameters
     std::atomic<bool>* is_in_ad_mode,
     const std::wstring& ad_mode_quality,
+    const std::wstring& user_quality,
     std::atomic<bool>* needs_switch_to_ad,
     std::atomic<bool>* needs_switch_to_user,
     const std::map<std::wstring, std::wstring>* quality_to_url_map
@@ -42,7 +43,7 @@ std::thread StartStreamThread(
         
         return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
                                          base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle,
-                                         is_in_ad_mode, ad_mode_quality, needs_switch_to_ad, needs_switch_to_user, quality_to_url_map);
+                                         is_in_ad_mode, ad_mode_quality, user_quality, needs_switch_to_ad, needs_switch_to_user, quality_to_url_map);
     }
     
     // Use traditional HLS streaming
@@ -95,6 +96,7 @@ std::thread StartTransportStreamThread(
     // Ad-based quality switching parameters
     std::atomic<bool>* is_in_ad_mode,
     const std::wstring& ad_mode_quality,
+    const std::wstring& user_quality,
     std::atomic<bool>* needs_switch_to_ad,
     std::atomic<bool>* needs_switch_to_user,
     const std::map<std::wstring, std::wstring>* quality_to_url_map
@@ -131,6 +133,7 @@ std::thread StartTransportStreamThread(
             // Configure ad-based quality switching
             config.is_in_ad_mode = is_in_ad_mode;
             config.ad_mode_quality = ad_mode_quality;
+            config.user_quality = user_quality;
             config.needs_switch_to_ad = needs_switch_to_ad;
             config.needs_switch_to_user = needs_switch_to_user;
             config.quality_to_url_map = quality_to_url_map;

@@ -178,6 +178,7 @@ namespace tsduck_transport {
             // Ad-based quality switching parameters
             std::atomic<bool>* is_in_ad_mode = nullptr;
             std::wstring ad_mode_quality = L"";
+            std::wstring user_quality = L"";  // Store user's original quality for restoration
             std::atomic<bool>* needs_switch_to_ad = nullptr;
             std::atomic<bool>* needs_switch_to_user = nullptr;
             const std::map<std::wstring, std::wstring>* quality_to_url_map = nullptr;
@@ -235,6 +236,11 @@ namespace tsduck_transport {
         std::function<void(const std::wstring&)> log_callback_;
         HANDLE player_process_handle_;
         
+        // Current streaming URL for dynamic switching
+        std::wstring current_playlist_url_;
+        std::mutex url_switch_mutex_;
+        std::atomic<bool> url_switch_pending_{false};
+        
         // Frame Number Tagging statistics
         std::atomic<uint64_t> total_frames_processed_{0};
         std::atomic<uint32_t> frames_dropped_{0};
@@ -254,6 +260,9 @@ namespace tsduck_transport {
         
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
+        
+        // Switch to a new playlist URL (for ad-based quality switching)
+        void SwitchPlaylistURL(const std::wstring& new_url);
         
         // TS routing thread - sends TS packets to media player
         void TSRouterThread(std::atomic<bool>& cancel_token);
