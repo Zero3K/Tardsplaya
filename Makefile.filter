@@ -1,0 +1,67 @@
+# Makefile for Tardsplaya DirectShow Filter
+# Cross-compilation using MinGW-w64
+
+# Compiler and tools
+CXX = x86_64-w64-mingw32-g++
+WINDRES = x86_64-w64-mingw32-windres
+DLLTOOL = x86_64-w64-mingw32-dlltool
+
+# Directories
+SRCDIR = .
+OBJDIR = obj
+BINDIR = bin
+
+# Output
+TARGET = TardsplayaFilter.dll
+
+# Compiler flags
+CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -DWIN32 -D_WINDOWS -D_USRDLL -DUNICODE -D_UNICODE
+CXXFLAGS += -I. -I./tlsclient
+
+# Linker flags
+LDFLAGS = -shared -static-libgcc -static-libstdc++
+LDFLAGS += -Wl,--enable-stdcall-fixup -Wl,--kill-at
+LDFLAGS += -Wl,--def=tardsplaya_filter.def
+
+# Libraries
+LIBS = -lole32 -loleaut32 -luuid -lwinmm -lstrmiids
+
+# Source files (simplified for cross-compilation)
+SOURCES = directshow_filter_simple.cpp \
+          directshow_module_simple.cpp \
+          tsduck_transport_router.cpp
+
+# Object files
+OBJECTS = $(SOURCES:%.cpp=$(OBJDIR)/%.o)
+
+# Default target
+all: $(BINDIR)/$(TARGET)
+
+# Create directories
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
+$(BINDIR):
+	mkdir -p $(BINDIR)
+
+# Build DLL
+$(BINDIR)/$(TARGET): $(OBJECTS) tardsplaya_filter.def | $(BINDIR)
+	$(CXX) $(LDFLAGS) -o $@ $(OBJECTS) $(LIBS)
+
+# Compile source files
+$(OBJDIR)/%.o: %.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Clean
+clean:
+	rm -rf $(OBJDIR) $(BINDIR)
+
+# Install (register filter)
+install: $(BINDIR)/$(TARGET)
+	regsvr32 $(BINDIR)/$(TARGET)
+
+# Uninstall (unregister filter)
+uninstall:
+	regsvr32 /u $(BINDIR)/$(TARGET)
+
+.PHONY: all clean install uninstall
