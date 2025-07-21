@@ -9,6 +9,7 @@
 #define IDM_EXIT            205
 #define IDM_SETTINGS        206
 #define IDM_ABOUT           207
+#define IDM_DIRECTSHOW_HELP 208
 
 #define IDD_SETTINGS        300
 
@@ -40,6 +41,11 @@
 #define IDC_CHECK_VERSION       1110
 #define IDC_STATUS_BAR          1111
 
+// DirectShow integration controls
+#define IDC_DIRECTSHOW_ENABLE   1112
+#define IDC_DIRECTSHOW_LAUNCH   1113
+#define IDC_DIRECTSHOW_STATUS   1114
+#define IDC_DIRECTSHOW_HELP     1115
 
 // Tray icon support
 #define WM_TRAYICON             (WM_USER + 100)

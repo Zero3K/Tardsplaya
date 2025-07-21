@@ -27,6 +27,7 @@
 #include "favorites.h"
 #include "playlist_parser.h"
 #include "tsduck_transport_router.h"
+#include "directshow_compat.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 
@@ -46,9 +47,18 @@ struct StreamTab {
     bool playerStarted = false; // Track if player has started successfully
     HANDLE playerProcess = nullptr; // Store player process handle for cleanup
     std::atomic<int> chunkCount{0}; // Track actual chunk queue size
+    
+    // DirectShow integration
+    std::unique_ptr<directshow_compat::DirectShowStreamManager> directshow_manager;
+    HWND hDirectShowBtn = nullptr;  // DirectShow launch button
+    bool directshow_enabled = false;
+    bool directshow_streaming = false;
 
     // Make the struct movable but not copyable
-    StreamTab() : hChild(nullptr), hQualities(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr) {};
+    StreamTab() : hChild(nullptr), hQualities(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr), 
+                  hDirectShowBtn(nullptr), directshow_enabled(false), directshow_streaming(false) {
+        directshow_manager = std::make_unique<directshow_compat::DirectShowStreamManager>();
+    };
     StreamTab(const StreamTab&) = delete;
     StreamTab& operator=(const StreamTab&) = delete;
     StreamTab(StreamTab&& other) noexcept 
@@ -67,6 +77,10 @@ struct StreamTab {
         , playerStarted(other.playerStarted)
         , playerProcess(other.playerProcess)
         , chunkCount(other.chunkCount.load())
+        , directshow_manager(std::move(other.directshow_manager))
+        , hDirectShowBtn(other.hDirectShowBtn)
+        , directshow_enabled(other.directshow_enabled)
+        , directshow_streaming(other.directshow_streaming)
     {
         // Note: With vector capacity reservation, moves should not happen during normal operation
         // This move constructor exists for completeness but should not be called for active streams
@@ -81,6 +95,9 @@ struct StreamTab {
         other.hStopBtn = nullptr;
         other.isStreaming = false;
         other.playerProcess = nullptr;
+        other.hDirectShowBtn = nullptr;
+        other.directshow_enabled = false;
+        other.directshow_streaming = false;
     }
     StreamTab& operator=(StreamTab&& other) noexcept {
         if (this != &other) {
@@ -133,6 +150,13 @@ bool g_verboseDebug = false; // Enable verbose debug output for troubleshooting
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
 bool g_logToFile = false; // Enable logging to debug.log file
+
+// DirectShow integration global settings
+bool g_directShowEnabled = true; // Enable DirectShow compatibility features
+directshow_compat::DirectShowConfig g_directShowConfig;
+
+// Function declarations
+void LaunchDirectShowMode(StreamTab& tab, size_t tabIndex);
 
 
 
@@ -802,6 +826,12 @@ void LoadChannel(StreamTab& tab) {
         if (!tab.isStreaming) {
             EnableWindow(tab.hWatchBtn, TRUE);
         }
+        
+        // Enable DirectShow button if DirectShow is supported and not streaming
+        if (g_directShowEnabled && directshow_compat::IsDirectShowSupported() && 
+            !tab.isStreaming && !tab.directshow_streaming) {
+            EnableWindow(tab.hDirectShowBtn, TRUE);
+        }
     }
 }
 
@@ -971,6 +1001,113 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     // Don't detach the thread - keep it joinable for proper synchronization
 }
 
+void LaunchDirectShowMode(StreamTab& tab, size_t tabIndex) {
+    AddDebugLog(L"LaunchDirectShowMode: Starting for tab " + std::to_wstring(tabIndex) + 
+               L", channel=" + tab.channel + L", directshow_streaming=" + std::to_wstring(tab.directshow_streaming));
+    
+    if (tab.directshow_streaming) {
+        // Stop DirectShow streaming
+        tab.directshow_manager->StopStream();
+        tab.directshow_streaming = false;
+        
+        SetWindowTextW(tab.hDirectShowBtn, L"DirectShow");
+        EnableWindow(tab.hWatchBtn, TRUE);
+        EnableWindow(GetDlgItem(tab.hChild, IDC_CHANNEL), TRUE);
+        EnableWindow(tab.hQualities, TRUE);
+        EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), TRUE);
+        
+        AddLog(L"DirectShow streaming stopped for " + tab.channel);
+        UpdateStatusBar(L"DirectShow mode disabled");
+        return;
+    }
+    
+    // Check if a quality is selected
+    int sel = (int)SendMessage(tab.hQualities, LB_GETCURSEL, 0, 0);
+    if (sel == LB_ERR) {
+        MessageBoxW(tab.hChild, L"Select a quality first.", L"DirectShow Mode", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    
+    wchar_t qual[64];
+    SendMessage(tab.hQualities, LB_GETTEXT, sel, (LPARAM)qual);
+    qual[63] = L'\0';
+    
+    // Find the original quality name
+    std::wstring standardQuality = qual;
+    std::wstring originalQuality;
+    auto mappingIt = tab.standardToOriginalQuality.find(standardQuality);
+    if (mappingIt != tab.standardToOriginalQuality.end()) {
+        originalQuality = mappingIt->second;
+    } else {
+        originalQuality = standardQuality;
+    }
+    
+    auto it = tab.qualityToUrl.find(originalQuality);
+    if (it == tab.qualityToUrl.end()) {
+        MessageBoxW(tab.hChild, L"Failed to resolve quality URL.", L"DirectShow Mode", MB_OK | MB_ICONERROR);
+        return;
+    }
+    
+    std::wstring url = it->second;
+    
+    // Configure DirectShow compatibility mode
+    directshow_compat::DirectShowConfig config;
+    config.enable_directshow_mode = true;
+    config.enhanced_discontinuity_handling = true;
+    config.frame_tagging_enabled = true;
+    config.auto_register_filter = true;
+    config.named_pipe_path = L"\\\\.\\pipe\\TardsplayaStream_" + tab.channel;
+    config.buffer_size_packets = 8000;
+    config.enable_pat_pmt_repetition = true;
+    config.enable_pcr_insertion = true;
+    
+    // Initialize DirectShow manager
+    if (!tab.directshow_manager->Initialize(config)) {
+        MessageBoxW(tab.hChild, L"Failed to initialize DirectShow compatibility mode.", L"DirectShow Mode", MB_OK | MB_ICONERROR);
+        return;
+    }
+    
+    AddLog(L"Starting DirectShow-compatible streaming for " + tab.channel + L" (" + standardQuality + L")");
+    AddLog(L"Named pipe: " + config.named_pipe_path);
+    
+    // Start DirectShow streaming
+    if (!tab.directshow_manager->StartStream(url, tab.cancelToken, 
+        [&](const std::wstring& msg) { AddLog(L"DirectShow: " + msg); }, tab.channel)) {
+        MessageBoxW(tab.hChild, L"Failed to start DirectShow streaming.", L"DirectShow Mode", MB_OK | MB_ICONERROR);
+        return;
+    }
+    
+    tab.directshow_streaming = true;
+    
+    // Update UI
+    SetWindowTextW(tab.hDirectShowBtn, L"Stop DS");
+    EnableWindow(tab.hWatchBtn, FALSE);
+    EnableWindow(GetDlgItem(tab.hChild, IDC_CHANNEL), FALSE);
+    EnableWindow(tab.hQualities, FALSE);
+    EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), FALSE);
+    
+    AddLog(L"DirectShow streaming active. Configure your player to connect to: " + config.named_pipe_path);
+    AddLog(L"Recommended: Use MPC-HC or VLC. See Help menu for setup instructions.");
+    UpdateStatusBar(L"DirectShow mode active | Enhanced discontinuity handling enabled");
+    
+    // Show DirectShow instructions
+    std::wstring instructions = directshow_compat::GetDirectShowInstructions();
+    std::wstring message = L"DirectShow mode is now active!\n\n"
+        L"Named pipe: " + config.named_pipe_path + L"\n\n"
+        L"To connect your player:\n"
+        L"1. Open MPC-HC or VLC\n"
+        L"2. Open the named pipe path above as a file/network stream\n"
+        L"3. Enjoy enhanced discontinuity handling!\n\n"
+        L"Click OK to continue, or Cancel to see full instructions.";
+    
+    int result = MessageBoxW(tab.hChild, message.c_str(),
+        L"DirectShow Mode Active", MB_OKCANCEL | MB_ICONINFORMATION);
+    
+    if (result == IDCANCEL) {
+        MessageBoxW(tab.hChild, instructions.c_str(), L"DirectShow Setup Instructions", MB_OK | MB_ICONINFORMATION);
+    }
+}
+
 LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_CREATE) {
         // (Handled by parent)
@@ -1006,6 +1143,9 @@ LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             break;
         case IDC_STOP:
             StopStream(tab, true); // User clicked stop button
+            break;
+        case IDC_DIRECTSHOW_LAUNCH:
+            LaunchDirectShowMode(tab, tabIndex);
             break;
         case IDC_CHANNEL:
             if (HIWORD(wParam) == EN_CHANGE) {
@@ -1057,12 +1197,18 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     EnableWindow(hWatch, FALSE);
     EnableWindow(hStop, FALSE);
     
+    // DirectShow integration button
+    HWND hDirectShow = CreateWindowEx(0, L"BUTTON", L"DirectShow", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 130, 80, 22, hwnd, (HMENU)IDC_DIRECTSHOW_LAUNCH, g_hInst, nullptr);
+    SendMessage(hDirectShow, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    EnableWindow(hDirectShow, FALSE);
+    
 
 
     tab.hChild = hwnd;
     tab.hQualities = hQualList;
     tab.hWatchBtn = hWatch;
     tab.hStopBtn = hStop;
+    tab.hDirectShowBtn = hDirectShow;
     // Store index instead of pointer to avoid vector reallocation issues
     // We'll set this properly in AddStreamTab after the tab is added to vector
     return hwnd;
@@ -1575,6 +1721,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
     
     // Load settings from INI file
     LoadSettings();
+    
+    // Initialize DirectShow compatibility
+    g_directShowConfig.enable_directshow_mode = g_directShowEnabled;
+    g_directShowConfig.enhanced_discontinuity_handling = true;
+    g_directShowConfig.frame_tagging_enabled = true;
+    g_directShowConfig.auto_register_filter = true;
+    g_directShowConfig.buffer_size_packets = 8000;
+    g_directShowConfig.enable_pat_pmt_repetition = true;
+    g_directShowConfig.enable_pcr_insertion = true;
     
     // Reserve sufficient capacity for streams vector to prevent reallocation
     // This prevents use-after-free bugs when running threads reference cancelToken
