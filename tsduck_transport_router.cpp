@@ -792,6 +792,20 @@ TransportStreamRouter::BufferStats TransportStreamRouter::GetBufferStats() const
     return stats;
 }
 
+bool TransportStreamRouter::GetTSPacket(TSPacket& packet, std::chrono::milliseconds timeout) {
+    if (!ts_buffer_) {
+        return false;
+    }
+    return ts_buffer_->GetNextPacket(packet, timeout);
+}
+
+bool TransportStreamRouter::IsProducerActive() const {
+    if (!ts_buffer_) {
+        return false;
+    }
+    return ts_buffer_->IsProducerActive();
+}
+
 void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token) {
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] HLS fetcher thread started");

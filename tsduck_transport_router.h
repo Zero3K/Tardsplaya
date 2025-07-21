@@ -211,6 +211,12 @@ namespace tsduck_transport {
         };
         BufferStats GetBufferStats() const;
         
+        // Get TS packet from buffer for external streaming (DirectShow compatibility)
+        bool GetTSPacket(TSPacket& packet, std::chrono::milliseconds timeout = std::chrono::milliseconds(1000));
+        
+        // Check if the HLS fetcher is still producing packets
+        bool IsProducerActive() const;
+        
         // Get player process handle for external monitoring
         HANDLE GetPlayerProcessHandle() const { return player_process_handle_; }
         

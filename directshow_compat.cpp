@@ -343,25 +343,46 @@ void DirectShowStreamManager::PipeServerThread()
         
         // Stream data to connected player
         while (pipe_server_active_ && ts_router_ && ts_router_->IsRouting()) {
-            // Get transport stream packets from router
-            auto buffer_stats = ts_router_->GetBufferStats();
+            // Get actual transport stream packets from router buffer
+            tsduck_transport::TSPacket packet;
             
-            if (buffer_stats.buffered_packets > 0) {
-                // For demonstration, create a basic TS packet
-                // In a real implementation, this would read from the actual TS buffer
-                uint8_t ts_packet[188] = {0x47}; // Start with sync byte
+            // Try to get a packet from the TS buffer with a short timeout
+            if (ts_router_->GetTSPacket(packet, std::chrono::milliseconds(10))) {
+                // Process packet for DirectShow compatibility
+                ProcessTSPacketForDirectShow(packet);
                 
-                if (!WriteToNamedPipe(ts_packet, 188)) {
+                // Handle discontinuities for better DirectShow compatibility
+                if (packet.discontinuity) {
+                    HandleDiscontinuityForDirectShow(packet);
+                }
+                
+                // Insert PCR if enabled for timing synchronization
+                if (config_.enable_pcr_insertion) {
+                    InsertPCRForDirectShow(packet);
+                }
+                
+                // Write the actual TS packet to the named pipe
+                if (!WriteToNamedPipe(packet.data, 188)) {
                     if (log_callback_) {
                         log_callback_(L"Lost connection to DirectShow player.");
                     }
                     break;
                 }
                 
-                UpdateStreamStats(tsduck_transport::TSPacket()); // Update with dummy packet
+                UpdateStreamStats(packet);
+            } else {
+                // No packet available, check if we should continue
+                if (!ts_router_->IsProducerActive() && ts_router_->GetBufferStats().buffered_packets == 0) {
+                    // Stream ended
+                    if (log_callback_) {
+                        log_callback_(L"DirectShow: Stream ended - no more packets available.");
+                    }
+                    break;
+                }
+                
+                // Brief sleep to avoid busy waiting
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            
-            std::this_thread::sleep_for(std::chrono::milliseconds(40)); // ~25fps
         }
         
         // Disconnect client
