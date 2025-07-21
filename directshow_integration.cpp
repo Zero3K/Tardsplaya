@@ -2,6 +2,7 @@
 // Communication between main app and DirectShow filter
 
 #include "directshow_integration.h"
+#include "filter_guids.h"
 #include <shlwapi.h>
 #include <process.h>
 #include <fstream>
