@@ -342,12 +342,24 @@ void DirectShowStreamManager::PipeServerThread()
         current_stats_.external_player_connected = true;
         
         // Stream data to connected player
+        size_t packets_sent = 0;
+        size_t total_timeout_count = 0;
+        auto stream_start = std::chrono::steady_clock::now();
+        
         while (pipe_server_active_ && ts_router_ && ts_router_->IsRouting()) {
             // Get actual transport stream packets from router buffer
             tsduck_transport::TSPacket packet;
             
-            // Try to get a packet from the TS buffer with a short timeout
-            if (ts_router_->GetTSPacket(packet, std::chrono::milliseconds(10))) {
+            // Try to get a packet from the TS buffer with a timeout
+            if (ts_router_->GetTSPacket(packet, std::chrono::milliseconds(100))) {
+                // Validate packet before sending
+                if (!packet.IsValid()) {
+                    if (log_callback_) {
+                        log_callback_(L"DirectShow: Invalid TS packet received (missing sync byte)");
+                    }
+                    continue;
+                }
+                
                 // Process packet for DirectShow compatibility
                 ProcessTSPacketForDirectShow(packet);
                 
@@ -370,9 +382,36 @@ void DirectShowStreamManager::PipeServerThread()
                 }
                 
                 UpdateStreamStats(packet);
+                packets_sent++;
+                
+                // Log progress every 1000 packets
+                if (packets_sent % 1000 == 0) {
+                    auto elapsed = std::chrono::steady_clock::now() - stream_start;
+                    auto elapsed_sec = std::chrono::duration<double>(elapsed).count();
+                    if (log_callback_) {
+                        log_callback_(L"DirectShow: Sent " + std::to_wstring(packets_sent) + 
+                                    L" packets in " + std::to_wstring(elapsed_sec) + L" seconds");
+                    }
+                }
             } else {
+                total_timeout_count++;
+                
+                // Check buffer status for diagnostics
+                auto buffer_stats = ts_router_->GetBufferStats();
+                bool producer_active = ts_router_->IsProducerActive();
+                
+                // Log periodic status updates
+                if (total_timeout_count % 50 == 0) { // Every ~5 seconds
+                    if (log_callback_) {
+                        log_callback_(L"DirectShow: Waiting for packets - buffered: " + 
+                                    std::to_wstring(buffer_stats.buffered_packets) + 
+                                    L", producer active: " + (producer_active ? L"yes" : L"no") +
+                                    L", timeouts: " + std::to_wstring(total_timeout_count));
+                    }
+                }
+                
                 // No packet available, check if we should continue
-                if (!ts_router_->IsProducerActive() && ts_router_->GetBufferStats().buffered_packets == 0) {
+                if (!producer_active && buffer_stats.buffered_packets == 0) {
                     // Stream ended
                     if (log_callback_) {
                         log_callback_(L"DirectShow: Stream ended - no more packets available.");
@@ -380,8 +419,13 @@ void DirectShowStreamManager::PipeServerThread()
                     break;
                 }
                 
-                // Brief sleep to avoid busy waiting
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                // If we've been waiting too long without packets, something is wrong
+                if (total_timeout_count > 300 && packets_sent == 0) { // 30 seconds without any packets
+                    if (log_callback_) {
+                        log_callback_(L"DirectShow: Error - No packets received after 30 seconds. HLS stream may have failed.");
+                    }
+                    break;
+                }
             }
         }
         

@@ -357,8 +357,12 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
     }
     
     if (sync_offset >= data_size) {
+        // Log this issue for debugging
         return ts_packets; // No valid sync found
     }
+    
+    size_t packets_found = 0;
+    size_t valid_packets = 0;
     
     // Frame Number Tagging: Reset segment frame counter for new segment
     if (is_first_segment) {
@@ -369,6 +373,7 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
     // Process data in 188-byte TS packet chunks starting from sync position
     for (size_t offset = sync_offset; offset + TS_PACKET_SIZE <= data_size; offset += TS_PACKET_SIZE) {
         TSPacket packet;
+        packets_found++;
         
         // Copy packet data
         memcpy(packet.data, data_ptr + offset, TS_PACKET_SIZE);
@@ -440,6 +445,15 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         // The original HLS TS segments should have correct continuity counters
         
         ts_packets.push_back(packet);
+        valid_packets++;
+    }
+    
+    // Log conversion results for debugging (only for first few segments to avoid spam)
+    static size_t conversion_count = 0;
+    conversion_count++;
+    if (conversion_count <= 3) {
+        // This would need a logging mechanism to be passed in, but for now we can't log here
+        // In a future improvement, we should pass a logger to this function
     }
     
     return ts_packets;
@@ -820,6 +834,10 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
         try {
             // Fetch playlist
             std::string playlist_content;
+            if (log_callback_ && consecutive_failures == 0) {
+                log_callback_(L"[TS_ROUTER] Fetching HLS playlist: " + playlist_url);
+            }
+            
             if (!HttpGetText(playlist_url, playlist_content, &cancel_token)) {
                 consecutive_failures++;
                 if (log_callback_) {
@@ -830,6 +848,10 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 2 seconds, but check every 100ms
                 }
                 continue;
+            }
+            
+            if (log_callback_ && consecutive_failures == 0) {
+                log_callback_(L"[TS_ROUTER] Playlist fetched successfully (" + std::to_wstring(playlist_content.size()) + L" bytes)");
             }
             
             consecutive_failures = 0; // Reset failure counter on success
@@ -857,6 +879,22 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 
                 // Check for discontinuities that indicate ad transitions
                 has_discontinuities = playlist_parser.HasDiscontinuities();
+                
+                if (log_callback_ && segment_urls.empty()) {
+                    log_callback_(L"[TS_ROUTER] Playlist parsed but no segments found");
+                } else if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Found " + std::to_wstring(segment_urls.size()) + L" segments in playlist");
+                }
+            } else {
+                // Fallback to simple parsing if advanced parser fails
+                if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Advanced playlist parsing failed, using fallback parser");
+                }
+                segment_urls = ParseHLSPlaylist(playlist_content, playlist_url);
+                if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Fallback parser found " + std::to_wstring(segment_urls.size()) + L" segments");
+                }
+            }
                 
                 if (has_discontinuities) {
                     if (log_callback_) {
@@ -935,6 +973,10 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 
                 // Fetch segment data
                 std::vector<uint8_t> segment_data;
+                if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Downloading segment: " + segment_url.substr(segment_url.rfind(L'/') + 1));
+                }
+                
                 if (FetchHLSSegment(segment_url, segment_data, &cancel_token)) {
                     if (segment_data.empty()) {
                         if (log_callback_) {
@@ -943,15 +985,23 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
+                    if (log_callback_) {
+                        log_callback_(L"[TS_ROUTER] Segment downloaded successfully (" + std::to_wstring(segment_data.size()) + L" bytes)");
+                    }
+                    
                     // Convert to TS packets
                     auto ts_packets = hls_converter_->ConvertSegment(segment_data, first_segment);
                     first_segment = false;
                     
                     if (ts_packets.empty()) {
                         if (log_callback_) {
-                            log_callback_(L"[TS_ROUTER] No valid TS packets found in segment");
+                            log_callback_(L"[TS_ROUTER] No valid TS packets found in segment - data may not be valid TS format");
                         }
                         continue;
+                    }
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[TS_ROUTER] Converted segment to " + std::to_wstring(ts_packets.size()) + L" TS packets");
                     }
                     
                     // Add to buffer with special handling for post-discontinuity segments
@@ -1007,6 +1057,13 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 } else {
                     if (log_callback_) {
                         log_callback_(L"[TS_ROUTER] Failed to fetch segment: " + segment_url);
+                    }
+                    consecutive_failures++;
+                    if (consecutive_failures >= max_consecutive_failures) {
+                        if (log_callback_) {
+                            log_callback_(L"[TS_ROUTER] Too many consecutive failures - stopping HLS fetcher");
+                        }
+                        break;
                     }
                 }
             }
