@@ -664,6 +664,12 @@ TransportStreamRouter::TransportStreamRouter() {
     last_video_packet_time_ = std::chrono::steady_clock::now();
     last_audio_packet_time_ = std::chrono::steady_clock::now();
     
+    // Initialize ad sequence tracking
+    expecting_post_ad_sync_ = false;
+    last_playlist_had_ads_ = false;
+    last_ad_skip_time_ = std::chrono::steady_clock::now();
+    post_ad_packets_processed_ = 0;
+    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();
@@ -867,6 +873,15 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         segment_urls.push_back(segment.url);
                     }
                     
+                    // Check if we're transitioning from no ads to ads, or continuing with ads
+                    bool transitioning_to_content = last_playlist_had_ads_.load() && stats.ad_segments > 0;
+                    if (transitioning_to_content) {
+                        // We skipped ads in this playlist and are now processing content
+                        EnablePostAdSkipSync();
+                    }
+                    
+                    last_playlist_had_ads_ = true;
+                    
                     if (log_callback_) {
                         std::wstring mode_str = use_conservative_mode ? L"Conservative" : L"Normal";
                         log_callback_(L"[" + stream_id_ + L":AD_SKIP] " + mode_str + L" mode: Ads detected! Total: " + 
@@ -896,6 +911,9 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     for (const auto& segment : segments) {
                         segment_urls.push_back(segment.url);
                     }
+                    
+                    // Reset ad tracking when no ads are detected
+                    last_playlist_had_ads_ = false;
                     
                     if (use_conservative_mode && log_callback_ && stats.discontinuity_count > 0) {
                         log_callback_(L"[" + stream_id_ + L":AD_SKIP] Conservative mode: " + std::to_wstring(stats.discontinuity_count) + 
@@ -1029,6 +1047,24 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         
                         // Check stream health before adding packets
                         CheckStreamHealth(packet);
+                        
+                        // Handle post-ad-skip synchronization
+                        if (expecting_post_ad_sync_.load()) {
+                            post_ad_packets_processed_++;
+                            
+                            // Check for video freeze condition
+                            CheckVideoFreeze();
+                            
+                            // Reset sync after processing a few packets
+                            if (ShouldResetAfterAdSkip()) {
+                                if (log_callback_) {
+                                    log_callback_(L"[" + stream_id_ + L":SYNC] Resetting synchronization after ad sequence");
+                                }
+                                ts_buffer_->Clear();
+                                ResetFrameStatistics();
+                                expecting_post_ad_sync_ = false;
+                            }
+                        }
                         
                         // Implement flow control with latency-optimized timing
                         while (ts_buffer_->GetBufferedPackets() >= buffer_high_watermark && routing_active_ && !cancel_token) {
@@ -1544,6 +1580,41 @@ void TransportStreamRouter::ResetFrameStatistics() {
     video_sync_loss_count_ = 0;
     last_video_packet_time_ = std::chrono::steady_clock::now();
     last_audio_packet_time_ = std::chrono::steady_clock::now();
+}
+
+void TransportStreamRouter::EnablePostAdSkipSync() {
+    expecting_post_ad_sync_ = true;
+    last_ad_skip_time_ = std::chrono::steady_clock::now();
+    post_ad_packets_processed_ = 0;
+    
+    if (log_callback_) {
+        log_callback_(L"[" + stream_id_ + L":SYNC] Post-ad-skip synchronization enabled");
+    }
+}
+
+void TransportStreamRouter::CheckVideoFreeze() {
+    auto now = std::chrono::steady_clock::now();
+    auto video_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_video_packet_time_);
+    auto audio_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_audio_packet_time_);
+    
+    // Detect video freeze: video gap > 2s while audio continues (gap < 1s)
+    if (video_gap.count() > 2000 && audio_gap.count() < 1000 && 
+        video_packets_processed_.load() > 0 && audio_packets_processed_.load() > 0) {
+        
+        if (log_callback_) {
+            log_callback_(L"[" + stream_id_ + L":FREEZE_DETECT] Video freeze detected after ad skip - resetting sync");
+        }
+        
+        // Clear buffers and reset timing
+        ts_buffer_->Clear();
+        ResetFrameStatistics();
+        expecting_post_ad_sync_ = false;
+    }
+}
+
+bool TransportStreamRouter::ShouldResetAfterAdSkip() const {
+    // Reset sync after processing a few packets following an ad skip
+    return expecting_post_ad_sync_.load() && post_ad_packets_processed_.load() >= 5;
 }
 
 bool TransportStreamRouter::IsVideoStreamHealthy() const {
