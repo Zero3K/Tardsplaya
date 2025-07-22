@@ -418,3 +418,6 @@ demo_exit_fix
 demo_exit_fix.exe
 test_exit_behavior.cpp
 demo_exit_fix.cpp
+pts_test
+standalone_pts_test
+*.test

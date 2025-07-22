@@ -33,6 +33,12 @@ namespace tsduck_transport {
         bool is_video_packet = false;     // True if this packet contains video data
         bool is_audio_packet = false;     // True if this packet contains audio data
         
+        // PTS/DTS timing information (extracted from payload)
+        int64_t pts = -1;                 // Presentation timestamp (in 90kHz clock)
+        int64_t dts = -1;                 // Decode timestamp (in 90kHz clock)
+        bool has_pts = false;             // True if PTS is valid
+        bool has_dts = false;             // True if DTS is valid
+        
         // Frame Number Tagging for lag reduction
         uint64_t frame_number = 0;        // Global frame sequence number
         uint32_t segment_frame_number = 0; // Frame number within current segment
@@ -50,6 +56,12 @@ namespace tsduck_transport {
         
         // Parse packet header information
         void ParseHeader();
+        
+        // Parse PTS/DTS from PES header if present
+        void ParsePTSDTS();
+        
+        // Apply timestamp discontinuity correction
+        void ApplyTimestampCorrection(int64_t pts_offset, int64_t dts_offset);
         
         // Check if this is a valid TS packet
         bool IsValid() const { return data[0] == 0x47; }
@@ -101,7 +113,7 @@ namespace tsduck_transport {
         bool low_latency_mode_{false};
     };
     
-    // HLS to Transport Stream converter
+    // HLS to Transport Stream converter with PTS discontinuity handling
     class HLSToTSConverter {
     public:
         HLSToTSConverter();
@@ -113,8 +125,15 @@ namespace tsduck_transport {
         void SetProgramID(uint16_t program_id) { program_id_ = program_id; }
         void SetPMTPID(uint16_t pmt_pid) { pmt_pid_ = pmt_pid; }
         
+        // Enable/disable PTS discontinuity correction
+        void SetPTSDiscontinuityCorrection(bool enable) { pts_correction_enabled_ = enable; }
+        void SetDiscontinuityThreshold(int64_t threshold_ms) { discontinuity_threshold_ = threshold_ms * 90; } // Convert ms to 90kHz
+        
         // Reset converter state for new stream
         void Reset();
+        
+        // Reset PTS/DTS correction state (called when SCTE-35 discontinuity is detected)
+        void ResetDiscontinuityState();
         
     private:
         uint16_t program_id_ = 1;
@@ -124,6 +143,16 @@ namespace tsduck_transport {
         uint8_t continuity_counter_ = 0;
         bool pat_sent_ = false;
         bool pmt_sent_ = false;
+        
+        // PTS/DTS discontinuity correction state
+        bool pts_correction_enabled_ = true;
+        int64_t discontinuity_threshold_ = 1800000; // 20 seconds in 90kHz (20 * 1000 * 90)
+        int64_t last_video_pts_ = -1;
+        int64_t last_video_dts_ = -1;
+        int64_t last_audio_pts_ = -1;
+        int64_t pts_offset_ = 0;
+        int64_t dts_offset_ = 0;
+        bool discontinuity_detected_ = false;
         
         // Frame Number Tagging state
         uint64_t global_frame_counter_ = 0;     // Total frames processed across all segments
@@ -149,6 +178,14 @@ namespace tsduck_transport {
         
         // Detect and classify stream types (video/audio)
         void DetectStreamTypes(TSPacket& packet);
+        
+        // PTS/DTS discontinuity correction methods
+        void CheckAndCorrectDiscontinuity(TSPacket& packet);
+        void ApplyPTSCorrection(std::vector<TSPacket>& packets);
+        int64_t ExtractPTSFromPES(const uint8_t* pes_data, size_t pes_length);
+        int64_t ExtractDTSFromPES(const uint8_t* pes_data, size_t pes_length);
+        void WritePTSToPES(uint8_t* pes_data, int64_t pts);
+        void WriteDTSToPES(uint8_t* pes_data, int64_t dts);
     };
     
     // Transport Stream Router - main component for re-routing streams to media players
@@ -167,6 +204,10 @@ namespace tsduck_transport {
             std::chrono::milliseconds pcr_interval{40}; // PCR every 40ms
             bool enable_pat_pmt_repetition = true;
             std::chrono::milliseconds pat_pmt_interval{100}; // PAT/PMT every 100ms
+            
+            // PTS discontinuity correction settings
+            bool enable_pts_discontinuity_correction = true;
+            int64_t discontinuity_threshold_ms = 20000; // 20 seconds threshold
             
             // Low-latency streaming optimizations
             bool low_latency_mode = true;  // Enable aggressive latency reduction

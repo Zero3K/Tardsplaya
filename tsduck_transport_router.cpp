@@ -182,6 +182,124 @@ void TSPacket::ParseHeader() {
     }
 }
 
+void TSPacket::ParsePTSDTS() {
+    if (!IsValid() || !payload_unit_start) return;
+    
+    // Find PES header start
+    size_t payload_start = 4;
+    bool has_adaptation = (data[3] & 0x20) != 0;
+    
+    if (has_adaptation) {
+        uint8_t adaptation_length = data[4];
+        payload_start = 5 + adaptation_length;
+    }
+    
+    // Check if we have enough space for PES header
+    if (payload_start + 9 >= TS_PACKET_SIZE) return;
+    
+    const uint8_t* pes_start = &data[payload_start];
+    
+    // Check for PES start code (0x000001)
+    if (pes_start[0] != 0x00 || pes_start[1] != 0x00 || pes_start[2] != 0x01) return;
+    
+    // Skip stream_id
+    const uint8_t* pes_header = pes_start + 6;
+    if (payload_start + 9 >= TS_PACKET_SIZE) return;
+    
+    uint8_t pts_dts_flags = (pes_header[1] >> 6) & 0x03;
+    
+    size_t header_offset = 3;
+    
+    // Parse PTS if present
+    if (pts_dts_flags & 0x02) {
+        if (payload_start + 9 + header_offset + 4 >= TS_PACKET_SIZE) return;
+        
+        const uint8_t* pts_data = pes_header + header_offset;
+        pts = ((int64_t)(pts_data[0] & 0x0E) << 29) |
+              ((int64_t)(pts_data[1]) << 22) |
+              ((int64_t)(pts_data[2] & 0xFE) << 14) |
+              ((int64_t)(pts_data[3]) << 7) |
+              ((int64_t)(pts_data[4] & 0xFE) >> 1);
+        has_pts = true;
+        header_offset += 5;
+    }
+    
+    // Parse DTS if present
+    if (pts_dts_flags & 0x01) {
+        if (payload_start + 9 + header_offset + 4 >= TS_PACKET_SIZE) return;
+        
+        const uint8_t* dts_data = pes_header + header_offset;
+        dts = ((int64_t)(dts_data[0] & 0x0E) << 29) |
+              ((int64_t)(dts_data[1]) << 22) |
+              ((int64_t)(dts_data[2] & 0xFE) << 14) |
+              ((int64_t)(dts_data[3]) << 7) |
+              ((int64_t)(dts_data[4] & 0xFE) >> 1);
+        has_dts = true;
+    }
+}
+
+void TSPacket::ApplyTimestampCorrection(int64_t pts_offset, int64_t dts_offset) {
+    if (!IsValid() || !payload_unit_start) return;
+    
+    // Find PES header start
+    size_t payload_start = 4;
+    bool has_adaptation = (data[3] & 0x20) != 0;
+    
+    if (has_adaptation) {
+        uint8_t adaptation_length = data[4];
+        payload_start = 5 + adaptation_length;
+    }
+    
+    // Check if we have enough space for PES header
+    if (payload_start + 9 >= TS_PACKET_SIZE) return;
+    
+    uint8_t* pes_start = &data[payload_start];
+    
+    // Check for PES start code (0x000001)
+    if (pes_start[0] != 0x00 || pes_start[1] != 0x00 || pes_start[2] != 0x01) return;
+    
+    // Skip stream_id
+    uint8_t* pes_header = pes_start + 6;
+    if (payload_start + 9 >= TS_PACKET_SIZE) return;
+    
+    uint8_t pts_dts_flags = (pes_header[1] >> 6) & 0x03;
+    
+    size_t header_offset = 3;
+    
+    // Apply PTS correction if present
+    if ((pts_dts_flags & 0x02) && has_pts) {
+        if (payload_start + 9 + header_offset + 4 >= TS_PACKET_SIZE) return;
+        
+        int64_t corrected_pts = pts + pts_offset;
+        uint8_t* pts_data = pes_header + header_offset;
+        
+        pts_data[0] = (pts_data[0] & 0xF1) | (((corrected_pts >> 29) & 0x0E));
+        pts_data[1] = (corrected_pts >> 22) & 0xFF;
+        pts_data[2] = (pts_data[2] & 0x01) | ((corrected_pts >> 14) & 0xFE);
+        pts_data[3] = (corrected_pts >> 7) & 0xFF;
+        pts_data[4] = (pts_data[4] & 0x01) | ((corrected_pts << 1) & 0xFE);
+        
+        pts = corrected_pts;
+        header_offset += 5;
+    }
+    
+    // Apply DTS correction if present
+    if ((pts_dts_flags & 0x01) && has_dts) {
+        if (payload_start + 9 + header_offset + 4 >= TS_PACKET_SIZE) return;
+        
+        int64_t corrected_dts = dts + dts_offset;
+        uint8_t* dts_data = pes_header + header_offset;
+        
+        dts_data[0] = (dts_data[0] & 0xF1) | (((corrected_dts >> 29) & 0x0E));
+        dts_data[1] = (corrected_dts >> 22) & 0xFF;
+        dts_data[2] = (dts_data[2] & 0x01) | ((corrected_dts >> 14) & 0xFE);
+        dts_data[3] = (corrected_dts >> 7) & 0xFF;
+        dts_data[4] = (dts_data[4] & 0x01) | ((corrected_dts << 1) & 0xFE);
+        
+        dts = corrected_dts;
+    }
+}
+
 // Frame Number Tagging implementations
 void TSPacket::SetFrameInfo(uint64_t global_frame, uint32_t segment_frame, bool key_frame, std::chrono::milliseconds duration) {
     frame_number = global_frame;
@@ -327,6 +445,24 @@ void HLSToTSConverter::Reset() {
     // Reset stream type detection
     detected_video_pid_ = 0;
     detected_audio_pid_ = 0;
+    
+    // Reset PTS/DTS discontinuity correction state
+    last_video_pts_ = -1;
+    last_video_dts_ = -1;
+    last_audio_pts_ = -1;
+    pts_offset_ = 0;
+    dts_offset_ = 0;
+    discontinuity_detected_ = false;
+}
+
+void HLSToTSConverter::ResetDiscontinuityState() {
+    // Reset only the PTS/DTS correction state, not the entire converter
+    last_video_pts_ = -1;
+    last_video_dts_ = -1;
+    last_audio_pts_ = -1;
+    pts_offset_ = 0;
+    dts_offset_ = 0;
+    discontinuity_detected_ = false;
 }
 
 std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
@@ -383,8 +519,18 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         // Parse packet header
         packet.ParseHeader();
         
+        // Parse PTS/DTS if this is a PES start packet
+        if (packet.payload_unit_start) {
+            packet.ParsePTSDTS();
+        }
+        
         // Detect and classify stream types (video/audio)
         DetectStreamTypes(packet);
+        
+        // Apply PTS/DTS discontinuity correction if enabled
+        if (pts_correction_enabled_) {
+            CheckAndCorrectDiscontinuity(packet);
+        }
         
         // Frame Number Tagging: Assign frame numbers for video packets
         if (packet.is_video_packet || packet.payload_unit_start) {
@@ -642,6 +788,70 @@ void HLSToTSConverter::DetectStreamTypes(TSPacket& packet) {
     }
 }
 
+void HLSToTSConverter::CheckAndCorrectDiscontinuity(TSPacket& packet) {
+    if (!packet.has_pts && !packet.has_dts) return;
+    
+    // Check for video stream discontinuities
+    if (packet.is_video_packet && packet.has_pts) {
+        if (last_video_pts_ != -1) {
+            int64_t pts_delta = packet.pts - last_video_pts_;
+            
+            // Check if delta exceeds threshold (indicates discontinuity)
+            if (std::abs(pts_delta) > discontinuity_threshold_) {
+                if (!discontinuity_detected_) {
+                    // First discontinuity detected - calculate offset
+                    pts_offset_ = last_video_pts_ - packet.pts;
+                    if (packet.has_dts) {
+                        dts_offset_ = (last_video_dts_ != -1) ? last_video_dts_ - packet.dts : pts_offset_;
+                    }
+                    discontinuity_detected_ = true;
+                    
+                    AddDebugLog(L"[PTS_DISCONTINUITY] Video PTS jump detected: " + 
+                               std::to_wstring(pts_delta / 90) + L"ms, applying offset: " + 
+                               std::to_wstring(pts_offset_ / 90) + L"ms");
+                }
+            }
+        }
+        
+        // Apply correction if discontinuity was detected
+        if (discontinuity_detected_ && (pts_offset_ != 0 || dts_offset_ != 0)) {
+            packet.ApplyTimestampCorrection(pts_offset_, dts_offset_);
+        }
+        
+        last_video_pts_ = packet.pts;
+        if (packet.has_dts) {
+            last_video_dts_ = packet.dts;
+        }
+    }
+    
+    // Check for audio stream discontinuities
+    if (packet.is_audio_packet && packet.has_pts) {
+        if (last_audio_pts_ != -1) {
+            int64_t pts_delta = packet.pts - last_audio_pts_;
+            
+            // Check if delta exceeds threshold
+            if (std::abs(pts_delta) > discontinuity_threshold_) {
+                if (!discontinuity_detected_) {
+                    // Audio discontinuity detected
+                    pts_offset_ = last_audio_pts_ - packet.pts;
+                    discontinuity_detected_ = true;
+                    
+                    AddDebugLog(L"[PTS_DISCONTINUITY] Audio PTS jump detected: " + 
+                               std::to_wstring(pts_delta / 90) + L"ms, applying offset: " + 
+                               std::to_wstring(pts_offset_ / 90) + L"ms");
+                }
+            }
+        }
+        
+        // Apply correction if discontinuity was detected
+        if (discontinuity_detected_ && pts_offset_ != 0) {
+            packet.ApplyTimestampCorrection(pts_offset_, 0);
+        }
+        
+        last_audio_pts_ = packet.pts;
+    }
+}
+
 // TransportStreamRouter implementation
 TransportStreamRouter::TransportStreamRouter() {
     // Initialize member variables
@@ -699,6 +909,8 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     
     // Reset converter and buffer
     hls_converter_->Reset();
+    hls_converter_->SetPTSDiscontinuityCorrection(config.enable_pts_discontinuity_correction);
+    hls_converter_->SetDiscontinuityThreshold(config.discontinuity_threshold_ms);
     ts_buffer_->Reset(); // This will clear packets and reset producer_active
     ts_buffer_->SetLowLatencyMode(config.low_latency_mode); // Configure buffer for latency mode
     
@@ -711,6 +923,11 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
             log_callback_(L"[LOW_LATENCY] Mode enabled - targeting minimal stream delay");
             log_callback_(L"[LOW_LATENCY] Max segments: " + std::to_wstring(config.max_segments_to_buffer) + 
                          L", Refresh: " + std::to_wstring(config.playlist_refresh_interval.count()) + L"ms");
+        }
+        
+        if (config.enable_pts_discontinuity_correction) {
+            log_callback_(L"[PTS_CORRECTION] Enabled with threshold: " + 
+                         std::to_wstring(config.discontinuity_threshold_ms) + L"ms");
         }
     }
     
