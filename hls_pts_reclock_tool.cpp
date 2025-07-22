@@ -207,35 +207,6 @@ public:
         
         return playlist;
     }
-    
-private:
-    static std::string ResolveUrl(const std::string& url, const std::string& base_url) {
-        if (url.find("http://") == 0 || url.find("https://") == 0) {
-            return url; // Already absolute
-        }
-        
-        // Simple relative URL resolution
-        if (url[0] == '/') {
-            // Absolute path
-            size_t scheme_end = base_url.find("://");
-            if (scheme_end != std::string::npos) {
-                size_t host_end = base_url.find('/', scheme_end + 3);
-                if (host_end != std::string::npos) {
-                    return base_url.substr(0, host_end) + url;
-                } else {
-                    return base_url + url;
-                }
-            }
-        } else {
-            // Relative path
-            size_t last_slash = base_url.find_last_of('/');
-            if (last_slash != std::string::npos) {
-                return base_url.substr(0, last_slash + 1) + url;
-            }
-        }
-        
-        return url;
-    }
 };
 
 // MPEG-TS Parser for PTS extraction
