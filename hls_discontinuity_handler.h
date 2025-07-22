@@ -1,5 +1,6 @@
 #pragma once
 // HLS Discontinuity Handler - Converts HLS streams with discontinuity markers into continuous data
+// Primarily handles #EXT-X-DISCONTINUITY markers for seamless stream transitions
 // Based on concepts from https://github.com/SnailTowardThesun/hls-decode
 
 #include <string>
@@ -103,7 +104,7 @@ namespace hls_discontinuity {
         struct Config {
             bool enable_continuity_correction = true;      // Enable continuity counter correction
             bool enable_timestamp_smoothing = true;        // Enable timestamp smoothing across discontinuities
-            bool enable_ad_detection = true;               // Enable SCTE-35 ad marker detection
+            bool enable_ad_detection = false;              // Enable SCTE-35 ad marker detection (secondary to discontinuity markers)
             bool preserve_stream_timing = false;           // Preserve original timing vs smooth output
             std::chrono::milliseconds max_gap_tolerance{5000}; // Max gap to bridge smoothly
             

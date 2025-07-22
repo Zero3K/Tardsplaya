@@ -706,7 +706,7 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
         hls_discontinuity::HLSDiscontinuityHandler::Config disc_config;
         disc_config.enable_continuity_correction = config.enable_continuity_correction;
         disc_config.enable_timestamp_smoothing = config.enable_timestamp_smoothing;
-        disc_config.enable_ad_detection = true;
+        disc_config.enable_ad_detection = false; // Prioritize discontinuity markers over SCTE-35
         disc_config.max_gap_tolerance = config.max_gap_tolerance;
         disc_config.output_buffer_packets = config.buffer_size_packets / 4; // Use 25% of main buffer
         discontinuity_handler_->SetConfig(disc_config);

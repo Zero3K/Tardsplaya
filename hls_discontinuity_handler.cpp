@@ -242,14 +242,15 @@ std::vector<TSPacketInfo> HLSDiscontinuityHandler::ProcessHLSSegment(const std::
         return result;
     }
     
-    // Handle SCTE-35 ad break markers
-    if (segment_info.has_scte35_out && config_.enable_ad_detection) {
-        StartAdBreak(segment_info);
-    }
-    
-    // Handle discontinuity markers
+    // Handle discontinuity markers first - they are the primary mechanism for stream transitions
     if (segment_info.has_discontinuity) {
         ProcessDiscontinuityMarkers(segment_info);
+    }
+    
+    // Handle SCTE-35 ad break markers only if no discontinuity marker is present
+    // Discontinuity markers take precedence over SCTE-35 timing
+    if (!segment_info.has_discontinuity && segment_info.has_scte35_out && config_.enable_ad_detection) {
+        StartAdBreak(segment_info);
     }
     
     // Process each packet for continuity correction
@@ -267,18 +268,29 @@ std::vector<TSPacketInfo> HLSDiscontinuityHandler::ProcessHLSSegment(const std::
         SmoothTimestamps(result, segment_info);
     }
     
-    // Handle ad break logic
+    // Handle discontinuity-based processing logic
     if (config_.enable_ad_detection) {
-        // If this segment ends an ad break
-        if (segment_info.has_scte35_in && in_ad_break_) {
+        // If this segment has a discontinuity marker, it indicates a stream transition
+        if (segment_info.has_discontinuity) {
+            // End any existing ad break when we hit a discontinuity
+            if (in_ad_break_) {
+                EndAdBreak();
+            }
+            
+            // Release any buffered segments after discontinuity processing
+            auto buffered_packets = ReleaseBufferedSegments();
+            result.insert(result.end(), buffered_packets.begin(), buffered_packets.end());
+        }
+        // If this segment ends an ad break with SCTE-35 IN marker
+        else if (segment_info.has_scte35_in && in_ad_break_) {
             EndAdBreak();
             
             // Release any buffered segments
             auto buffered_packets = ReleaseBufferedSegments();
             result.insert(result.end(), buffered_packets.begin(), buffered_packets.end());
         }
-        // If we should buffer this segment (we're in an ad break and content resumed too early)
-        else if (ShouldBufferSegment(segment_info)) {
+        // If we should buffer this segment (we're in an ad break without discontinuity marker)
+        else if (!segment_info.has_discontinuity && ShouldBufferSegment(segment_info)) {
             // Buffer this segment instead of returning it immediately
             buffered_post_ad_segments_.push(result);
             result.clear(); // Don't return packets yet
@@ -404,6 +416,11 @@ void HLSDiscontinuityHandler::EndAdBreak() {
 
 bool HLSDiscontinuityHandler::ShouldBufferSegment(const SegmentInfo& segment_info) {
     if (!config_.enable_ad_detection) return false;
+    
+    // Never buffer segments with discontinuity markers - they indicate immediate transitions
+    if (segment_info.has_discontinuity) {
+        return false;
+    }
     
     // If we're in an ad break and this segment has SCTE-35 IN, it's the end of the ad
     if (in_ad_break_ && segment_info.has_scte35_in) {
