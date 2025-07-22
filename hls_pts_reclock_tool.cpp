@@ -11,6 +11,7 @@
 #include <algorithm>
 
 #ifdef _WIN32
+#define NOMINMAX  // Prevent min/max macros from windows.h
 #include <windows.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
@@ -579,8 +580,9 @@ private:
         
         // Add payload
         if (packet.has_payload && !packet.payload.empty()) {
-            size_t copy_size = std::min(packet.payload.size(), 
-                                      static_cast<size_t>(MPEGTSParser::TS_PACKET_SIZE - data_start));
+            size_t payload_size = static_cast<size_t>(packet.payload.size());
+            size_t max_size = static_cast<size_t>(MPEGTSParser::TS_PACKET_SIZE - data_start);
+            size_t copy_size = (payload_size < max_size) ? payload_size : max_size;
             std::copy(packet.payload.begin(), packet.payload.begin() + copy_size, 
                      ts_data.begin() + data_start);
         }
