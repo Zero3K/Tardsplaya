@@ -1,3 +1,4 @@
+#define NOMINMAX
 #include "hls_pts_reclock.h"
 #include "tlsclient/tlsclient.h"
 #include <iostream>
@@ -14,7 +15,6 @@
 #include <vector>
 
 #ifdef _WIN32
-#define NOMINMAX  // Prevent min/max macros from windows.h
 #include <windows.h>
 
 // Helper function for wide string to UTF-8 conversion
