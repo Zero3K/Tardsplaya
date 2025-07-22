@@ -8,13 +8,12 @@
 #include <signal.h>
 #include <sstream>
 #include <map>
+#include <algorithm>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <winhttp.h>
-#include <wininet.h>
 #pragma comment(lib, "winhttp.lib")
-#pragma comment(lib, "wininet.lib")
 #endif
 
 using namespace hls_pts_reclock;
