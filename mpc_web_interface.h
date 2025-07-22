@@ -44,6 +44,7 @@ public:
     
     // Discontinuity recovery commands
     bool HandleDiscontinuity();             // Main discontinuity recovery function
+    bool ReopenCurrentStream();             // Reopen current stream/pipe (most robust recovery)
     bool PausePlayback();                   // Pause before discontinuity
     bool ResumePlayback();                  // Resume after discontinuity
     bool FrameStep();                       // Step forward one frame

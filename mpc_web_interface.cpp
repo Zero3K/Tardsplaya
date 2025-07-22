@@ -151,7 +151,7 @@ bool MPCWebInterface::HandleDiscontinuity() {
         return false;
     }
     
-    AddDebugLog(L"[MPC-WEB] Handling discontinuity - trying frame step approach");
+    AddDebugLog(L"[MPC-WEB] Handling discontinuity - trying stream reopen approach");
     
     // Get current state
     PlayerState current_state = GetPlayerState();
@@ -159,8 +159,28 @@ bool MPCWebInterface::HandleDiscontinuity() {
     
     bool success = false;
     
-    if (current_state == PlayerState::Playing) {
-        // Method 1: Try frame step approach first (most precise and least disruptive)
+    // Method 1: Try reopening the current stream/pipe (most robust)
+    // This is the preferred approach as it completely refreshes the stream connection
+    AddDebugLog(L"[MPC-WEB] Attempting stream reopen for discontinuity recovery");
+    
+    if (ReopenCurrentStream()) {
+        // Allow time for stream to reopen and stabilize
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        
+        // Verify the player is responsive after reopening
+        PlayerState reopen_state = GetPlayerState();
+        if (reopen_state == PlayerState::Playing || reopen_state == PlayerState::Loading) {
+            success = true;
+            AddDebugLog(L"[MPC-WEB] Discontinuity handled successfully with stream reopen");
+        } else {
+            AddDebugLog(L"[MPC-WEB] Stream reopen completed but player state unclear, trying fallback");
+        }
+    } else {
+        AddDebugLog(L"[MPC-WEB] Stream reopen failed, trying frame step fallback");
+    }
+    
+    // Fallback 1: Frame step approach (if reopen failed)
+    if (!success && (current_state == PlayerState::Playing || current_state == PlayerState::Unknown)) {
         AddDebugLog(L"[MPC-WEB] Attempting frame step for discontinuity recovery");
         
         if (FrameStep()) {
@@ -174,31 +194,32 @@ bool MPCWebInterface::HandleDiscontinuity() {
                 AddDebugLog(L"[MPC-WEB] Discontinuity handled successfully with frame step");
             } else {
                 AddDebugLog(L"[MPC-WEB] Frame step didn't resolve discontinuity, trying pause/resume");
-                
-                // Fallback to pause/resume if frame step didn't work
-                if (PausePlayback()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    
-                    if (ResumePlayback()) {
-                        success = true;
-                        AddDebugLog(L"[MPC-WEB] Discontinuity handled with pause/resume fallback");
-                    } else {
-                        AddDebugLog(L"[MPC-WEB] Failed to resume after discontinuity pause");
-                    }
-                } else {
-                    AddDebugLog(L"[MPC-WEB] Failed to pause for discontinuity handling");
-                }
             }
         } else {
             AddDebugLog(L"[MPC-WEB] Frame step failed, trying pause/resume fallback");
+        }
+    }
+    
+    // Fallback 2: Pause/resume cycle (if frame step failed or player was paused/stopped)
+    if (!success) {
+        if (current_state == PlayerState::Paused || current_state == PlayerState::Stopped) {
+            // If already paused/stopped, try to resume
+            AddDebugLog(L"[MPC-WEB] Player paused/stopped, attempting to resume for discontinuity recovery");
             
-            // Fallback to pause/resume if frame step command failed
+            if (ResumePlayback() || SendPlayCommand()) {
+                success = true;
+                AddDebugLog(L"[MPC-WEB] Discontinuity handled by resuming paused player");
+            }
+        } else {
+            // Try pause/resume cycle for playing state
+            AddDebugLog(L"[MPC-WEB] Attempting pause/resume cycle for discontinuity recovery");
+            
             if (PausePlayback()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 
                 if (ResumePlayback()) {
                     success = true;
-                    AddDebugLog(L"[MPC-WEB] Discontinuity handled with pause/resume fallback");
+                    AddDebugLog(L"[MPC-WEB] Discontinuity handled with pause/resume cycle");
                 } else {
                     AddDebugLog(L"[MPC-WEB] Failed to resume after discontinuity pause");
                 }
@@ -206,44 +227,9 @@ bool MPCWebInterface::HandleDiscontinuity() {
                 AddDebugLog(L"[MPC-WEB] Failed to pause for discontinuity handling");
             }
         }
-    } else if (current_state == PlayerState::Paused || current_state == PlayerState::Stopped) {
-        // If already paused/stopped, try to resume
-        AddDebugLog(L"[MPC-WEB] Player paused/stopped, attempting to resume for discontinuity recovery");
-        
-        if (ResumePlayback() || SendPlayCommand()) {
-            success = true;
-            AddDebugLog(L"[MPC-WEB] Discontinuity handled by resuming paused player");
-        } else {
-            AddDebugLog(L"[MPC-WEB] Failed to resume paused player for discontinuity");
-        }
-    } else if (current_state == PlayerState::Unknown) {
-        // If state is unknown but web interface is available, attempt recovery anyway
-        AddDebugLog(L"[MPC-WEB] Player state unknown, attempting generic discontinuity recovery");
-        
-        // Try frame step first as it's least disruptive
-        if (FrameStep()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            success = true;
-            AddDebugLog(L"[MPC-WEB] Discontinuity handled with frame step (unknown state)");
-        } else {
-            // Fallback to pause/resume cycle
-            AddDebugLog(L"[MPC-WEB] Frame step failed, trying pause/resume for unknown state");
-            if (PausePlayback()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                
-                if (ResumePlayback()) {
-                    success = true;
-                    AddDebugLog(L"[MPC-WEB] Discontinuity handled with pause/resume (unknown state)");
-                } else {
-                    AddDebugLog(L"[MPC-WEB] Failed to resume after pause (unknown state)");
-                }
-            } else {
-                AddDebugLog(L"[MPC-WEB] Failed to pause for unknown state recovery");
-            }
-        }
     }
     
-    // Fallback: Try seeking to beginning if still having issues
+    // Final fallback: Try seeking to beginning if all else failed
     if (!success) {
         AddDebugLog(L"[MPC-WEB] Attempting seek fallback for discontinuity recovery");
         
@@ -251,7 +237,7 @@ bool MPCWebInterface::HandleDiscontinuity() {
             success = true;
             AddDebugLog(L"[MPC-WEB] Discontinuity handled with seek fallback");
         } else {
-            AddDebugLog(L"[MPC-WEB] Seek fallback also failed");
+            AddDebugLog(L"[MPC-WEB] All discontinuity recovery methods failed");
         }
     }
     
@@ -271,52 +257,70 @@ bool MPCWebInterface::HandleDiscontinuity() {
     return success;
 }
 
+bool MPCWebInterface::ReopenCurrentStream() {
+    AddDebugLog(L"[MPC-WEB] Reopening current stream/pipe");
+    // Use ID_FILE_REOPEN (976) command to reopen current file/stream
+    // This completely refreshes the stream connection and resets decoder state
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=976", response); // 976 is ID_FILE_REOPEN
+}
+
 bool MPCWebInterface::PausePlayback() {
     AddDebugLog(L"[MPC-WEB] Sending pause command");
-    return SendHTTPCommand(L"wm_command=889", std::wstring{}); // 889 is pause command
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=889", response); // 889 is pause command
 }
 
 bool MPCWebInterface::ResumePlayback() {
     AddDebugLog(L"[MPC-WEB] Sending resume/play command");
-    return SendHTTPCommand(L"wm_command=887", std::wstring{}); // 887 is play command
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=887", response); // 887 is play command
 }
 
 bool MPCWebInterface::FrameStep() {
     AddDebugLog(L"[MPC-WEB] Sending frame step command");
-    return SendHTTPCommand(L"wm_command=891", std::wstring{}); // 891 is ID_PLAY_FRAMESTEP
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=891", response); // 891 is ID_PLAY_FRAMESTEP
 }
 
 bool MPCWebInterface::SeekToBeginning() {
     AddDebugLog(L"[MPC-WEB] Seeking to beginning");
-    return SendHTTPCommand(L"wm_command=996", std::wstring{}); // 996 is go to beginning
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=996", response); // 996 is go to beginning
 }
 
 bool MPCWebInterface::RefreshStream() {
     AddDebugLog(L"[MPC-WEB] Refreshing stream");
     // Send refresh/reload command if available
-    return SendHTTPCommand(L"wm_command=919", std::wstring{}); // 919 is reload
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=919", response); // 919 is reload
 }
 
 bool MPCWebInterface::SendPlayCommand() {
-    return SendHTTPCommand(L"wm_command=887", std::wstring{}); // 887 is play
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=887", response); // 887 is play
 }
 
 bool MPCWebInterface::SendPauseCommand() {
-    return SendHTTPCommand(L"wm_command=889", std::wstring{}); // 889 is pause
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=889", response); // 889 is pause
 }
 
 bool MPCWebInterface::SendStopCommand() {
-    return SendHTTPCommand(L"wm_command=890", std::wstring{}); // 890 is stop
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=890", response); // 890 is stop
 }
 
 bool MPCWebInterface::SendCloseCommand() {
-    return SendHTTPCommand(L"wm_command=816", std::wstring{}); // 816 is close
+    std::wstring response;
+    return SendHTTPCommand(L"wm_command=816", response); // 816 is close
 }
 
 bool MPCWebInterface::OpenURL(const std::wstring& url) {
     std::wstring encoded_url = UrlEncode(url);
     std::wstring command = L"wm_command=800&filename=" + encoded_url; // 800 is open file
-    return SendHTTPCommand(command, std::wstring{});
+    std::wstring response;
+    return SendHTTPCommand(command, response);
 }
 
 bool MPCWebInterface::GetPosition(double& position) const {
