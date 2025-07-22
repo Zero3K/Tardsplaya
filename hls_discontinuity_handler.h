@@ -106,6 +106,7 @@ namespace hls_discontinuity {
             bool enable_timestamp_smoothing = true;        // Enable timestamp smoothing across discontinuities
             bool enable_ad_detection = false;              // Enable SCTE-35 ad marker detection (secondary to discontinuity markers)
             bool preserve_stream_timing = false;           // Preserve original timing vs smooth output
+            bool enable_debug_logging = false;             // Enable detailed debug logging
             std::chrono::milliseconds max_gap_tolerance{5000}; // Max gap to bridge smoothly
             
             // Buffer settings for smooth output
@@ -127,6 +128,9 @@ namespace hls_discontinuity {
         void SetConfig(const Config& config) { config_ = config; }
         Config GetConfig() const { return config_; }
         
+        // Set debug logging callback
+        void SetDebugLogCallback(std::function<void(const std::wstring&)> callback) { debug_log_callback_ = callback; }
+        
         // Get processing statistics
         struct ProcessingStats {
             uint64_t segments_processed = 0;
@@ -146,6 +150,9 @@ namespace hls_discontinuity {
     private:
         Config config_;
         ContinuityCounterManager continuity_manager_;
+        
+        // Debug logging callback
+        std::function<void(const std::wstring&)> debug_log_callback_;
         
         // Processing state
         uint64_t segments_processed_ = 0;

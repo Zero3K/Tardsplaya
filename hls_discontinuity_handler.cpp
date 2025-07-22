@@ -57,30 +57,49 @@ bool ContinuityCounterManager::ProcessPacket(TSPacketInfo& packet) {
         return true;
     }
     
-    // Handle packets after discontinuity differently
-    auto it = pid_seen_after_discontinuity_.find(packet.pid);
-    if (it != pid_seen_after_discontinuity_.end() && !it->second) {
-        // First packet for this PID after discontinuity - reset tracking
-        pid_continuity_counters_[packet.pid] = packet.original_continuity_counter;
-        pid_seen_after_discontinuity_[packet.pid] = true;
-        return true;
+    // Check if packet has payload (continuity counter only applies to packets with payload)
+    uint8_t adaptation_field_control = (packet.data[3] >> 4) & 0x03;
+    bool has_payload = (adaptation_field_control == 0x01) || (adaptation_field_control == 0x03);
+    
+    if (!has_payload) {
+        return true; // Skip packets without payload
     }
     
     // Check if we need to correct continuity counter
     auto counter_it = pid_continuity_counters_.find(packet.pid);
     if (counter_it != pid_continuity_counters_.end()) {
+        // We have a previous continuity counter for this PID
         uint8_t expected_counter = (counter_it->second + 1) & 0x0F;
         
-        if (packet.original_continuity_counter != expected_counter) {
-            // Discontinuity in continuity counter - correct it
-            packet.SetContinuityCounter(expected_counter);
-            stats_.continuity_corrections_made++;
+        // Handle packets after discontinuity differently
+        auto disc_it = pid_seen_after_discontinuity_.find(packet.pid);
+        if (disc_it != pid_seen_after_discontinuity_.end() && !disc_it->second) {
+            // First packet for this PID after discontinuity - maintain continuous sequence
+            // Instead of resetting to match the incoming stream, correct it to continue the sequence
+            if (packet.original_continuity_counter != expected_counter) {
+                packet.SetContinuityCounter(expected_counter);
+                stats_.continuity_corrections_made++;
+            }
+            pid_seen_after_discontinuity_[packet.pid] = true;
+            pid_continuity_counters_[packet.pid] = expected_counter;
+        } else {
+            // Normal packet processing - check for continuity breaks
+            if (packet.original_continuity_counter != expected_counter) {
+                // Discontinuity in continuity counter - correct it
+                packet.SetContinuityCounter(expected_counter);
+                stats_.continuity_corrections_made++;
+            }
+            pid_continuity_counters_[packet.pid] = packet.continuity_counter;
         }
-        
-        pid_continuity_counters_[packet.pid] = packet.continuity_counter;
     } else {
-        // First packet for this PID
+        // First packet ever for this PID - initialize tracking
         pid_continuity_counters_[packet.pid] = packet.original_continuity_counter;
+        
+        // If this PID was marked for post-discontinuity handling, mark it as seen
+        auto disc_it = pid_seen_after_discontinuity_.find(packet.pid);
+        if (disc_it != pid_seen_after_discontinuity_.end()) {
+            pid_seen_after_discontinuity_[packet.pid] = true;
+        }
     }
     
     return true;
@@ -109,9 +128,9 @@ ContinuityCounterManager::Stats ContinuityCounterManager::GetStats() const {
 }
 
 bool ContinuityCounterManager::ShouldHaveContinuityCounter(uint16_t pid) const {
-    // PIDs that should have continuity counters (exclude NULL packets and PSI with no payload)
-    return pid != 0x1FFF && // Not NULL packet
-           (pid >= 0x20 || pid == 0x00 || (pid >= 0x10 && pid <= 0x1F)); // Program streams or PSI with payload
+    // PIDs that should have continuity counters (exclude NULL packets)
+    // According to ISO/IEC 13818-1, continuity counter applies to all PIDs except NULL packets
+    return pid != 0x1FFF; // Not NULL packet
 }
 
 uint8_t ContinuityCounterManager::GetNextContinuityCounter(uint16_t pid) {
