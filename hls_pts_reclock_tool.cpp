@@ -13,8 +13,17 @@
 #ifdef _WIN32
 #define NOMINMAX  // Prevent min/max macros from windows.h
 #include <windows.h>
-#include <winhttp.h>
-#pragma comment(lib, "winhttp.lib")
+
+// Use existing HTTP functionality from Tardsplaya
+extern bool HttpGetText(const std::wstring& url, std::string& out);
+
+// Stub for AddLog function required by twitch_api.cpp
+void AddLog(const std::wstring& msg) {
+    // Convert to string and output to stderr for debugging
+    std::string narrow_msg(msg.begin(), msg.end());
+    std::cerr << "[LOG] " << narrow_msg << std::endl;
+}
+
 #endif
 
 using namespace hls_pts_reclock;
@@ -27,102 +36,39 @@ void SignalHandler(int signal) {
     g_running = false;
 }
 
-// HTTP downloader for HLS segments (Windows implementation)
-#ifdef _WIN32
-class WindowsHttpDownloader {
-private:
-    HINTERNET hSession;
-    
+// HTTP downloader for HLS segments using existing Tardsplaya HTTP functionality
+class TardsplayaHttpDownloader {
 public:
-    WindowsHttpDownloader() : hSession(nullptr) {
-        hSession = WinHttpOpen(L"HLS-PTS-Reclock/1.0",
-                              WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                              WINHTTP_NO_PROXY_NAME,
-                              WINHTTP_NO_PROXY_BYPASS,
-                              0);
-    }
-    
-    ~WindowsHttpDownloader() {
-        if (hSession) WinHttpCloseHandle(hSession);
-    }
+    TardsplayaHttpDownloader() = default;
+    ~TardsplayaHttpDownloader() = default;
     
     std::vector<uint8_t> DownloadData(const std::string& url) {
         std::vector<uint8_t> data;
         
-        if (!hSession) return data;
-        
-        // Parse URL
+#ifdef _WIN32
+        // Convert to wide string for existing HTTP function
         std::wstring wide_url(url.begin(), url.end());
-        URL_COMPONENTS urlComp = {};
-        urlComp.dwStructSize = sizeof(urlComp);
+        std::string response;
         
-        wchar_t hostname[256];
-        wchar_t urlPath[1024];
-        urlComp.lpszHostName = hostname;
-        urlComp.dwHostNameLength = sizeof(hostname) / sizeof(wchar_t);
-        urlComp.lpszUrlPath = urlPath;
-        urlComp.dwUrlPathLength = sizeof(urlPath) / sizeof(wchar_t);
+        bool success = HttpGetText(wide_url, response);
         
-        if (!WinHttpCrackUrl(wide_url.c_str(), wide_url.length(), 0, &urlComp)) {
+        if (!success) {
+            std::cerr << "Failed to download from " << url << "\n";
             return data;
         }
         
-        HINTERNET hConnect = WinHttpConnect(hSession, hostname, urlComp.nPort, 0);
-        if (!hConnect) return data;
+        // Convert string response to byte vector
+        data.assign(response.begin(), response.end());
         
-        DWORD flags = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
-        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", urlPath,
-                                              NULL, WINHTTP_NO_REFERER, 
-                                              WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
-        
-        if (hRequest) {
-            if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-                if (WinHttpReceiveResponse(hRequest, NULL)) {
-                    DWORD bytesAvailable = 0;
-                    while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
-                        std::vector<uint8_t> buffer(bytesAvailable);
-                        DWORD bytesRead = 0;
-                        if (WinHttpReadData(hRequest, buffer.data(), bytesAvailable, &bytesRead)) {
-                            data.insert(data.end(), buffer.begin(), buffer.begin() + bytesRead);
-                        }
-                    }
-                }
-            }
-            WinHttpCloseHandle(hRequest);
+        if (data.empty()) {
+            std::cerr << "Downloaded empty response from " << url << "\n";
         }
         
-        WinHttpCloseHandle(hConnect);
-        return data;
-    }
-    
-    bool DownloadToFile(const std::string& url, const std::string& filename) {
-        auto data = DownloadData(url);
-        if (data.empty()) return false;
-        
-        std::ofstream file(filename, std::ios::binary);
-        if (!file.is_open()) return false;
-        
-        file.write(reinterpret_cast<const char*>(data.data()), data.size());
-        return file.good();
-    }
-};
-
-using HttpDownloader = WindowsHttpDownloader;
-
 #else
-// Simple HTTP downloader for non-Windows platforms (basic implementation)
-class SimpleHttpDownloader {
-public:
-    SimpleHttpDownloader() = default;
-    ~SimpleHttpDownloader() = default;
-    
-    std::vector<uint8_t> DownloadData(const std::string& url) {
-        std::vector<uint8_t> data;
-        // For this implementation, we'll just simulate successful download
-        // In a real implementation, you'd use libcurl or similar
-        std::cerr << "Note: HTTP downloading not implemented for this platform\n";
-        std::cerr << "Would download: " << url << "\n";
+        std::cerr << "HTTP downloading not supported on this platform\n";
+        std::cerr << "Attempted URL: " << url << "\n";
+#endif
+        
         return data;
     }
     
@@ -131,15 +77,17 @@ public:
         if (data.empty()) return false;
         
         std::ofstream file(filename, std::ios::binary);
-        if (!file.is_open()) return false;
+        if (!file.is_open()) {
+            std::cerr << "Failed to create output file: " << filename << "\n";
+            return false;
+        }
         
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         return file.good();
     }
 };
 
-using HttpDownloader = SimpleHttpDownloader;
-#endif
+using HttpDownloader = TardsplayaHttpDownloader;
 
 // HLS Playlist Parser
 class HLSPlaylistParser {
@@ -162,6 +110,36 @@ public:
         
         Playlist() : target_duration(0.0), media_sequence(0), is_live(false) {}
     };
+    
+    static std::string ResolveUrl(const std::string& url, const std::string& base_url) {
+        // If url is already absolute, return as-is
+        if (url.find("http://") == 0 || url.find("https://") == 0) {
+            return url;
+        }
+        
+        // Extract base URL directory
+        std::string base_dir = base_url;
+        size_t last_slash = base_dir.find_last_of('/');
+        if (last_slash != std::string::npos) {
+            base_dir = base_dir.substr(0, last_slash + 1);
+        }
+        
+        // Handle relative URLs
+        if (url[0] == '/') {
+            // Absolute path - need to get protocol and host from base_url
+            size_t proto_end = base_url.find("://");
+            if (proto_end != std::string::npos) {
+                size_t host_end = base_url.find('/', proto_end + 3);
+                if (host_end != std::string::npos) {
+                    return base_url.substr(0, host_end) + url;
+                }
+            }
+            return base_url + url;
+        } else {
+            // Relative path
+            return base_dir + url;
+        }
+    }
     
     static Playlist ParsePlaylist(const std::string& content, const std::string& base_url) {
         Playlist playlist;
@@ -188,15 +166,27 @@ public:
                         if (comma_pos != std::string::npos) {
                             duration_str = duration_str.substr(0, comma_pos);
                         }
-                        current_segment.duration = std::stod(duration_str);
-                        has_extinf = true;
+                        try {
+                            current_segment.duration = std::stod(duration_str);
+                            has_extinf = true;
+                        } catch (const std::exception& e) {
+                            std::cerr << "Failed to parse segment duration: " << duration_str << "\n";
+                        }
                     }
                 } else if (line.find("#EXT-X-DISCONTINUITY") == 0) {
                     current_segment.has_discontinuity = true;
                 } else if (line.find("#EXT-X-TARGETDURATION:") == 0) {
-                    playlist.target_duration = std::stod(line.substr(22));
+                    try {
+                        playlist.target_duration = std::stod(line.substr(22));
+                    } catch (const std::exception& e) {
+                        std::cerr << "Failed to parse target duration\n";
+                    }
                 } else if (line.find("#EXT-X-MEDIA-SEQUENCE:") == 0) {
-                    playlist.media_sequence = std::stoll(line.substr(22));
+                    try {
+                        playlist.media_sequence = std::stoll(line.substr(22));
+                    } catch (const std::exception& e) {
+                        std::cerr << "Failed to parse media sequence\n";
+                    }
                 } else if (line.find("#EXT-X-PLAYLIST-TYPE:") == 0) {
                     std::string type = line.substr(21);
                     playlist.is_live = (type != "VOD");
@@ -402,17 +392,37 @@ public:
         }
         
         // Download and parse HLS playlist
+        std::cout << "Downloading playlist from: " << args_.input_url << "\n";
         auto playlist_data = downloader_.DownloadData(args_.input_url);
         if (playlist_data.empty()) {
-            std::cerr << "Failed to download HLS playlist\n";
+            std::cerr << "Failed to download HLS playlist from: " << args_.input_url << "\n";
+            std::cerr << "This could be due to:\n";
+            std::cerr << "  - Network connectivity issues\n";
+            std::cerr << "  - Invalid URL or server not responding\n";
+            std::cerr << "  - TLS/SSL certificate problems\n";
+            std::cerr << "  - Server blocking the request\n";
             return false;
         }
         
+        std::cout << "Downloaded " << playlist_data.size() << " bytes of playlist data\n";
+        
         std::string playlist_content(playlist_data.begin(), playlist_data.end());
+        if (args_.verbose) {
+            std::cout << "Playlist content preview:\n";
+            std::cout << playlist_content.substr(0, 500) << "\n";
+            if (playlist_content.size() > 500) {
+                std::cout << "...\n";
+            }
+        }
+        
         auto playlist = HLSPlaylistParser::ParsePlaylist(playlist_content, args_.input_url);
         
         if (playlist.segments.empty()) {
             std::cerr << "No segments found in HLS playlist\n";
+            std::cerr << "This could indicate:\n";
+            std::cerr << "  - Invalid M3U8 format\n";
+            std::cerr << "  - Empty playlist\n";
+            std::cerr << "  - Incorrect URL (not pointing to a valid HLS stream)\n";
             return false;
         }
         
@@ -421,6 +431,12 @@ public:
             std::cout << "Target duration: " << playlist.target_duration << "s\n";
             std::cout << "Media sequence: " << playlist.media_sequence << "\n";
             std::cout << "Is live: " << (playlist.is_live ? "yes" : "no") << "\n";
+            
+            // Show first few segment URLs for debugging
+            std::cout << "First few segment URLs:\n";
+            for (size_t i = 0; i < playlist.segments.size() && i < 3; ++i) {
+                std::cout << "  " << (i + 1) << ": " << playlist.segments[i].url << "\n";
+            }
         }
         
         return ProcessSegments(playlist);
@@ -465,7 +481,26 @@ private:
             auto segment_data = downloader_.DownloadData(segment.url);
             if (segment_data.empty()) {
                 std::cerr << "Failed to download segment: " << segment.url << "\n";
+                std::cerr << "Skipping this segment and continuing...\n";
                 continue;
+            }
+            
+            if (args_.verbose) {
+                std::cout << "Downloaded " << segment_data.size() << " bytes for segment " << (segments_processed + 1) << "\n";
+            }
+            
+            // Validate that this looks like MPEG-TS data
+            if (segment_data.size() < 188 || segment_data[0] != 0x47) {
+                std::cerr << "Warning: Segment data doesn't appear to be valid MPEG-TS (size: " 
+                         << segment_data.size() << ", first byte: 0x" 
+                         << std::hex << static_cast<int>(segment_data[0]) << std::dec << ")\n";
+                if (args_.verbose) {
+                    std::cout << "First 16 bytes: ";
+                    for (size_t i = 0; i < 16 && i < segment_data.size(); ++i) {
+                        std::cout << std::hex << static_cast<int>(segment_data[i]) << " ";
+                    }
+                    std::cout << std::dec << "\n";
+                }
             }
             
             // Parse MPEG-TS packets
