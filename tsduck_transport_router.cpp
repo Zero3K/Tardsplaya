@@ -208,7 +208,6 @@ std::wstring TSPacket::GetFrameDebugInfo() const {
     if (payload_unit_start) info += L" [START]";
     if (discontinuity) info += L" [DISC]";
     if (video_sync_lost) info += L" [SYNC_LOST]";
-    if (post_ad_skip) info += L" [POST_AD_SKIP]";
     
     if (frame_duration.count() > 0) {
         info += L" (" + std::to_wstring(frame_duration.count()) + L"ms)";
@@ -330,7 +329,7 @@ void HLSToTSConverter::Reset() {
     detected_audio_pid_ = 0;
 }
 
-std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment, bool post_ad_skip) {
+std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
     std::vector<TSPacket> ts_packets;
     
     if (hls_data.empty()) {
@@ -386,11 +385,6 @@ std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t
         
         // Detect and classify stream types (video/audio)
         DetectStreamTypes(packet);
-        
-        // Mark packets that follow ad skips for special sync handling
-        if (post_ad_skip) {
-            packet.SetPostAdSkip(true);
-        }
         
         // Frame Number Tagging: Assign frame numbers for video packets
         if (packet.is_video_packet || packet.payload_unit_start) {
@@ -670,11 +664,6 @@ TransportStreamRouter::TransportStreamRouter() {
     last_video_packet_time_ = std::chrono::steady_clock::now();
     last_audio_packet_time_ = std::chrono::steady_clock::now();
     
-    // Initialize post-ad-skip sync monitoring
-    expecting_post_ad_skip_sync_ = false;
-    last_ad_skip_time_ = std::chrono::steady_clock::now();
-    post_ad_skip_packets_processed_ = 0;
-    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();
@@ -878,42 +867,6 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         segment_urls.push_back(segment.url);
                     }
                     
-                    // Check if this is the end of an ad sequence (content resumes after ads)
-                    bool ad_sequence_ended = false;
-                    if (stats.ad_segments > 0 && !content_segments.empty()) {
-                        // Look for the pattern: ad segments followed by content segments
-                        auto all_segments = playlist_parser.GetSegments();
-                        for (size_t i = 1; i < all_segments.size(); ++i) {
-                            if (all_segments[i-1].is_ad_segment && !all_segments[i].is_ad_segment) {
-                                ad_sequence_ended = true;
-                                break;
-                            }
-                        }
-                    }
-                    
-                    if (ad_sequence_ended) {
-                        // Reset converter and buffer to prevent video/audio desync after ad skips
-                        if (log_callback_) {
-                            log_callback_(L"[" + stream_id_ + L":SYNC_FIX] Ad sequence ended - resetting stream sync to prevent desync");
-                        }
-                        
-                        // Clear buffer immediately to prevent accumulated timing drift
-                        ts_buffer_->Clear();
-                        
-                        // Reset converter state to clear any accumulated timing offset
-                        hls_converter_->Reset();
-                        
-                        // Reset frame statistics to prevent false drop alerts after ad skip
-                        ResetFrameStatistics();
-                        
-                        // Enable special monitoring for post-ad-skip sync
-                        EnablePostAdSkipSync();
-                        
-                        if (log_callback_) {
-                            log_callback_(L"[" + stream_id_ + L":SYNC_FIX] Stream synchronization reset complete");
-                        }
-                    }
-                    
                     if (log_callback_) {
                         std::wstring mode_str = use_conservative_mode ? L"Conservative" : L"Normal";
                         log_callback_(L"[" + stream_id_ + L":AD_SKIP] " + mode_str + L" mode: Ads detected! Total: " + 
@@ -922,9 +875,6 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                                      L", Ads: " + std::to_wstring(stats.ad_segments) + L" (skipped)");
                         if (!stats.detection_reason.empty()) {
                             log_callback_(L"[" + stream_id_ + L":AD_SKIP] Reason: " + stats.detection_reason);
-                        }
-                        if (ad_sequence_ended) {
-                            log_callback_(L"[" + stream_id_ + L":SYNC_FIX] Applied sync fix for ad sequence transition");
                         }
                     }
                 } else if (ads_detected && !detection_reliable) {
@@ -1042,8 +992,8 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Convert to TS packets with ad-skip sync handling
-                    auto ts_packets = hls_converter_->ConvertSegment(segment_data, first_segment, ad_sequence_ended);
+                    // Convert to TS packets
+                    auto ts_packets = hls_converter_->ConvertSegment(segment_data, first_segment);
                     first_segment = false;
                     
                     if (ts_packets.empty()) {
@@ -1223,63 +1173,14 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             std::chrono::milliseconds(50);    // Standard timeout
             
         if (ts_buffer_->GetNextPacket(packet, packet_timeout)) {
-            // Enhanced video/audio desync detection and mitigation
-            auto now = std::chrono::steady_clock::now();
-            
-            // Monitor for video/audio desync patterns common after ad skips
-            if (packet.is_video_packet) {
-                last_video_packet_time_ = now;
-            } else if (packet.is_audio_packet) {
-                last_audio_packet_time_ = now;
-            }
-            
-            // Check for video freeze while audio continues (common after ad skips)
-            auto video_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_video_packet_time_);
-            auto audio_gap = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_audio_packet_time_);
-            
-            // If video has stopped but audio continues, this indicates desync
-            if (video_gap.count() > 2000 && audio_gap.count() < 500 && packets_sent > 100) {
-                if (log_callback_) {
-                    log_callback_(L"[DESYNC_FIX] Video freeze detected (video gap: " + std::to_wstring(video_gap.count()) + 
-                                 L"ms, audio gap: " + std::to_wstring(audio_gap.count()) + L"ms) - applying recovery");
-                }
-                
-                // Apply desync recovery: flush buffer and reset timing
-                ts_buffer_->Clear();
-                hls_converter_->Reset();
-                ResetFrameStatistics();
-                EnablePostAdSkipSync();
-                
-                if (log_callback_) {
-                    log_callback_(L"[DESYNC_FIX] Stream reset applied to recover from video freeze");
-                }
-                
-                // Skip this iteration to allow reset to take effect
-                continue;
-            }
-            // Frame Number Tagging: Track frame statistics with enhanced post-ad-skip handling
+            // Frame Number Tagging: Track frame statistics
             if (packet.frame_number > 0) {
                 // Check for frame drops or duplicates
                 uint64_t current_frame = packet.frame_number;
                 uint64_t last_frame = last_frame_number_.load();
                 
-                // Special handling for post-ad-skip packets to prevent false frame drop detection
-                if (packet.post_ad_skip && packet.is_video_packet) {
-                    // This packet follows an ad skip - reset expectations to prevent false alarms
-                    if (log_callback_) {
-                        log_callback_(L"[SYNC_FIX] Post-ad-skip video packet detected - resetting frame tracking");
-                    }
-                    
-                    // Don't check for frame drops after ad skips - the sequence is expected to be non-continuous
-                    last_frame_number_ = current_frame;
-                    total_frames_processed_++;
-                    
-                    // Special logging for post-ad-skip frames
-                    if (log_callback_) {
-                        log_callback_(L"[SYNC_FIX] " + packet.GetFrameDebugInfo() + L" [POST_AD_SKIP]");
-                    }
-                } else if (current_frame > last_frame + 1 && last_frame > 0) {
-                    // Frame drop detected (only if not post-ad-skip)
+                if (current_frame > last_frame + 1) {
+                    // Frame drop detected
                     uint32_t dropped = static_cast<uint32_t>(current_frame - last_frame - 1);
                     frames_dropped_ += dropped;
                     
@@ -1288,54 +1189,29 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                                      L" frames dropped between #" + std::to_wstring(last_frame) + 
                                      L" and #" + std::to_wstring(current_frame));
                     }
-                } else if (current_frame <= last_frame && last_frame > 0 && !packet.post_ad_skip) {
-                    // Potential duplicate or reordered frame (only if not post-ad-skip)
+                } else if (current_frame <= last_frame && last_frame > 0) {
+                    // Potential duplicate or reordered frame
                     frames_duplicated_++;
                     
                     if (log_callback_) {
                         log_callback_(L"[FRAME_TAG] Duplicate/reordered frame: #" + std::to_wstring(current_frame) + 
                                      L" (last: #" + std::to_wstring(last_frame) + L")");
                     }
-                } else {
-                    // Normal frame progression
-                    last_frame_number_ = current_frame;
-                    total_frames_processed_++;
                 }
                 
-                // Video-specific frame tracking with post-ad-skip monitoring
+                last_frame_number_ = current_frame;
+                total_frames_processed_++;
+                
+                // Video-specific frame tracking
                 if (packet.is_video_packet) {
                     video_frames_processed_++;
                     last_video_frame_number_ = packet.video_frame_number;
-                    
-                    // Enhanced post-ad-skip sync monitoring
-                    if (packet.post_ad_skip) {
-                        post_ad_skip_packets_processed_++;
-                        
-                        // Monitor for healthy video resumption after ad skip
-                        if (post_ad_skip_packets_processed_ >= 10) { // After 10 post-ad-skip packets
-                            expecting_post_ad_skip_sync_ = false;
-                            if (log_callback_) {
-                                log_callback_(L"[SYNC_FIX] Post-ad-skip sync monitoring complete - video stream stable");
-                            }
-                        }
-                    }
                     
                     // Check for video synchronization issues
                     if (packet.video_sync_lost) {
                         video_sync_loss_count_++;
                         if (log_callback_) {
                             log_callback_(L"[VIDEO_SYNC] Video synchronization lost at frame #" + std::to_wstring(current_frame));
-                            
-                            // If this happens during post-ad-skip period, apply additional recovery
-                            if (expecting_post_ad_skip_sync_) {
-                                log_callback_(L"[SYNC_FIX] Video sync loss during post-ad-skip period - applying enhanced recovery");
-                                
-                                // Clear a small portion of buffer to help resync
-                                for (int i = 0; i < 5 && !ts_buffer_->IsEmpty(); ++i) {
-                                    TSPacket dummy;
-                                    ts_buffer_->GetNextPacket(dummy, std::chrono::milliseconds(1));
-                                }
-                            }
                         }
                     }
                 }
@@ -1668,19 +1544,6 @@ void TransportStreamRouter::ResetFrameStatistics() {
     video_sync_loss_count_ = 0;
     last_video_packet_time_ = std::chrono::steady_clock::now();
     last_audio_packet_time_ = std::chrono::steady_clock::now();
-    
-    // Reset post-ad-skip monitoring
-    post_ad_skip_packets_processed_ = 0;
-}
-
-void TransportStreamRouter::EnablePostAdSkipSync() {
-    expecting_post_ad_skip_sync_ = true;
-    last_ad_skip_time_ = std::chrono::steady_clock::now();
-    post_ad_skip_packets_processed_ = 0;
-    
-    if (log_callback_) {
-        log_callback_(L"[SYNC_FIX] Post-ad-skip sync monitoring enabled");
-    }
 }
 
 bool TransportStreamRouter::IsVideoStreamHealthy() const {

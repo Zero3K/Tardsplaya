@@ -42,7 +42,6 @@ namespace tsduck_transport {
         // Video synchronization data
         uint64_t video_frame_number = 0;  // Video-specific frame counter
         bool video_sync_lost = false;     // True if video synchronization is lost
-        bool post_ad_skip = false;        // True if this packet follows an ad skip sequence
         
         TSPacket() {
             memset(data, 0, TS_PACKET_SIZE);
@@ -61,9 +60,6 @@ namespace tsduck_transport {
         std::wstring GetFrameDebugInfo() const;
         bool IsFrameDropDetected(const TSPacket& previous_packet) const;
         bool IsVideoSyncValid() const;
-        
-        // Set video synchronization info after ad skip reset
-        void SetPostAdSkip(bool post_skip = true) { post_ad_skip = post_skip; }
     };
     
     // Transport Stream buffer for smooth re-routing
@@ -110,8 +106,8 @@ namespace tsduck_transport {
     public:
         HLSToTSConverter();
         
-        // Convert HLS segment data to TS packets with ad-skip sync handling
-        std::vector<TSPacket> ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment = false, bool post_ad_skip = false);
+        // Convert HLS segment data to TS packets
+        std::vector<TSPacket> ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment = false);
         
         // Set conversion parameters
         void SetProgramID(uint16_t program_id) { program_id_ = program_id; }
@@ -240,7 +236,7 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_frame_time_;
         std::chrono::steady_clock::time_point stream_start_time_;
         
-        // Enhanced video/audio stream health tracking
+        // Video/Audio stream health tracking
         std::atomic<uint64_t> video_packets_processed_{0};
         std::atomic<uint64_t> audio_packets_processed_{0};
         std::atomic<uint64_t> video_frames_processed_{0};
@@ -249,22 +245,14 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_video_packet_time_;
         std::chrono::steady_clock::time_point last_audio_packet_time_;
         
-        // Post-ad-skip sync monitoring
-        std::atomic<bool> expecting_post_ad_skip_sync_{false};
-        std::chrono::steady_clock::time_point last_ad_skip_time_;
-        std::atomic<uint32_t> post_ad_skip_packets_processed_{0};
-        
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
         
         // TS routing thread - sends TS packets to media player
         void TSRouterThread(std::atomic<bool>& cancel_token);
         
-        // Reset frame statistics (for discontinuities and ad skips)
+        // Reset frame statistics (for discontinuities)
         void ResetFrameStatistics();
-        
-        // Enable post-ad-skip sync monitoring
-        void EnablePostAdSkipSync();
         
         // Video stream health monitoring
         bool IsVideoStreamHealthy() const;
