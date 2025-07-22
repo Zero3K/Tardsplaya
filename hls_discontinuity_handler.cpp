@@ -274,6 +274,10 @@ HLSDiscontinuityHandler::ProcessingStats HLSDiscontinuityHandler::GetStats() con
     stats.ad_breaks_detected = ad_breaks_detected_;
     stats.total_gap_time_bridged = total_gap_time_bridged_;
     
+    // Get continuity corrections from continuity manager
+    auto continuity_stats = continuity_manager_.GetStats();
+    stats.continuity_corrections_made = continuity_stats.continuity_corrections_made;
+    
     // Calculate average segment duration
     if (!segment_durations_.empty()) {
         double total = 0.0;

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <mutex>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -129,6 +130,7 @@ namespace hls_discontinuity {
             uint64_t discontinuities_detected = 0;
             uint64_t discontinuities_smoothed = 0;
             uint64_t ad_breaks_detected = 0;
+            uint64_t continuity_corrections_made = 0;
             std::chrono::milliseconds total_gap_time_bridged{0};
             double average_segment_duration_ms = 0.0;
         };
