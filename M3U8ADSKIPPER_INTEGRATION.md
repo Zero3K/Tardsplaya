@@ -92,15 +92,80 @@ In this example:
 ### Files Modified
 
 - `tsduck_hls_wrapper.h` - Added ad detection structures and methods
-- `tsduck_hls_wrapper.cpp` - Implemented m3u8adskipper algorithm
+- `tsduck_hls_wrapper.cpp` - Implemented m3u8adskipper algorithm with multi-stream awareness
 - `tsduck_transport_router.cpp` - Integrated ad filtering into stream processing
+- `tsduck_transport_router.h` - Added stream instance isolation
 
 ### Key Methods
 
-- `PlaylistParser::DetectAds()` - Main ad detection entry point
+- `PlaylistParser::DetectAds(bool conservative_mode)` - Main ad detection entry point with multi-stream support
 - `PlaylistParser::GetContentSegments()` - Returns only non-ad segments
-- `PlaylistParser::GetAdDetectionStats()` - Provides detection statistics
+- `PlaylistParser::GetAdDetectionStats()` - Provides detection statistics including reliability info
 - `PlaylistParser::ClassifySegmentsByDiscontinuity()` - Groups segments by stream
 - `PlaylistParser::DetermineContentGroup()` - Identifies which group contains content
+- `PlaylistParser::ValidateAdDetectionResult()` - Validates detection confidence
 
-This implementation provides the same core functionality as the original m3u8adskipper module while being fully integrated into Tardsplaya's existing streaming infrastructure.
+## Multi-Stream Improvements (v2.0)
+
+### Issue Resolution
+
+**Problem**: Ad detection became unreliable when multiple stream instances were running concurrently due to resource contention and timing issues.
+
+**Solution**: Implemented multi-stream aware ad detection with conservative fallbacks and system load detection.
+
+### New Features
+
+#### Conservative Mode
+- **Automatic Activation**: Enabled when multiple streams are active or system is under load
+- **Stricter Thresholds**: Requires 3:1 content-to-ad ratio (vs 2:1 in normal mode)
+- **Better Validation**: Enhanced checks for segment patterns and discontinuity counts
+- **Fallback Logic**: Automatically streams all segments if detection is unreliable
+
+#### Stream Instance Isolation
+- **Unique Stream IDs**: Each stream gets a unique identifier (`stream_0`, `stream_1`, etc.)
+- **Independent Logging**: Clear separation of log messages between stream instances
+- **Per-Stream Statistics**: Ad detection metrics tracked separately for each stream
+
+#### System Load Detection
+- **Active Stream Monitoring**: Tracks concurrent stream count via `StreamResourceManager`
+- **Resource Pressure Detection**: Identifies when system is under load
+- **Adaptive Behavior**: Automatically switches modes based on system conditions
+
+### Enhanced Status Messages
+
+#### Normal Operation (Single Stream)
+```
+[stream_0] System status: 1 active streams, load=NORMAL
+[stream_0:AD_SKIP] Normal mode: Ads detected! Total: 8, Content: 6, Ads: 2 (skipped)
+```
+
+#### Conservative Mode (Multiple Streams)
+```
+[stream_1] System status: 3 active streams, load=HIGH
+[stream_1:AD_SKIP] Conservative mode: Ads detected! Total: 12, Content: 9, Ads: 3 (skipped)
+[stream_2:AD_SKIP] Conservative mode: 4 discontinuities found but no reliable ad pattern detected
+```
+
+#### Reliability Fallback
+```
+[stream_0:AD_SKIP] Ad detection unreliable - using all segments for stability
+[stream_0:AD_SKIP] Reason: Conservative mode: insufficient confidence (ratio 1.5 < 3.0)
+```
+
+### Benefits
+
+1. **Reliable Multi-Stream Operation**: No false ad detection when multiple streams are running
+2. **Automatic Adaptation**: System adjusts behavior based on load without user intervention
+3. **Stream Isolation**: Each stream operates independently without interference
+4. **Graceful Degradation**: Falls back to normal playback if ad detection becomes uncertain
+5. **Performance Optimization**: Reduces overhead when system resources are constrained
+
+### Testing Results
+
+✅ **Single Stream**: Normal ad detection with 2:1 confidence threshold  
+✅ **Multiple Streams**: Conservative detection with 3:1 confidence threshold  
+✅ **Resource Pressure**: Automatic fallback to normal playback when detection is unreliable  
+✅ **Stream Isolation**: Independent operation without cross-stream interference  
+✅ **Edge Cases**: Proper handling of ambiguous discontinuity patterns  
+
+This implementation provides the same core functionality as the original m3u8adskipper module while being fully integrated into Tardsplaya's existing streaming infrastructure and optimized for reliable multi-stream operation.
