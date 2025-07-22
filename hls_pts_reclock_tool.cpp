@@ -214,6 +214,7 @@ public:
                     playlist.is_live = (type != "VOD");
                 } else if (line.find("#EXT-X-ENDLIST") == 0) {
                     // Presence of ENDLIST indicates this is a VOD stream
+                    // However, when streaming to stdout, treat as live to maintain continuous output
                     playlist.is_live = false;
                 }
             } else {
@@ -425,6 +426,14 @@ public:
             return false;
         }
         
+        // For streaming mode, always treat as live to maintain continuous output
+        if (args_.use_stdout || args_.output_url == "-") {
+            playlist.is_live = true;
+            if (args_.verbose) {
+                *info_out << "Streaming mode: treating as live stream regardless of playlist markers\n";
+            }
+        }
+        
         *info_out << "Found " << playlist.segments.size() << " segments in playlist\n";
         if (args_.verbose) {
             *info_out << "Target duration: " << playlist.target_duration << "s\n";
@@ -465,6 +474,15 @@ private:
         // For live streams, keep track of processed segments to avoid reprocessing
         std::set<int64_t> processed_sequence_numbers;
         auto current_playlist = initial_playlist;
+        
+        // Force streaming mode to be live
+        if (args_.use_stdout || args_.output_url == "-") {
+            current_playlist.is_live = true;
+            if (args_.verbose) {
+                std::cerr << "Streaming mode: forced live stream processing\n";
+            }
+        }
+        
         int segments_processed = 0;
         std::map<uint16_t, std::vector<uint8_t>> pes_buffers; // PID -> accumulated PES data
         
@@ -614,6 +632,10 @@ private:
                     std::string playlist_content(playlist_data.begin(), playlist_data.end());
                     auto new_playlist = HLSPlaylistParser::ParsePlaylist(playlist_content, args_.input_url);
                     if (!new_playlist.segments.empty()) {
+                        // Force streaming mode to stay live regardless of playlist markers
+                        if (args_.use_stdout || args_.output_url == "-") {
+                            new_playlist.is_live = true;
+                        }
                         current_playlist = new_playlist;
                         
                         // Clean up old processed sequence numbers to prevent memory growth
