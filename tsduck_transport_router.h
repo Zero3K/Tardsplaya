@@ -233,6 +233,11 @@ namespace tsduck_transport {
         // MPC-HC web interface for discontinuity handling
         std::unique_ptr<MPCWebInterface> mpc_web_interface_;
         
+        // Discontinuity handling state
+        bool previous_had_discontinuities_ = false;
+        bool stream_started_ = false;
+        std::chrono::steady_clock::time_point stream_start_time_real_;
+        
         // Frame Number Tagging statistics
         std::atomic<uint64_t> total_frames_processed_{0};
         std::atomic<uint32_t> frames_dropped_{0};

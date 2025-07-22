@@ -665,6 +665,10 @@ TransportStreamRouter::TransportStreamRouter() {
     last_video_packet_time_ = std::chrono::steady_clock::now();
     last_audio_packet_time_ = std::chrono::steady_clock::now();
     
+    // Initialize discontinuity handling state
+    previous_had_discontinuities_ = false;
+    stream_started_ = false;
+    
     // Use dynamic buffer sizing based on system load
     auto& resource_manager = StreamResourceManager::getInstance();
     int active_streams = resource_manager.GetActiveStreamCount();
@@ -702,6 +706,10 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     hls_converter_->Reset();
     ts_buffer_->Reset(); // This will clear packets and reset producer_active
     ts_buffer_->SetLowLatencyMode(config.low_latency_mode); // Configure buffer for latency mode
+    
+    // Reset discontinuity handling state for new stream
+    previous_had_discontinuities_ = false;
+    stream_started_ = false;
     
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Starting TSDuck-inspired transport stream routing");
@@ -845,9 +853,13 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 // Check for discontinuities that indicate ad transitions
                 has_discontinuities = playlist_parser.HasDiscontinuities();
                 
-                if (has_discontinuities) {
+                // Only trigger discontinuity recovery on NEW discontinuities after stream has started
+                bool is_new_discontinuity = has_discontinuities && !previous_had_discontinuities_;
+                bool stream_ready = stream_started_ && (std::chrono::steady_clock::now() - stream_start_time_real_) > std::chrono::seconds(3);
+                
+                if (is_new_discontinuity && stream_ready) {
                     if (log_callback_) {
-                        log_callback_(L"[DISCONTINUITY] Detected ad transition - using MPC-HC web interface recovery");
+                        log_callback_(L"[DISCONTINUITY] Detected NEW ad transition - using MPC-HC web interface recovery");
                     }
                     
                     // Use MPC-HC web interface for discontinuity recovery if available
@@ -877,7 +889,14 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                             log_callback_(L"[DISCONTINUITY] No web interface object created");
                         }
                     }
+                } else if (has_discontinuities && !stream_ready) {
+                    if (log_callback_) {
+                        log_callback_(L"[DISCONTINUITY] Discontinuity detected but stream not ready yet - skipping recovery");
+                    }
                 }
+                
+                // Update previous state
+                previous_had_discontinuities_ = has_discontinuities;
             } else {
                 // Fallback to basic parsing if enhanced parser fails
                 segment_urls = ParseHLSPlaylist(playlist_content, playlist_url);
@@ -1180,6 +1199,15 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             }
             packets_sent++;
             last_packet_time = std::chrono::steady_clock::now();
+            
+            // Mark stream as started after first packet is successfully sent
+            if (!stream_started_) {
+                stream_started_ = true;
+                stream_start_time_real_ = std::chrono::steady_clock::now();
+                if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Stream data flow started - discontinuity recovery now available");
+                }
+            }
         } else {
             // No packet available, check if we should continue waiting
             if (!ts_buffer_->IsProducerActive() && ts_buffer_->IsEmpty()) {
