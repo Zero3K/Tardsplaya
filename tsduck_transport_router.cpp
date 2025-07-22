@@ -723,6 +723,19 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
         log_callback_(L"[TS_ROUTER] Player: " + config.player_path);
         log_callback_(L"[TS_ROUTER] Buffer size: " + std::to_wstring(config.buffer_size_packets) + L" packets");
         
+        // Log discontinuity handling configuration
+        if (config.enable_discontinuity_smoothing) {
+            log_callback_(L"[DISCONTINUITY] Seamless discontinuity handling ENABLED");
+            if (config.enable_continuity_correction) {
+                log_callback_(L"[DISCONTINUITY] Continuity counter correction ENABLED");
+            }
+            if (config.enable_timestamp_smoothing) {
+                log_callback_(L"[DISCONTINUITY] Timestamp smoothing ENABLED");
+            }
+        } else {
+            log_callback_(L"[DISCONTINUITY] Using legacy discontinuity handling");
+        }
+        
         if (config.low_latency_mode) {
             log_callback_(L"[LOW_LATENCY] Mode enabled - targeting minimal stream delay");
             log_callback_(L"[LOW_LATENCY] Max segments: " + std::to_wstring(config.max_segments_to_buffer) + 
@@ -956,32 +969,40 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     
                     // Use discontinuity handler for seamless processing if enabled
                     if (current_config_.enable_discontinuity_smoothing && discontinuity_handler_) {
-                        // Create segment info for discontinuity handling
-                        hls_discontinuity::SegmentInfo segment_info;
-                        segment_info.url = segment_url;
-                        segment_info.has_discontinuity = has_discontinuities;
-                        segment_info.sequence_number = processed_segments.size();
-                        
-                        // Process through discontinuity handler for smooth output
-                        auto discontinuity_packets = discontinuity_handler_->ProcessHLSSegment(
-                            segment_data, segment_info, first_segment);
-                        
-                        if (log_callback_ && has_discontinuities) {
-                            auto stats = discontinuity_handler_->GetStats();
-                            log_callback_(L"[DISCONTINUITY] Seamless processing: " + 
-                                         std::to_wstring(discontinuity_packets.size()) + L" packets, " +
-                                         std::to_wstring(stats.continuity_corrections_made) + L" corrections made");
-                        }
-                        
-                        // Convert discontinuity handler packets to TSPacket format
-                        for (const auto& disc_packet : discontinuity_packets) {
-                            TSPacket ts_packet;
-                            memcpy(ts_packet.data, disc_packet.data, 188);
-                            ts_packet.pid = disc_packet.pid;
-                            ts_packet.payload_unit_start = disc_packet.payload_unit_start;
-                            ts_packet.discontinuity = disc_packet.discontinuity_indicator;
-                            ts_packet.timestamp = disc_packet.timestamp;
-                            ts_packets.push_back(ts_packet);
+                        try {
+                            // Create segment info for discontinuity handling
+                            hls_discontinuity::SegmentInfo segment_info;
+                            segment_info.url = segment_url;
+                            segment_info.has_discontinuity = has_discontinuities;
+                            segment_info.sequence_number = processed_segments.size();
+                            
+                            // Process through discontinuity handler for smooth output
+                            auto discontinuity_packets = discontinuity_handler_->ProcessHLSSegment(
+                                segment_data, segment_info, first_segment);
+                            
+                            if (log_callback_ && has_discontinuities) {
+                                auto stats = discontinuity_handler_->GetStats();
+                                log_callback_(L"[DISCONTINUITY] Seamless processing: " + 
+                                             std::to_wstring(discontinuity_packets.size()) + L" packets, " +
+                                             std::to_wstring(stats.continuity_corrections_made) + L" corrections made");
+                            }
+                            
+                            // Convert discontinuity handler packets to TSPacket format
+                            for (const auto& disc_packet : discontinuity_packets) {
+                                TSPacket ts_packet;
+                                memcpy(ts_packet.data, disc_packet.data, 188);
+                                ts_packet.pid = disc_packet.pid;
+                                ts_packet.payload_unit_start = disc_packet.payload_unit_start;
+                                ts_packet.discontinuity = disc_packet.discontinuity_indicator;
+                                ts_packet.timestamp = disc_packet.timestamp;
+                                ts_packets.push_back(ts_packet);
+                            }
+                        } catch (const std::exception& e) {
+                            if (log_callback_) {
+                                log_callback_(L"[DISCONTINUITY] Handler error, falling back to standard processing");
+                            }
+                            // Fallback to original converter
+                            ts_packets = hls_converter_->ConvertSegment(segment_data, first_segment);
                         }
                     } else {
                         // Use original converter for traditional processing

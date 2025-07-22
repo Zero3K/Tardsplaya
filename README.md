@@ -70,6 +70,8 @@ The TSDuck integration includes:
 | **Lag Analysis** | **Basic logging only** | **Detailed frame statistics and timing data** |
 | **Stream Format** | **HLS segments only** | **HLS segments + Transport Stream routing** |
 | **Player Compatibility** | **Basic stdin piping** | **Professional TS format support** |
+| **Discontinuity Handling** | **Basic buffer clearing** | **Seamless continuity correction and timestamp smoothing** |
+| **Ad Break Transitions** | **Interruption/restart** | **Smooth transitions without playback breaks** |
 
 The integration works transparently:
 1. **Primary**: TSDuck-enhanced parsing for optimal performance
@@ -86,8 +88,21 @@ The integration works transparently:
 - **Enhanced Buffering**: Packet-level buffering instead of segment buffering  
 - **Better Compatibility**: Works with professional media players expecting TS format
 - **Reduced Latency**: Continuous stream instead of segment-based delivery
+- **NEW: HLS Discontinuity Handling**: Seamless processing of discontinuity markers for continuous playback
 
 TSDuck TS Mode provides superior performance and compatibility compared to traditional HLS segment streaming.
+
+#### HLS Discontinuity Handling
+
+**Seamless Discontinuity Processing** - Automatically handles EXT-X-DISCONTINUITY markers:
+
+- **Continuity Counter Correction**: Automatically fixes TS packet continuity counters across discontinuities
+- **Timestamp Smoothing**: Ensures continuous timing for uninterrupted playback
+- **Ad Break Detection**: Identifies and smoothly transitions across SCTE-35 ad markers
+- **Buffer Management**: Smart buffering prevents interruptions during stream transitions
+- **Configurable Processing**: Enable/disable specific discontinuity handling features
+
+This feature converts HLS streams with discontinuity markers into continuous data without playback interruptions, based on concepts from [hls-decode](https://github.com/SnailTowardThesun/hls-decode).
 
 ## TLS Client Integration
 
