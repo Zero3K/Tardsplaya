@@ -89,6 +89,55 @@ The integration works transparently:
 
 TSDuck TS Mode provides superior performance and compatibility compared to traditional HLS segment streaming.
 
+## HLS PTS Discontinuity Correction
+
+**NEW**: Integrated HLS PTS (Presentation Time Stamp) discontinuity correction for seamless streaming:
+
+### What are PTS Discontinuities?
+
+HLS streams can have timestamp discontinuities that cause:
+- **Audio/Video Sync Issues**: Timestamps jump backward or forward unexpectedly
+- **Player Buffering**: Media players struggle with non-monotonic timestamps  
+- **Stream Interruptions**: Playback stops or stutters during timestamp jumps
+- **Format Conversion Problems**: Issues when converting HLS to MPEG-TS or RTMP
+
+### Automatic Correction
+
+Tardsplaya now includes a **standalone HLS PTS reclock tool** based on [ffmpeg-hls-pts-discontinuity-reclock](https://github.com/jjustman/ffmpeg-hls-pts-discontinuity-reclock):
+
+- **Automatic Detection**: Identifies PTS discontinuities in live streams
+- **Timestamp Monotonicity**: Ensures timestamps always move forward 
+- **Seamless Integration**: Works transparently with existing streaming
+- **Format Support**: Outputs corrected MPEG-TS or FLV streams
+- **Live Stream Optimized**: Tuned for Twitch and other live streaming platforms
+
+### Technical Implementation
+
+The PTS correction system includes:
+
+- `hls_pts_reclock.h/cpp` - Core discontinuity detection and correction engine
+- `hls_pts_reclock_tool.cpp` - Standalone executable for stream processing
+- `tardsplaya_hls_reclock_integration.h/cpp` - Integration with Tardsplaya streaming
+- **HLSPTSReclock.vcxproj** - Separate project for the reclock tool
+
+### Automatic Operation
+
+1. **Stream Analysis**: Detects if HLS stream likely has discontinuities
+2. **PTS Correction**: Processes stream to fix timestamp issues  
+3. **Transparent Handoff**: Provides corrected stream to media player
+4. **Fallback Support**: Uses original stream if correction fails
+
+### Configuration
+
+The system automatically configures itself but supports tuning:
+
+- **Discontinuity Threshold**: How large a timestamp jump triggers correction (default: 1 second)
+- **Delta Threshold**: Maximum acceptable timestamp variation (default: 10 seconds)  
+- **Live Stream Mode**: Optimized settings for real-time streams
+- **Debug Logging**: Detailed correction information when enabled
+
+This ensures smooth playback of problematic HLS streams that would otherwise cause issues in standard media players.
+
 ## TLS Client Integration
 
 This version includes an integrated TLS client from the [tlsclient](https://github.com/zero3k/tlsclient) repository, providing:

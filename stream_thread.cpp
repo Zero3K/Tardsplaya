@@ -2,6 +2,78 @@
 #include "stream_pipe.h"
 #include "tsduck_transport_router.h"
 #include "stream_resource_manager.h"
+#include "tardsplaya_hls_reclock_integration.h"
+
+// Helper function to process HLS streams with PTS discontinuity correction
+static std::wstring ProcessHLSWithPTSCorrection(
+    const std::wstring& playlist_url, 
+    const std::wstring& channel_name,
+    std::function<void(const std::wstring&)> log_callback
+) {
+    using namespace tardsplaya_hls_reclock;
+    
+    // Convert wide string to narrow string for the reclock API
+    std::string narrow_url(playlist_url.begin(), playlist_url.end());
+    
+    // Check if we should apply PTS correction
+    if (!integration_utils::ShouldApplyPTSCorrection(narrow_url)) {
+        return playlist_url; // Return original URL
+    }
+    
+    if (log_callback) {
+        log_callback(L"Applying HLS PTS discontinuity correction for " + channel_name);
+    }
+    
+    // Create configuration for live streams (most Twitch streams benefit from this)
+    auto config = integration_utils::CreateConfigForStreamType("live");
+    config.verbose_logging = g_verboseDebug;
+    
+    // Create reclock processor
+    TardsplayaHLSReclock reclocker(config);
+    
+    if (!reclocker.IsReclockToolAvailable()) {
+        if (log_callback) {
+            log_callback(L"HLS PTS reclock tool not available, using original stream");
+        }
+        AddDebugLog(L"HLS PTS reclock tool not found, falling back to original stream");
+        return playlist_url; // Return original URL if tool not available
+    }
+    
+    // Process the stream with progress callback
+    auto progress_cb = [&](int progress, const std::string& status) {
+        if (log_callback && g_verboseDebug) {
+            std::wstring wide_status(status.begin(), status.end());
+            log_callback(L"PTS Reclock: " + wide_status + L" (" + std::to_wstring(progress) + L"%)");
+        }
+    };
+    
+    // Use MPEG-TS format for better compatibility with players
+    auto result = reclocker.ProcessHLSStream(narrow_url, "mpegts", progress_cb);
+    
+    if (result.success) {
+        if (log_callback) {
+            log_callback(L"HLS PTS correction applied successfully");
+            if (result.discontinuities_detected > 0) {
+                log_callback(L"Detected and corrected " + std::to_wstring(result.discontinuities_detected) + L" PTS discontinuities");
+            }
+        }
+        
+        AddDebugLog(L"HLS PTS reclock successful: " + std::to_wstring(result.discontinuities_detected) + 
+                   L" discontinuities, " + std::to_wstring(result.timestamp_corrections) + L" corrections");
+        
+        // Return path to corrected stream file
+        std::wstring wide_output(result.output_path.begin(), result.output_path.end());
+        return wide_output;
+    } else {
+        if (log_callback) {
+            std::wstring error_msg(result.error_message.begin(), result.error_message.end());
+            log_callback(L"HLS PTS correction failed: " + error_msg + L", using original stream");
+        }
+        
+        AddDebugLog(L"HLS PTS reclock failed: " + std::wstring(result.error_message.begin(), result.error_message.end()));
+        return playlist_url; // Return original URL on failure
+    }
+}
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
@@ -18,6 +90,9 @@ std::thread StartStreamThread(
     StreamingMode mode,
     HANDLE* player_process_handle
 ) {
+    // Apply HLS PTS discontinuity correction if needed
+    std::wstring processed_url = ProcessHLSWithPTSCorrection(playlist_url, channel_name, log_callback);
+    
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
         // For low-latency streaming, use smaller buffers to reduce delay
@@ -34,7 +109,7 @@ std::thread StartStreamThread(
             base_buffer_packets = static_cast<size_t>(base_buffer_packets * 1.5); // Max 50% larger
         }
         
-        return StartTransportStreamThread(player_path, playlist_url, cancel_token, log_callback,
+        return StartTransportStreamThread(player_path, processed_url, cancel_token, log_callback,
                                          base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle);
     }
     
@@ -47,7 +122,7 @@ std::thread StartStreamThread(
                    L", Tab=" + std::to_wstring(tab_index) + 
                    L", BufferSegs=" + std::to_wstring(buffer_segments));
         
-        bool ok = BufferAndPipeStreamToPlayer(player_path, playlist_url, cancel_token, buffer_segments, channel_name, chunk_count, selected_quality, player_process_handle);
+        bool ok = BufferAndPipeStreamToPlayer(player_path, processed_url, cancel_token, buffer_segments, channel_name, chunk_count, selected_quality, player_process_handle);
         
         AddDebugLog(L"StartStreamThread: Stream finished, ok=" + std::to_wstring(ok) + 
                    L", Channel=" + channel_name + L", Tab=" + std::to_wstring(tab_index));
