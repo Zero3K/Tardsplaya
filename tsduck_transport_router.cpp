@@ -242,7 +242,8 @@ bool TSBuffer::AddPacket(const TSPacket& packet) {
     // In low-latency mode, more aggressively drop old packets
     if (low_latency_mode_ && packet_queue_.size() >= max_packets_ / 2) {
         // Drop multiple old packets to make room for new ones
-        size_t packets_to_drop = (packet_queue_.size() / 4 < size_t(10)) ? packet_queue_.size() / 4 : size_t(10);
+        size_t quarter_size = packet_queue_.size() / 4;
+        size_t packets_to_drop = (quarter_size < 10) ? quarter_size : 10;
         for (size_t i = 0; i < packets_to_drop && !packet_queue_.empty(); ++i) {
             packet_queue_.pop();
         }
@@ -877,36 +878,35 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     segment_urls.push_back(segment.url);
                 }
                 
-                // Check for discontinuities that indicate ad transitions
+                // Check for discontinuities for seamless handling
                 has_discontinuities = playlist_parser.HasDiscontinuities();
                 
                 if (has_discontinuities) {
                     if (log_callback_) {
-                        log_callback_(L"[DISCONTINUITY] Detected ad transition - implementing fast restart");
+                        log_callback_(L"[DISCONTINUITY] Detected discontinuity markers - preparing for seamless processing");
                     }
                     
-                    // Clear buffer immediately for fast restart after ad break
-                    ts_buffer_->Clear();
-                    
-                    // Reset frame numbering to prevent frame drop false positives
-                    hls_converter_->Reset();
-                    
-                    // Reset frame statistics to prevent false drop alerts after discontinuity
-                    ResetFrameStatistics();
-                    
-                    if (log_callback_) {
-                        log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
-                    }
-                    
-                    // For fast restart, only process the newest segments
-                    if (segment_urls.size() > 1) {
-                        // Keep only the last segment for immediate restart
-                        std::vector<std::wstring> restart_segments;
-                        restart_segments.push_back(segment_urls.back());
-                        segment_urls = restart_segments;
-                        
+                    // If discontinuity smoothing is enabled, let the discontinuity handler manage the transition
+                    if (current_config_.enable_discontinuity_smoothing && discontinuity_handler_) {
+                        // No buffer clearing or restart - the discontinuity handler will provide seamless processing
                         if (log_callback_) {
-                            log_callback_(L"[FAST_RESTART] Using only newest segment for immediate playback");
+                            log_callback_(L"[DISCONTINUITY] Using seamless discontinuity handling - no restart required");
+                        }
+                    } else {
+                        // Fallback to legacy fast restart behavior only when discontinuity smoothing is disabled
+                        if (log_callback_) {
+                            log_callback_(L"[DISCONTINUITY] Seamless handling disabled - using legacy restart approach");
+                        }
+                        
+                        ts_buffer_->Clear();
+                        hls_converter_->Reset();
+                        ResetFrameStatistics();
+                        
+                        // For legacy mode, only process the newest segments
+                        if (segment_urls.size() > 1) {
+                            std::vector<std::wstring> restart_segments;
+                            restart_segments.push_back(segment_urls.back());
+                            segment_urls = restart_segments;
                         }
                     }
                 }
@@ -1021,13 +1021,13 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     // Add to buffer with special handling for post-discontinuity segments
                     size_t buffer_high_watermark, buffer_low_watermark;
                     
-                    if (has_discontinuities) {
-                        // Immediately after discontinuity: minimal buffering for fastest restart
+                    if (has_discontinuities && !current_config_.enable_discontinuity_smoothing) {
+                        // Legacy mode: minimal buffering for fastest restart when seamless handling is disabled
                         buffer_high_watermark = current_config_.buffer_size_packets / 8; // 12.5% for immediate restart
                         buffer_low_watermark = current_config_.buffer_size_packets / 16;  // 6.25% for fastest response
                         
                         if (log_callback_ && segments_processed == 0) {
-                            log_callback_(L"[FAST_RESTART] Using minimal buffering for immediate playback after ad");
+                            log_callback_(L"[LEGACY_RESTART] Using minimal buffering for immediate playback");
                         }
                     } else if (current_config_.low_latency_mode) {
                         // For low-latency, use smaller buffers and more aggressive flow control
