@@ -608,7 +608,8 @@ private:
                 
                 auto playlist_data = downloader_.DownloadData(args_.input_url);
                 if (!playlist_data.empty()) {
-                    auto new_playlist = HLSPlaylistParser::ParsePlaylist(playlist_data, args_.input_url);
+                    std::string playlist_content(playlist_data.begin(), playlist_data.end());
+                    auto new_playlist = HLSPlaylistParser::ParsePlaylist(playlist_content, args_.input_url);
                     if (!new_playlist.segments.empty()) {
                         current_playlist = new_playlist;
                         
