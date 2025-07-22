@@ -506,38 +506,61 @@ private:
             // Parse MPEG-TS packets
             auto ts_packets = MPEGTSParser::ParseTSData(segment_data);
             
+            if (args_.verbose) {
+                std::cout << "Parsed " << ts_packets.size() << " TS packets from segment\n";
+            }
+            
             // Process packets and apply PTS correction
             std::vector<uint8_t> corrected_data;
             bool segment_has_discontinuity = segment.has_discontinuity;
             
-            for (const auto& ts_packet : ts_packets) {
-                // Accumulate PES data for streams with PTS/DTS
-                if (ts_packet.payload_unit_start && !pes_buffers[ts_packet.pid].empty()) {
-                    // Process complete PES packet
-                    ProcessPESPacket(pes_buffers[ts_packet.pid], ts_packet.pid, segment_has_discontinuity);
-                    pes_buffers[ts_packet.pid].clear();
+            if (ts_packets.empty()) {
+                // If we can't parse TS packets, pass through original data as fallback
+                std::cerr << "Warning: Could not parse TS packets, using original segment data\n";
+                corrected_data = segment_data;
+            } else {
+                for (const auto& ts_packet : ts_packets) {
+                    // Accumulate PES data for streams with PTS/DTS
+                    if (ts_packet.payload_unit_start && !pes_buffers[ts_packet.pid].empty()) {
+                        // Process complete PES packet
+                        ProcessPESPacket(pes_buffers[ts_packet.pid], ts_packet.pid, segment_has_discontinuity);
+                        pes_buffers[ts_packet.pid].clear();
+                    }
+                    
+                    // Add payload to buffer
+                    if (ts_packet.has_payload) {
+                        pes_buffers[ts_packet.pid].insert(pes_buffers[ts_packet.pid].end(),
+                                                         ts_packet.payload.begin(), ts_packet.payload.end());
+                    }
+                    
+                    // Reconstruct TS packet with corrected data
+                    std::vector<uint8_t> ts_packet_data = ReconstructTSPacket(ts_packet);
+                    corrected_data.insert(corrected_data.end(), ts_packet_data.begin(), ts_packet_data.end());
                 }
                 
-                // Add payload to buffer
-                if (ts_packet.has_payload) {
-                    pes_buffers[ts_packet.pid].insert(pes_buffers[ts_packet.pid].end(),
-                                                     ts_packet.payload.begin(), ts_packet.payload.end());
-                }
-                
-                // Reconstruct TS packet with corrected data
-                std::vector<uint8_t> ts_packet_data = ReconstructTSPacket(ts_packet);
-                corrected_data.insert(corrected_data.end(), ts_packet_data.begin(), ts_packet_data.end());
-            }
-            
-            // Process any remaining PES buffers
-            for (auto& [pid, buffer] : pes_buffers) {
-                if (!buffer.empty()) {
-                    ProcessPESPacket(buffer, pid, segment_has_discontinuity);
+                // Process any remaining PES buffers
+                for (auto& [pid, buffer] : pes_buffers) {
+                    if (!buffer.empty()) {
+                        ProcessPESPacket(buffer, pid, segment_has_discontinuity);
+                    }
                 }
             }
             
             // Write corrected data to output
-            output_stream->write(reinterpret_cast<const char*>(corrected_data.data()), corrected_data.size());
+            if (!corrected_data.empty()) {
+                output_stream->write(reinterpret_cast<const char*>(corrected_data.data()), corrected_data.size());
+                
+                // Log first packet info for debugging (only for first segment)
+                if (segments_processed == 0 && args_.verbose) {
+                    std::cout << "First corrected TS packet: ";
+                    for (size_t i = 0; i < 16 && i < corrected_data.size(); ++i) {
+                        std::cout << std::hex << static_cast<int>(corrected_data[i]) << " ";
+                    }
+                    std::cout << std::dec << "\n";
+                }
+            } else {
+                std::cerr << "Warning: No corrected data generated for segment " << (segments_processed + 1) << "\n";
+            }
             
             if (args_.use_stdout) {
                 output_stream->flush();
@@ -597,29 +620,49 @@ private:
     std::vector<uint8_t> ReconstructTSPacket(const MPEGTSParser::TSPacket& packet) {
         std::vector<uint8_t> ts_data(MPEGTSParser::TS_PACKET_SIZE, 0xFF); // Fill with padding
         
-        // TS header
-        ts_data[0] = MPEGTSParser::SYNC_BYTE;
+        // TS header (4 bytes)
+        ts_data[0] = MPEGTSParser::SYNC_BYTE; // 0x47
+        
+        // Transport Error Indicator (0), Payload Unit Start Indicator, Transport Priority (0), PID (13 bits)
         ts_data[1] = (packet.payload_unit_start ? 0x40 : 0x00) | ((packet.pid >> 8) & 0x1F);
         ts_data[2] = packet.pid & 0xFF;
-        ts_data[3] = (packet.has_adaptation ? 0x20 : 0x00) | 
-                     (packet.has_payload ? 0x10 : 0x00) | 
-                     packet.continuity_counter;
+        
+        // Transport Scrambling Control (00), Adaptation Field Control, Continuity Counter
+        uint8_t adaptation_control = 0;
+        if (packet.has_adaptation && packet.has_payload) {
+            adaptation_control = 0x30; // Both adaptation field and payload present
+        } else if (packet.has_adaptation) {
+            adaptation_control = 0x20; // Adaptation field only
+        } else if (packet.has_payload) {
+            adaptation_control = 0x10; // Payload only
+        } else {
+            adaptation_control = 0x00; // Reserved (should not happen)
+        }
+        
+        ts_data[3] = adaptation_control | (packet.continuity_counter & 0x0F);
         
         int data_start = 4;
         
         // Add adaptation field if needed
         if (packet.has_adaptation) {
-            ts_data[4] = 0; // Adaptation field length (minimal)
+            // For simplicity, add minimal adaptation field
+            ts_data[4] = 0; // Adaptation field length = 0 (just the length byte)
             data_start = 5;
         }
         
         // Add payload
         if (packet.has_payload && !packet.payload.empty()) {
-            size_t payload_size = static_cast<size_t>(packet.payload.size());
-            size_t max_size = static_cast<size_t>(MPEGTSParser::TS_PACKET_SIZE - data_start);
-            size_t copy_size = (payload_size < max_size) ? payload_size : max_size;
+            size_t payload_size = packet.payload.size();
+            size_t max_size = MPEGTSParser::TS_PACKET_SIZE - data_start;
+            size_t copy_size = std::min(payload_size, max_size);
+            
             std::copy(packet.payload.begin(), packet.payload.begin() + copy_size, 
                      ts_data.begin() + data_start);
+                     
+            if (args_.verbose && copy_size < payload_size) {
+                std::cerr << "Warning: TS packet payload truncated from " << payload_size 
+                         << " to " << copy_size << " bytes\n";
+            }
         }
         
         return ts_data;
