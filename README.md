@@ -31,6 +31,19 @@ This version includes **TSDuck-inspired HLS processing** for improved streaming 
 - **Real-time Statistics**: Displays current FPS, frame drops, and timing information
 - **Lag Analysis**: Provides detailed frame timing data to help identify lag sources
 
+### NEW: PTS Discontinuity Fix for Broken Bitstreams
+
+**PTS Discontinuity Correction** - Advanced timestamp correction system based on FFmpeg HLS PTS discontinuity reclocking:
+
+- **Automatic Detection**: Monitors PTS/DTS values for timestamp jumps exceeding configurable threshold
+- **Seamless Correction**: Applies offset corrections to maintain smooth playback across discontinuities
+- **SCTE-35 Integration**: Automatically resets on ad break transitions detected in playlists
+- **Configurable Thresholds**: Adjustable sensitivity for different stream types (default: 20 second threshold)
+- **Multi-Stream Support**: Separate tracking for video and audio streams to handle complex scenarios
+- **Debug Logging**: Detailed logging of detected discontinuities and applied corrections
+
+This fix resolves issues with broken bitstreams that have timestamp offsets, commonly seen in HLS streams with ad insertions.
+
 ### Technical Details
 
 Frame Number Tagging enhances the existing TSDuck transport stream system:
@@ -70,6 +83,7 @@ The TSDuck integration includes:
 | **Lag Analysis** | **Basic logging only** | **Detailed frame statistics and timing data** |
 | **Stream Format** | **HLS segments only** | **HLS segments + Transport Stream routing** |
 | **Player Compatibility** | **Basic stdin piping** | **Professional TS format support** |
+| **PTS Correction** | **No timestamp fixing** | **Automatic discontinuity detection and correction** |
 
 The integration works transparently:
 1. **Primary**: TSDuck-enhanced parsing for optimal performance
