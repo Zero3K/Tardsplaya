@@ -11,6 +11,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include "hls_discontinuity_handler.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -173,6 +174,12 @@ namespace tsduck_transport {
             size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
             std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
             bool skip_old_segments = true;  // Skip older segments when catching up
+            
+            // HLS Discontinuity handling configuration
+            bool enable_discontinuity_smoothing = true;    // Enable seamless discontinuity handling
+            bool enable_continuity_correction = true;      // Fix continuity counters across discontinuities
+            bool enable_timestamp_smoothing = true;        // Smooth timestamps for continuous output
+            std::chrono::milliseconds max_gap_tolerance{5000}; // Max gap to bridge smoothly
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -211,12 +218,16 @@ namespace tsduck_transport {
         };
         BufferStats GetBufferStats() const;
         
+        // Get discontinuity handling statistics
+        hls_discontinuity::HLSDiscontinuityHandler::ProcessingStats GetDiscontinuityStats() const;
+        
         // Get player process handle for external monitoring
         HANDLE GetPlayerProcessHandle() const { return player_process_handle_; }
         
     private:
         std::unique_ptr<TSBuffer> ts_buffer_;
         std::unique_ptr<HLSToTSConverter> hls_converter_;
+        std::unique_ptr<hls_discontinuity::HLSDiscontinuityHandler> discontinuity_handler_;
         std::atomic<bool> routing_active_{false};
         std::thread hls_fetcher_thread_;
         std::thread ts_router_thread_;
