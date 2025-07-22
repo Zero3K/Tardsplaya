@@ -163,7 +163,12 @@ bool MPCWebInterface::HandleDiscontinuity() {
     // This is the preferred approach as it completely refreshes the stream connection
     AddDebugLog(L"[MPC-WEB] Attempting stream reopen for discontinuity recovery");
     
+    auto reopen_start = std::chrono::steady_clock::now();
     if (ReopenCurrentStream()) {
+        auto reopen_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - reopen_start).count();
+        AddDebugLog(L"[MPC-WEB] Stream reopen completed in " + std::to_wstring(reopen_duration) + L"ms");
+        
         // Allow time for stream to reopen and stabilize
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         
@@ -176,7 +181,9 @@ bool MPCWebInterface::HandleDiscontinuity() {
             AddDebugLog(L"[MPC-WEB] Stream reopen completed but player state unclear, trying fallback");
         }
     } else {
-        AddDebugLog(L"[MPC-WEB] Stream reopen failed, trying frame step fallback");
+        auto reopen_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - reopen_start).count();
+        AddDebugLog(L"[MPC-WEB] Stream reopen failed after " + std::to_wstring(reopen_duration) + L"ms, trying frame step fallback");
     }
     
     // Fallback 1: Frame step approach (if reopen failed)
@@ -258,35 +265,35 @@ bool MPCWebInterface::HandleDiscontinuity() {
 }
 
 bool MPCWebInterface::ReopenCurrentStream() {
-    AddDebugLog(L"[MPC-WEB] Reopening current stream/pipe");
+    AddDebugLog(L"[MPC-WEB] Reopening current stream/pipe (using fast timeout for discontinuity recovery)");
     // Use ID_FILE_REOPEN (976) command to reopen current file/stream
     // This completely refreshes the stream connection and resets decoder state
     std::wstring response;
-    return SendHTTPCommand(L"wm_command=976", response); // 976 is ID_FILE_REOPEN
+    return SendHTTPCommandFast(L"wm_command=976", response); // 976 is ID_FILE_REOPEN
 }
 
 bool MPCWebInterface::PausePlayback() {
     AddDebugLog(L"[MPC-WEB] Sending pause command");
     std::wstring response;
-    return SendHTTPCommand(L"wm_command=889", response); // 889 is pause command
+    return SendHTTPCommandFast(L"wm_command=889", response); // 889 is pause command
 }
 
 bool MPCWebInterface::ResumePlayback() {
     AddDebugLog(L"[MPC-WEB] Sending resume/play command");
     std::wstring response;
-    return SendHTTPCommand(L"wm_command=887", response); // 887 is play command
+    return SendHTTPCommandFast(L"wm_command=887", response); // 887 is play command
 }
 
 bool MPCWebInterface::FrameStep() {
     AddDebugLog(L"[MPC-WEB] Sending frame step command");
     std::wstring response;
-    return SendHTTPCommand(L"wm_command=891", response); // 891 is ID_PLAY_FRAMESTEP
+    return SendHTTPCommandFast(L"wm_command=891", response); // 891 is ID_PLAY_FRAMESTEP
 }
 
 bool MPCWebInterface::SeekToBeginning() {
     AddDebugLog(L"[MPC-WEB] Seeking to beginning");
     std::wstring response;
-    return SendHTTPCommand(L"wm_command=996", response); // 996 is go to beginning
+    return SendHTTPCommandFast(L"wm_command=996", response); // 996 is go to beginning
 }
 
 bool MPCWebInterface::RefreshStream() {
@@ -342,6 +349,11 @@ bool MPCWebInterface::GetDuration(double& duration) const {
 bool MPCWebInterface::SendHTTPCommand(const std::wstring& command, std::wstring& response) const {
     std::wstring path = L"/command.html?" + command;
     return SendHTTPRequest(path, L"GET", L"", response);
+}
+
+bool MPCWebInterface::SendHTTPCommandFast(const std::wstring& command, std::wstring& response) const {
+    std::wstring path = L"/command.html?" + command;
+    return SendHTTPRequestFast(path, L"GET", L"", response);
 }
 
 bool MPCWebInterface::SendHTTPRequest(const std::wstring& path, const std::wstring& method, 
@@ -459,6 +471,132 @@ bool MPCWebInterface::SendHTTPRequest(const std::wstring& path, const std::wstri
         
         if (attempt < config_.max_retries - 1) {
             std::this_thread::sleep_for(config_.retry_delay);
+        }
+    }
+    
+    return false;
+}
+
+bool MPCWebInterface::SendHTTPRequestFast(const std::wstring& path, const std::wstring& method, 
+                                         const std::wstring& data, std::wstring& response) const {
+    // Fast configuration for discontinuity recovery - single attempt with very short timeout
+    const int fast_max_retries = 1;
+    const std::chrono::milliseconds fast_timeout{800}; // 800ms timeout for very fast response
+    const std::chrono::milliseconds fast_retry_delay{50}; // Minimal retry delay
+    
+    for (int attempt = 0; attempt < fast_max_retries; ++attempt) {
+        HINTERNET hSession = WinHttpOpen(L"Tardsplaya-MPC/1.0", 
+                                        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, 
+                                        WINHTTP_NO_PROXY_NAME, 
+                                        WINHTTP_NO_PROXY_BYPASS, 
+                                        0);
+        if (!hSession) {
+            if (attempt < fast_max_retries - 1) {
+                std::this_thread::sleep_for(fast_retry_delay);
+                continue;
+            }
+            return false;
+        }
+        
+        HINTERNET hConnect = WinHttpConnect(hSession, config_.host.c_str(), config_.port, 0);
+        if (!hConnect) {
+            WinHttpCloseHandle(hSession);
+            if (attempt < fast_max_retries - 1) {
+                std::this_thread::sleep_for(fast_retry_delay);
+                continue;
+            }
+            return false;
+        }
+        
+        HINTERNET hRequest = WinHttpOpenRequest(hConnect, 
+                                               method.c_str(), 
+                                               path.c_str(),
+                                               NULL, 
+                                               WINHTTP_NO_REFERER, 
+                                               WINHTTP_DEFAULT_ACCEPT_TYPES, 
+                                               0);
+        if (!hRequest) {
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            if (attempt < fast_max_retries - 1) {
+                std::this_thread::sleep_for(fast_retry_delay);
+                continue;
+            }
+            return false;
+        }
+        
+        // Set fast timeout for discontinuity recovery
+        DWORD timeout = static_cast<DWORD>(fast_timeout.count());
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
+        
+        // Send request
+        BOOL bResult = FALSE;
+        if (data.empty()) {
+            bResult = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, 
+                                        WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+        } else {
+            std::string utf8_data;
+            int len = WideCharToMultiByte(CP_UTF8, 0, data.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            if (len > 0) {
+                utf8_data.resize(len - 1);
+                WideCharToMultiByte(CP_UTF8, 0, data.c_str(), -1, &utf8_data[0], len, nullptr, nullptr);
+            }
+            
+            bResult = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                        (LPVOID)utf8_data.c_str(), (DWORD)utf8_data.length(), 
+                                        (DWORD)utf8_data.length(), 0);
+        }
+        
+        if (bResult) {
+            bResult = WinHttpReceiveResponse(hRequest, NULL);
+        }
+        
+        if (bResult) {
+            DWORD dwSize = 0;
+            std::string response_data;
+            
+            do {
+                DWORD dwDownloaded = 0;
+                if (!WinHttpQueryDataAvailable(hRequest, &dwSize)) {
+                    break;
+                }
+                
+                if (dwSize == 0) {
+                    break;
+                }
+                
+                std::vector<char> buffer(dwSize + 1);
+                if (!WinHttpReadData(hRequest, buffer.data(), dwSize, &dwDownloaded)) {
+                    break;
+                }
+                
+                buffer[dwDownloaded] = '\0';
+                response_data.append(buffer.data(), dwDownloaded);
+            } while (dwSize > 0);
+            
+            // Convert to wide string
+            if (!response_data.empty()) {
+                int wlen = MultiByteToWideChar(CP_UTF8, 0, response_data.c_str(), -1, nullptr, 0);
+                if (wlen > 0) {
+                    response.resize(wlen - 1);
+                    MultiByteToWideChar(CP_UTF8, 0, response_data.c_str(), -1, &response[0], wlen);
+                }
+            }
+            
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return true;
+        }
+        
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        
+        if (attempt < fast_max_retries - 1) {
+            std::this_thread::sleep_for(fast_retry_delay);
         }
     }
     

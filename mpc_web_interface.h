@@ -76,8 +76,11 @@ private:
     
     // HTTP communication
     bool SendHTTPCommand(const std::wstring& command, std::wstring& response) const;
+    bool SendHTTPCommandFast(const std::wstring& command, std::wstring& response) const;
     bool SendHTTPRequest(const std::wstring& path, const std::wstring& method, 
                         const std::wstring& data, std::wstring& response) const;
+    bool SendHTTPRequestFast(const std::wstring& path, const std::wstring& method, 
+                            const std::wstring& data, std::wstring& response) const;
     
     // Response parsing
     PlayerState ParsePlayerState(const std::wstring& response) const;
