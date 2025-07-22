@@ -138,6 +138,9 @@ namespace tsduck_transport {
         // Reset PTS/DTS correction state (called when SCTE-35 discontinuity is detected)
         void ResetDiscontinuityState();
         
+        // Signal playlist discontinuity detected (replaces autonomous timestamp jump detection)
+        void SignalPlaylistDiscontinuity();
+        
     private:
         uint16_t program_id_ = 1;
         uint16_t pmt_pid_ = 0x1000;
@@ -156,6 +159,7 @@ namespace tsduck_transport {
         int64_t pts_offset_ = 0;
         int64_t dts_offset_ = 0;
         bool discontinuity_detected_ = false;
+        bool playlist_discontinuity_pending_ = false; // New: tracks playlist discontinuity signal
         
         // Frame Number Tagging state
         uint64_t global_frame_counter_ = 0;     // Total frames processed across all segments

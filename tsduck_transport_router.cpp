@@ -453,6 +453,7 @@ void HLSToTSConverter::Reset() {
     pts_offset_ = 0;
     dts_offset_ = 0;
     discontinuity_detected_ = false;
+    playlist_discontinuity_pending_ = false;
 }
 
 void HLSToTSConverter::ResetDiscontinuityState() {
@@ -463,6 +464,15 @@ void HLSToTSConverter::ResetDiscontinuityState() {
     pts_offset_ = 0;
     dts_offset_ = 0;
     discontinuity_detected_ = false;
+    playlist_discontinuity_pending_ = false;
+}
+
+void HLSToTSConverter::SignalPlaylistDiscontinuity() {
+    // Signal that a playlist discontinuity was detected - this replaces autonomous timestamp jump detection
+    playlist_discontinuity_pending_ = true;
+    if (log_callback_) {
+        log_callback_(L"[PTS_DISCONTINUITY] Playlist discontinuity signaled - preparing for correction");
+    }
 }
 
 std::vector<TSPacket> HLSToTSConverter::ConvertSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment) {
@@ -791,67 +801,63 @@ void HLSToTSConverter::DetectStreamTypes(TSPacket& packet) {
 void HLSToTSConverter::CheckAndCorrectDiscontinuity(TSPacket& packet) {
     if (!packet.has_pts && !packet.has_dts) return;
     
-    // Check for video stream discontinuities
-    if (packet.is_video_packet && packet.has_pts) {
-        if (last_video_pts_ != -1) {
-            int64_t pts_delta = packet.pts - last_video_pts_;
-            
-            // Check if delta exceeds threshold (indicates discontinuity)
-            if (std::abs(pts_delta) > discontinuity_threshold_) {
-                if (!discontinuity_detected_) {
-                    // First discontinuity detected - calculate offset
-                    pts_offset_ = last_video_pts_ - packet.pts;
-                    if (packet.has_dts) {
-                        dts_offset_ = (last_video_dts_ != -1) ? last_video_dts_ - packet.dts : pts_offset_;
-                    }
-                    discontinuity_detected_ = true;
-                    
-                    if (log_callback_) {
-                        log_callback_(L"[PTS_DISCONTINUITY] Video PTS jump detected: " + 
-                                     std::to_wstring(pts_delta / 90) + L"ms, applying offset: " + 
-                                     std::to_wstring(pts_offset_ / 90) + L"ms");
-                    }
+    // Check if a playlist discontinuity was signaled (replaces autonomous timestamp jump detection)
+    if (playlist_discontinuity_pending_) {
+        // Handle video stream discontinuity correction
+        if (packet.is_video_packet && packet.has_pts) {
+            if (last_video_pts_ != -1 && !discontinuity_detected_) {
+                // Calculate offset based on expected continuation vs actual PTS
+                pts_offset_ = last_video_pts_ - packet.pts;
+                if (packet.has_dts && last_video_dts_ != -1) {
+                    dts_offset_ = last_video_dts_ - packet.dts;
+                } else {
+                    dts_offset_ = pts_offset_;
+                }
+                discontinuity_detected_ = true;
+                
+                if (log_callback_) {
+                    log_callback_(L"[PTS_DISCONTINUITY] Playlist discontinuity detected, applying video offset: " + 
+                                 std::to_wstring(pts_offset_ / 90) + L"ms");
                 }
             }
         }
         
-        // Apply correction if discontinuity was detected
-        if (discontinuity_detected_ && (pts_offset_ != 0 || dts_offset_ != 0)) {
-            packet.ApplyTimestampCorrection(pts_offset_, dts_offset_);
+        // Handle audio stream discontinuity correction
+        if (packet.is_audio_packet && packet.has_pts) {
+            if (last_audio_pts_ != -1 && !discontinuity_detected_) {
+                // Calculate offset for audio stream
+                pts_offset_ = last_audio_pts_ - packet.pts;
+                discontinuity_detected_ = true;
+                
+                if (log_callback_) {
+                    log_callback_(L"[PTS_DISCONTINUITY] Playlist discontinuity detected, applying audio offset: " + 
+                                 std::to_wstring(pts_offset_ / 90) + L"ms");
+                }
+            }
         }
         
+        // Clear the pending flag after first correction calculation
+        if (discontinuity_detected_) {
+            playlist_discontinuity_pending_ = false;
+        }
+    }
+    
+    // Apply correction if discontinuity was detected
+    if (discontinuity_detected_) {
+        if (packet.is_video_packet && (pts_offset_ != 0 || dts_offset_ != 0)) {
+            packet.ApplyTimestampCorrection(pts_offset_, dts_offset_);
+        } else if (packet.is_audio_packet && pts_offset_ != 0) {
+            packet.ApplyTimestampCorrection(pts_offset_, 0);
+        }
+    }
+    
+    // Update last known timestamps for next discontinuity detection
+    if (packet.is_video_packet && packet.has_pts) {
         last_video_pts_ = packet.pts;
         if (packet.has_dts) {
             last_video_dts_ = packet.dts;
         }
-    }
-    
-    // Check for audio stream discontinuities
-    if (packet.is_audio_packet && packet.has_pts) {
-        if (last_audio_pts_ != -1) {
-            int64_t pts_delta = packet.pts - last_audio_pts_;
-            
-            // Check if delta exceeds threshold
-            if (std::abs(pts_delta) > discontinuity_threshold_) {
-                if (!discontinuity_detected_) {
-                    // Audio discontinuity detected
-                    pts_offset_ = last_audio_pts_ - packet.pts;
-                    discontinuity_detected_ = true;
-                    
-                    if (log_callback_) {
-                        log_callback_(L"[PTS_DISCONTINUITY] Audio PTS jump detected: " + 
-                                     std::to_wstring(pts_delta / 90) + L"ms, applying offset: " + 
-                                     std::to_wstring(pts_offset_ / 90) + L"ms");
-                    }
-                }
-            }
-        }
-        
-        // Apply correction if discontinuity was detected
-        if (discontinuity_detected_ && pts_offset_ != 0) {
-            packet.ApplyTimestampCorrection(pts_offset_, 0);
-        }
-        
+    } else if (packet.is_audio_packet && packet.has_pts) {
         last_audio_pts_ = packet.pts;
     }
 }
@@ -1076,6 +1082,9 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     
                     // Reset frame numbering to prevent frame drop false positives
                     hls_converter_->Reset();
+                    
+                    // Signal playlist discontinuity to PTS correction system
+                    hls_converter_->SignalPlaylistDiscontinuity();
                     
                     // Reset frame statistics to prevent false drop alerts after discontinuity
                     ResetFrameStatistics();
