@@ -1,4 +1,5 @@
 #include "hls_pts_reclock.h"
+#include "tlsclient/tlsclient.h"
 #include <iostream>
 #include <fstream>
 #include <memory>
@@ -14,62 +15,27 @@
 #ifdef _WIN32
 #define NOMINMAX  // Prevent min/max macros from windows.h
 #include <windows.h>
-#include <winhttp.h>
 
-// Simple HTTP GET implementation using WinHTTP
+// Helper function for wide string to UTF-8 conversion
+std::string WideToUtf8(const std::wstring& wide) {
+    if (wide.empty()) return "";
+    int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, NULL, 0, NULL, NULL);
+    if (size == 0) return "";
+    std::string result(size - 1, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &result[0], size, NULL, NULL);
+    return result;
+}
+
+// HTTP GET implementation using TLSClient
 bool HttpGetText(const std::wstring& url, std::string& out) {
-    URL_COMPONENTS uc = { sizeof(uc) };
-    wchar_t host[256] = L"", path[2048] = L"";
-    uc.lpszHostName = host; uc.dwHostNameLength = 255;
-    uc.lpszUrlPath = path; uc.dwUrlPathLength = 2047;
-    
-    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) {
-        return false;
-    }
-
-    HINTERNET hSession = WinHttpOpen(L"HLS-PTS-Reclock/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, 0, 0, 0);
-    if (!hSession) return false;
-    
-    HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
-    if (!hConnect) { 
-        WinHttpCloseHandle(hSession); 
-        return false; 
+    static bool initialized = false;
+    if (!initialized) {
+        TLSClient::InitializeGlobal();
+        initialized = true;
     }
     
-    HINTERNET hRequest = WinHttpOpenRequest(
-        hConnect, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-        (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0);
-    
-    if (!hRequest) {
-        WinHttpCloseHandle(hConnect); 
-        WinHttpCloseHandle(hSession); 
-        return false;
-    }
-    
-    BOOL res = WinHttpSendRequest(hRequest, 0, 0, 0, 0, 0, 0) && WinHttpReceiveResponse(hRequest, 0);
-    if (!res) { 
-        WinHttpCloseHandle(hRequest); 
-        WinHttpCloseHandle(hConnect); 
-        WinHttpCloseHandle(hSession); 
-        return false; 
-    }
-    
-    std::vector<char> data;
-    DWORD bytesAvailable = 0;
-    while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
-        std::vector<char> buffer(bytesAvailable);
-        DWORD bytesRead = 0;
-        if (WinHttpReadData(hRequest, buffer.data(), bytesAvailable, &bytesRead)) {
-            data.insert(data.end(), buffer.begin(), buffer.begin() + bytesRead);
-        }
-    }
-    
-    WinHttpCloseHandle(hRequest); 
-    WinHttpCloseHandle(hConnect); 
-    WinHttpCloseHandle(hSession);
-    
-    out.assign(data.begin(), data.end());
-    return true;
+    // Try TLSClient for better HTTPS support
+    return TLSClientHTTP::HttpGetText(url, out);
 }
 
 // Stub for AddLog function (not needed in standalone tool)
