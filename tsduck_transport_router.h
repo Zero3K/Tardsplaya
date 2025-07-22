@@ -226,6 +226,7 @@ namespace tsduck_transport {
         RouterConfig current_config_;
         std::function<void(const std::wstring&)> log_callback_;
         HANDLE player_process_handle_;
+        std::wstring stream_id_; // Unique ID for this stream instance
         
         // Frame Number Tagging statistics
         std::atomic<uint64_t> total_frames_processed_{0};

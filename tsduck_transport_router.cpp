@@ -697,19 +697,31 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     log_callback_ = log_callback;
     routing_active_ = true;
     
+    // Generate unique stream ID for this instance
+    static std::atomic<int> stream_counter{0};
+    stream_id_ = L"stream_" + std::to_wstring(stream_counter.fetch_add(1));
+    
     // Reset converter and buffer
     hls_converter_->Reset();
     ts_buffer_->Reset(); // This will clear packets and reset producer_active
     ts_buffer_->SetLowLatencyMode(config.low_latency_mode); // Configure buffer for latency mode
     
     if (log_callback_) {
-        log_callback_(L"[TS_ROUTER] Starting TSDuck-inspired transport stream routing");
-        log_callback_(L"[TS_ROUTER] Player: " + config.player_path);
-        log_callback_(L"[TS_ROUTER] Buffer size: " + std::to_wstring(config.buffer_size_packets) + L" packets");
+        log_callback_(L"[" + stream_id_ + L"] Starting TSDuck-inspired transport stream routing");
+        log_callback_(L"[" + stream_id_ + L"] Player: " + config.player_path);
+        log_callback_(L"[" + stream_id_ + L"] Buffer size: " + std::to_wstring(config.buffer_size_packets) + L" packets");
+        
+        // Check system load
+        auto& resource_manager = StreamResourceManager::getInstance();
+        int active_streams = resource_manager.GetActiveStreamCount();
+        bool system_under_load = resource_manager.IsSystemUnderLoad();
+        
+        log_callback_(L"[" + stream_id_ + L"] System status: " + std::to_wstring(active_streams) + 
+                     L" active streams, load=" + (system_under_load ? L"HIGH" : L"NORMAL"));
         
         if (config.low_latency_mode) {
-            log_callback_(L"[LOW_LATENCY] Mode enabled - targeting minimal stream delay");
-            log_callback_(L"[LOW_LATENCY] Max segments: " + std::to_wstring(config.max_segments_to_buffer) + 
+            log_callback_(L"[" + stream_id_ + L"] Low-latency mode enabled - targeting minimal stream delay");
+            log_callback_(L"[" + stream_id_ + L"] Max segments: " + std::to_wstring(config.max_segments_to_buffer) + 
                          L", Refresh: " + std::to_wstring(config.playlist_refresh_interval.count()) + L"ms");
         }
     }
@@ -794,7 +806,7 @@ TransportStreamRouter::BufferStats TransportStreamRouter::GetBufferStats() const
 
 void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token) {
     if (log_callback_) {
-        log_callback_(L"[TS_ROUTER] HLS fetcher thread started");
+        log_callback_(L"[" + stream_id_ + L"] HLS fetcher thread started");
     }
     
     std::vector<std::wstring> processed_segments;
@@ -834,29 +846,60 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             std::vector<std::wstring> segment_urls;
             bool has_discontinuities = false;
             bool ads_detected = false;
+            bool detection_reliable = true;
             
             if (playlist_parser.ParsePlaylist(playlist_content)) {
-                // Perform ad detection first
-                ads_detected = playlist_parser.DetectAds();
+                // Check if system is under load to determine ad detection mode
+                auto& resource_manager = StreamResourceManager::getInstance();
+                bool system_under_load = resource_manager.IsSystemUnderLoad();
+                bool use_conservative_mode = system_under_load || resource_manager.GetActiveStreamCount() > 1;
                 
-                if (ads_detected) {
+                // Perform ad detection with appropriate mode
+                ads_detected = playlist_parser.DetectAds(use_conservative_mode);
+                
+                auto stats = playlist_parser.GetAdDetectionStats();
+                detection_reliable = stats.detection_reliable;
+                
+                if (ads_detected && detection_reliable) {
                     // Get only content segments (skip ads)
                     auto content_segments = playlist_parser.GetContentSegments();
                     for (const auto& segment : content_segments) {
                         segment_urls.push_back(segment.url);
                     }
                     
-                    auto stats = playlist_parser.GetAdDetectionStats();
                     if (log_callback_) {
-                        log_callback_(L"[AD_SKIP] Ads detected! Total: " + std::to_wstring(stats.total_segments) + 
+                        std::wstring mode_str = use_conservative_mode ? L"Conservative" : L"Normal";
+                        log_callback_(L"[" + stream_id_ + L":AD_SKIP] " + mode_str + L" mode: Ads detected! Total: " + 
+                                     std::to_wstring(stats.total_segments) + 
                                      L", Content: " + std::to_wstring(stats.content_segments) + 
                                      L", Ads: " + std::to_wstring(stats.ad_segments) + L" (skipped)");
+                        if (!stats.detection_reason.empty()) {
+                            log_callback_(L"[" + stream_id_ + L":AD_SKIP] Reason: " + stats.detection_reason);
+                        }
+                    }
+                } else if (ads_detected && !detection_reliable) {
+                    // Ad detection was unreliable - fall back to normal playback
+                    auto segments = playlist_parser.GetSegments();
+                    for (const auto& segment : segments) {
+                        segment_urls.push_back(segment.url);
+                    }
+                    
+                    if (log_callback_) {
+                        log_callback_(L"[" + stream_id_ + L":AD_SKIP] Ad detection unreliable - using all segments for stability");
+                        if (!stats.detection_reason.empty()) {
+                            log_callback_(L"[" + stream_id_ + L":AD_SKIP] Reason: " + stats.detection_reason);
+                        }
                     }
                 } else {
                     // No ads detected, use all segments
                     auto segments = playlist_parser.GetSegments();
                     for (const auto& segment : segments) {
                         segment_urls.push_back(segment.url);
+                    }
+                    
+                    if (use_conservative_mode && log_callback_ && stats.discontinuity_count > 0) {
+                        log_callback_(L"[" + stream_id_ + L":AD_SKIP] Conservative mode: " + std::to_wstring(stats.discontinuity_count) + 
+                                     L" discontinuities found but no reliable ad pattern detected");
                     }
                 }
                 

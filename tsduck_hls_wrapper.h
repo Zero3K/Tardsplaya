@@ -55,7 +55,8 @@ namespace tsduck_hls {
         int64_t GetMediaSequence() const { return media_sequence_; }
         
         // Enhanced ad detection using TSDuck-style SCTE-35 analysis and m3u8adskipper algorithm
-        bool DetectAds();
+        // Now with multi-stream awareness for reliable concurrent operation
+        bool DetectAds(bool conservative_mode = false);
         
         // Get segments filtered by ad detection (content only)
         std::vector<MediaSegment> GetContentSegments() const;
@@ -67,6 +68,8 @@ namespace tsduck_hls {
             int ad_segments = 0;
             int discontinuity_count = 0;
             bool ads_detected = false;
+            bool detection_reliable = true;  // False if detection may be unreliable
+            std::wstring detection_reason;    // Reason for detection result
         };
         AdDetectionStats GetAdDetectionStats() const;
         
@@ -89,6 +92,8 @@ namespace tsduck_hls {
         
         // Ad detection state (m3u8adskipper inspired)
         bool ads_detected_ = false;
+        bool detection_reliable_ = true;
+        std::wstring detection_reason_;
         int content_stream_group_ = -1;  // Which group (0 or 1) contains content
         
         // TSDuck-inspired parsing methods
@@ -101,9 +106,10 @@ namespace tsduck_hls {
         void CalculatePreciseTiming();
 
         // Ad detection methods (inspired by m3u8adskipper algorithm)
-        void PerformAdDetection();
+        void PerformAdDetection(bool conservative_mode = false);
         void ClassifySegmentsByDiscontinuity();
         int DetermineContentGroup() const;
+        bool ValidateAdDetectionResult() const;
         
         // Utility methods
         double ExtractFloatFromTag(const std::string& line, const std::string& tag);
