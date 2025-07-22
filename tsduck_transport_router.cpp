@@ -3,6 +3,7 @@
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
+#include "hls_discontinuity_handler.h"
 #define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
@@ -647,6 +648,9 @@ TransportStreamRouter::TransportStreamRouter() {
     // Initialize member variables
     player_process_handle_ = INVALID_HANDLE_VALUE;
     
+    // Initialize discontinuity handler for seamless stream processing
+    discontinuity_handler_ = std::make_unique<hls_discontinuity::HLSDiscontinuityHandler>();
+    
     // Frame Number Tagging: Initialize frame tracking
     total_frames_processed_ = 0;
     frames_dropped_ = 0;
@@ -696,6 +700,18 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     current_config_ = config;
     log_callback_ = log_callback;
     routing_active_ = true;
+    
+    // Configure discontinuity handler for seamless stream processing
+    if (discontinuity_handler_) {
+        hls_discontinuity::HLSDiscontinuityHandler::Config disc_config;
+        disc_config.enable_continuity_correction = config.enable_continuity_correction;
+        disc_config.enable_timestamp_smoothing = config.enable_timestamp_smoothing;
+        disc_config.enable_ad_detection = true;
+        disc_config.max_gap_tolerance = config.max_gap_tolerance;
+        disc_config.output_buffer_packets = config.buffer_size_packets / 4; // Use 25% of main buffer
+        discontinuity_handler_->SetConfig(disc_config);
+        discontinuity_handler_->Reset(); // Reset for new stream
+    }
     
     // Reset converter and buffer
     hls_converter_->Reset();
@@ -790,6 +806,13 @@ TransportStreamRouter::BufferStats TransportStreamRouter::GetBufferStats() const
     }
     
     return stats;
+}
+
+hls_discontinuity::HLSDiscontinuityHandler::ProcessingStats TransportStreamRouter::GetDiscontinuityStats() const {
+    if (discontinuity_handler_) {
+        return discontinuity_handler_->GetStats();
+    }
+    return hls_discontinuity::HLSDiscontinuityHandler::ProcessingStats{};
 }
 
 void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token) {
@@ -929,8 +952,42 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         continue;
                     }
                     
-                    // Convert to TS packets
-                    auto ts_packets = hls_converter_->ConvertSegment(segment_data, first_segment);
+                    std::vector<TSPacket> ts_packets;
+                    
+                    // Use discontinuity handler for seamless processing if enabled
+                    if (current_config_.enable_discontinuity_smoothing && discontinuity_handler_) {
+                        // Create segment info for discontinuity handling
+                        hls_discontinuity::SegmentInfo segment_info;
+                        segment_info.url = segment_url;
+                        segment_info.has_discontinuity = has_discontinuities;
+                        segment_info.sequence_number = processed_segments.size();
+                        
+                        // Process through discontinuity handler for smooth output
+                        auto discontinuity_packets = discontinuity_handler_->ProcessHLSSegment(
+                            segment_data, segment_info, first_segment);
+                        
+                        if (log_callback_ && has_discontinuities) {
+                            auto stats = discontinuity_handler_->GetStats();
+                            log_callback_(L"[DISCONTINUITY] Seamless processing: " + 
+                                         std::to_wstring(discontinuity_packets.size()) + L" packets, " +
+                                         std::to_wstring(stats.continuity_corrections_made) + L" corrections made");
+                        }
+                        
+                        // Convert discontinuity handler packets to TSPacket format
+                        for (const auto& disc_packet : discontinuity_packets) {
+                            TSPacket ts_packet;
+                            memcpy(ts_packet.data, disc_packet.data, 188);
+                            ts_packet.pid = disc_packet.pid;
+                            ts_packet.payload_unit_start = disc_packet.payload_unit_start;
+                            ts_packet.discontinuity = disc_packet.discontinuity_indicator;
+                            ts_packet.timestamp = disc_packet.timestamp;
+                            ts_packets.push_back(ts_packet);
+                        }
+                    } else {
+                        // Use original converter for traditional processing
+                        ts_packets = hls_converter_->ConvertSegment(segment_data, first_segment);
+                    }
+                    
                     first_segment = false;
                     
                     if (ts_packets.empty()) {
