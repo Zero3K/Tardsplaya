@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <sstream>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <vector>
 
@@ -129,7 +130,7 @@ public:
         bool is_live;
         std::string base_url;
         
-        Playlist() : target_duration(0.0), media_sequence(0), is_live(false) {}
+        Playlist() : target_duration(0.0), media_sequence(0), is_live(true) {}
     };
     
     static std::string ResolveUrl(const std::string& url, const std::string& base_url) {
@@ -211,6 +212,9 @@ public:
                 } else if (line.find("#EXT-X-PLAYLIST-TYPE:") == 0) {
                     std::string type = line.substr(21);
                     playlist.is_live = (type != "VOD");
+                } else if (line.find("#EXT-X-ENDLIST") == 0) {
+                    // Presence of ENDLIST indicates this is a VOD stream
+                    playlist.is_live = false;
                 }
             } else {
                 // This is a segment URL
@@ -435,7 +439,7 @@ public:
     }
     
 private:
-    bool ProcessSegments(const HLSPlaylistParser::Playlist& playlist) {
+    bool ProcessSegments(const HLSPlaylistParser::Playlist& initial_playlist) {
         std::ostream* output_stream = nullptr;
         std::ofstream file_output;
         
@@ -455,128 +459,201 @@ private:
             output_stream = &file_output;
         }
         
+        // For live streams, keep track of processed segments to avoid reprocessing
+        std::set<int64_t> processed_sequence_numbers;
+        auto current_playlist = initial_playlist;
         int segments_processed = 0;
         std::map<uint16_t, std::vector<uint8_t>> pes_buffers; // PID -> accumulated PES data
         
-        for (const auto& segment : playlist.segments) {
-            if (!g_running) {
-                std::cout << "Processing interrupted by user.\n";
-                return false;
-            }
+        // Main processing loop - for live streams this will run indefinitely
+        do {
+            bool processed_any_segments = false;
             
-            if (args_.verbose) {
-                std::cout << "Processing segment " << (segments_processed + 1) << "/" << playlist.segments.size()
-                         << ": " << segment.url << "\n";
-            }
-            
-            // Download segment
-            auto segment_data = downloader_.DownloadData(segment.url);
-            if (segment_data.empty()) {
-                std::cerr << "Failed to download segment: " << segment.url << "\n";
-                std::cerr << "Skipping this segment and continuing...\n";
-                continue;
-            }
-            
-            if (args_.verbose) {
-                std::cout << "Downloaded " << segment_data.size() << " bytes for segment " << (segments_processed + 1) << "\n";
-            }
-            
-            // Validate that this looks like MPEG-TS data
-            if (segment_data.size() < 188 || segment_data[0] != 0x47) {
-                std::cerr << "Warning: Segment data doesn't appear to be valid MPEG-TS (size: " 
-                         << segment_data.size() << ", first byte: 0x" 
-                         << std::hex << static_cast<int>(segment_data[0]) << std::dec << ")\n";
+            for (const auto& segment : current_playlist.segments) {
+                if (!g_running) {
+                    if (args_.verbose) {
+                        std::cerr << "Processing interrupted by user.\n";
+                    }
+                    return true; // Graceful exit
+                }
+                
+                // For live streams, skip already processed segments
+                if (current_playlist.is_live && 
+                    processed_sequence_numbers.find(segment.sequence_number) != processed_sequence_numbers.end()) {
+                    continue;
+                }
+                
                 if (args_.verbose) {
-                    std::cout << "First 16 bytes: ";
-                    for (size_t i = 0; i < 16 && i < segment_data.size(); ++i) {
-                        std::cout << std::hex << static_cast<int>(segment_data[i]) << " ";
-                    }
-                    std::cout << std::dec << "\n";
-                }
-            }
-            
-            // Parse MPEG-TS packets
-            auto ts_packets = MPEGTSParser::ParseTSData(segment_data);
-            
-            if (args_.verbose) {
-                std::cout << "Parsed " << ts_packets.size() << " TS packets from segment\n";
-            }
-            
-            // Process packets and apply PTS correction
-            std::vector<uint8_t> corrected_data;
-            bool segment_has_discontinuity = segment.has_discontinuity;
-            
-            if (ts_packets.empty()) {
-                // If we can't parse TS packets, pass through original data as fallback
-                std::cerr << "Warning: Could not parse TS packets, using original segment data\n";
-                corrected_data = segment_data;
-            } else {
-                for (const auto& ts_packet : ts_packets) {
-                    // Accumulate PES data for streams with PTS/DTS
-                    if (ts_packet.payload_unit_start && !pes_buffers[ts_packet.pid].empty()) {
-                        // Process complete PES packet
-                        ProcessPESPacket(pes_buffers[ts_packet.pid], ts_packet.pid, segment_has_discontinuity);
-                        pes_buffers[ts_packet.pid].clear();
-                    }
-                    
-                    // Add payload to buffer
-                    if (ts_packet.has_payload) {
-                        pes_buffers[ts_packet.pid].insert(pes_buffers[ts_packet.pid].end(),
-                                                         ts_packet.payload.begin(), ts_packet.payload.end());
-                    }
-                    
-                    // Reconstruct TS packet with corrected data
-                    std::vector<uint8_t> ts_packet_data = ReconstructTSPacket(ts_packet);
-                    corrected_data.insert(corrected_data.end(), ts_packet_data.begin(), ts_packet_data.end());
+                    std::cerr << "Processing segment " << (segments_processed + 1) 
+                             << " (seq: " << segment.sequence_number << "): " << segment.url << "\n";
                 }
                 
-                // Process any remaining PES buffers
-                for (auto& [pid, buffer] : pes_buffers) {
-                    if (!buffer.empty()) {
-                        ProcessPESPacket(buffer, pid, segment_has_discontinuity);
-                    }
+                // Download segment
+                auto segment_data = downloader_.DownloadData(segment.url);
+                if (segment_data.empty()) {
+                    std::cerr << "Failed to download segment: " << segment.url << "\n";
+                    std::cerr << "Skipping this segment and continuing...\n";
+                    continue;
                 }
-            }
-            
-            // Write corrected data to output
-            if (!corrected_data.empty()) {
-                output_stream->write(reinterpret_cast<const char*>(corrected_data.data()), corrected_data.size());
                 
-                // Log first packet info for debugging (only for first segment)
-                if (segments_processed == 0 && args_.verbose) {
-                    std::cout << "First corrected TS packet: ";
-                    for (size_t i = 0; i < 16 && i < corrected_data.size(); ++i) {
-                        std::cout << std::hex << static_cast<int>(corrected_data[i]) << " ";
-                    }
-                    std::cout << std::dec << "\n";
+                if (args_.verbose) {
+                    std::cerr << "Downloaded " << segment_data.size() << " bytes for segment " << (segments_processed + 1) << "\n";
                 }
-            } else {
-                std::cerr << "Warning: No corrected data generated for segment " << (segments_processed + 1) << "\n";
+                
+                // Validate that this looks like MPEG-TS data
+                if (segment_data.size() < 188 || segment_data[0] != 0x47) {
+                    std::cerr << "Warning: Segment data doesn't appear to be valid MPEG-TS (size: " 
+                             << segment_data.size() << ", first byte: 0x" 
+                             << std::hex << static_cast<int>(segment_data[0]) << std::dec << ")\n";
+                    if (args_.verbose) {
+                        std::cerr << "First 16 bytes: ";
+                        for (size_t i = 0; i < 16 && i < segment_data.size(); ++i) {
+                            std::cerr << std::hex << static_cast<int>(segment_data[i]) << " ";
+                        }
+                        std::cerr << std::dec << "\n";
+                    }
+                }
+                
+                // Parse MPEG-TS packets
+                auto ts_packets = MPEGTSParser::ParseTSData(segment_data);
+                
+                if (args_.verbose) {
+                    std::cerr << "Parsed " << ts_packets.size() << " TS packets from segment\n";
+                }
+                
+                // Process packets and apply PTS correction
+                std::vector<uint8_t> corrected_data;
+                bool segment_has_discontinuity = segment.has_discontinuity;
+                
+                if (ts_packets.empty()) {
+                    // If we can't parse TS packets, pass through original data as fallback
+                    std::cerr << "Warning: Could not parse TS packets, using original segment data\n";
+                    corrected_data = segment_data;
+                } else {
+                    for (const auto& ts_packet : ts_packets) {
+                        // Accumulate PES data for streams with PTS/DTS
+                        if (ts_packet.payload_unit_start && !pes_buffers[ts_packet.pid].empty()) {
+                            // Process complete PES packet
+                            ProcessPESPacket(pes_buffers[ts_packet.pid], ts_packet.pid, segment_has_discontinuity);
+                            pes_buffers[ts_packet.pid].clear();
+                        }
+                        
+                        // Add payload to buffer
+                        if (ts_packet.has_payload) {
+                            pes_buffers[ts_packet.pid].insert(pes_buffers[ts_packet.pid].end(),
+                                                             ts_packet.payload.begin(), ts_packet.payload.end());
+                        }
+                        
+                        // Reconstruct TS packet with corrected data
+                        std::vector<uint8_t> ts_packet_data = ReconstructTSPacket(ts_packet);
+                        corrected_data.insert(corrected_data.end(), ts_packet_data.begin(), ts_packet_data.end());
+                    }
+                    
+                    // Process any remaining PES buffers
+                    for (auto& [pid, buffer] : pes_buffers) {
+                        if (!buffer.empty()) {
+                            ProcessPESPacket(buffer, pid, segment_has_discontinuity);
+                        }
+                    }
+                }
+                
+                // Write corrected data to output
+                if (!corrected_data.empty()) {
+                    output_stream->write(reinterpret_cast<const char*>(corrected_data.data()), corrected_data.size());
+                    
+                    // Log first packet info for debugging (only for first segment)
+                    if (segments_processed == 0 && args_.verbose) {
+                        std::cerr << "First corrected TS packet: ";
+                        for (size_t i = 0; i < 16 && i < corrected_data.size(); ++i) {
+                            std::cerr << std::hex << static_cast<int>(corrected_data[i]) << " ";
+                        }
+                        std::cerr << std::dec << "\n";
+                    }
+                } else {
+                    std::cerr << "Warning: No corrected data generated for segment " << (segments_processed + 1) << "\n";
+                }
+                
+                if (args_.use_stdout) {
+                    output_stream->flush();
+                    // Small delay for real-time streaming  
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                
+                // Mark this segment as processed for live streams
+                if (current_playlist.is_live) {
+                    processed_sequence_numbers.insert(segment.sequence_number);
+                }
+                
+                segments_processed++;
+                processed_any_segments = true;
+                segment_has_discontinuity = false; // Only first segment after discontinuity marker
             }
             
-            if (args_.use_stdout) {
-                output_stream->flush();
-                // Small delay for real-time streaming
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            // For live streams, refresh playlist and continue processing new segments
+            if (current_playlist.is_live && g_running) {
+                if (!processed_any_segments) {
+                    // No new segments found, wait before refreshing
+                    if (args_.verbose) {
+                        std::cerr << "No new segments found, waiting " 
+                                 << static_cast<int>(current_playlist.target_duration / 2.0) << "s before refresh...\n";
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(
+                        static_cast<int>(current_playlist.target_duration * 500))); // Wait half target duration
+                }
+                
+                // Refresh playlist to get new segments
+                if (args_.verbose) {
+                    std::cerr << "Refreshing playlist for new segments...\n";
+                }
+                
+                auto playlist_data = downloader_.DownloadData(args_.input_url);
+                if (!playlist_data.empty()) {
+                    auto new_playlist = HLSPlaylistParser::ParsePlaylist(playlist_data, args_.input_url);
+                    if (!new_playlist.segments.empty()) {
+                        current_playlist = new_playlist;
+                        
+                        // Clean up old processed sequence numbers to prevent memory growth
+                        if (processed_sequence_numbers.size() > 50) {
+                            auto min_seq = current_playlist.media_sequence;
+                            auto it = processed_sequence_numbers.begin();
+                            while (it != processed_sequence_numbers.end()) {
+                                if (*it < min_seq - 10) { // Keep some history
+                                    it = processed_sequence_numbers.erase(it);
+                                } else {
+                                    ++it;
+                                }
+                            }
+                        }
+                    } else {
+                        std::cerr << "Warning: Refreshed playlist is empty, retrying...\n";
+                        std::this_thread::sleep_for(std::chrono::seconds(2));
+                    }
+                } else {
+                    std::cerr << "Warning: Failed to refresh playlist, retrying...\n";
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                }
             }
             
-            segments_processed++;
-            segment_has_discontinuity = false; // Only first segment after discontinuity marker
-        }
+        } while (current_playlist.is_live && g_running);
         
+        // VOD streams or live streams that have ended
         if (!args_.use_stdout && !args_.output_url.empty() && args_.output_url != "-") {
             file_output.close();
-            std::cout << "Created " << args_.output_format << " output: " << args_.output_url << "\n";
+            if (args_.verbose) {
+                std::cerr << "Created " << args_.output_format << " output: " << args_.output_url << "\n";
+            }
         }
         
-        // Print final statistics
-        const auto& stats = reclocker_.GetStats();
-        std::cout << "\nProcessing complete. Statistics:\n";
-        std::cout << "  Segments processed: " << segments_processed << "\n";
-        std::cout << "  Total packets processed: " << stats.total_packets_processed << "\n";
-        std::cout << "  Discontinuities detected: " << stats.discontinuities_detected << "\n";
-        std::cout << "  Timestamp corrections applied: " << stats.timestamp_corrections << "\n";
-        std::cout << "  Total offset applied: " << utils::FormatTimestamp(stats.total_offset_applied) << "\n";
+        // Print final statistics only for VOD or when exiting live streams
+        if (!current_playlist.is_live || !g_running) {
+            const auto& stats = reclocker_.GetStats();
+            std::cerr << "\nProcessing complete. Statistics:\n";
+            std::cerr << "  Segments processed: " << segments_processed << "\n";
+            std::cerr << "  Total packets processed: " << stats.total_packets_processed << "\n";
+            std::cerr << "  Discontinuities detected: " << stats.discontinuities_detected << "\n";
+            std::cerr << "  Timestamp corrections applied: " << stats.timestamp_corrections << "\n";
+            std::cerr << "  Total offset applied: " << utils::FormatTimestamp(stats.total_offset_applied) << "\n";
+        }
         
         return true;
     }
