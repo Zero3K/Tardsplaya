@@ -156,22 +156,9 @@
   <ItemGroup>
     <ClCompile Include="hls_pts_reclock.cpp" />
     <ClCompile Include="hls_pts_reclock_tool.cpp" />
-    <ClCompile Include="twitch_api.cpp" />
-    <ClCompile Include="urlencode.cpp" />
-    <ClCompile Include="tlsclient\tlsclient.cpp" />
-    <ClCompile Include="tlsclient\chacha20.c" />
-    <ClCompile Include="tlsclient\ecc.c" />
-    <ClCompile Include="tlsclient\gcm.c" />
-    <ClCompile Include="tlsclient\sha2.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="hls_pts_reclock.h" />
-    <ClInclude Include="twitch_api.h" />
-    <ClInclude Include="urlencode.h" />
-    <ClInclude Include="json_minimal.h" />
-    <ClInclude Include="tlsclient\tlsclient.h" />
-    <ClInclude Include="tlsclient\tls.h" />
-    <ClInclude Include="tlsclient\lock.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
