@@ -1,10 +1,10 @@
+#define NOMINMAX
 #include "tsduck_transport_router.h"
 #include "twitch_api.h"
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
 #include "hls_discontinuity_handler.h"
-#define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
 #include <iostream>
