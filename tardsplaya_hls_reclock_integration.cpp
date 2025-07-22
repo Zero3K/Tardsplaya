@@ -2,10 +2,23 @@
 #include <iostream>
 #include <sstream>
 #include <fstream>
-#include <filesystem>
 #include <regex>
 #include <process.h>
 #include <windows.h>
+
+// Handle filesystem include for different C++ standards
+#ifdef _MSC_VER
+    #if _MSC_VER >= 1914 && _MSVC_LANG >= 201703L
+        #include <filesystem>
+        namespace fs = std::filesystem;
+    #else
+        #include <experimental/filesystem>
+        namespace fs = std::experimental::filesystem;
+    #endif
+#else
+    #include <filesystem>
+    namespace fs = std::filesystem;
+#endif
 
 namespace tardsplaya_hls_reclock {
 
@@ -43,7 +56,7 @@ namespace tardsplaya_hls_reclock {
         // Execute the reclock tool
         bool success = ExecuteReclockTool(hls_url, result.output_path, output_format, progress_cb);
         
-        if (success && std::filesystem::exists(result.output_path)) {
+        if (success && fs::exists(result.output_path)) {
             result.success = true;
             if (progress_cb) {
                 progress_cb(100, "HLS PTS correction completed");
@@ -59,7 +72,7 @@ namespace tardsplaya_hls_reclock {
     }
 
     bool TardsplayaHLSReclock::IsReclockToolAvailable() const {
-        return !reclock_tool_path_.empty() && std::filesystem::exists(reclock_tool_path_);
+        return !reclock_tool_path_.empty() && fs::exists(reclock_tool_path_);
     }
 
     std::string TardsplayaHLSReclock::GetReclockToolPath() const {
@@ -69,8 +82,8 @@ namespace tardsplaya_hls_reclock {
     void TardsplayaHLSReclock::CleanupTempFiles() {
         for (const auto& file : temp_files_) {
             try {
-                if (std::filesystem::exists(file)) {
-                    std::filesystem::remove(file);
+                if (fs::exists(file)) {
+                    fs::remove(file);
                 }
             } catch (const std::exception& e) {
                 // Log error but continue cleanup
@@ -89,7 +102,7 @@ namespace tardsplaya_hls_reclock {
             return false;
         }
 
-        std::filesystem::path exe_dir = std::filesystem::path(module_path).parent_path();
+        fs::path exe_dir = fs::path(module_path).parent_path();
         
         // Check for both debug and release builds
         std::vector<std::string> possible_names = {
@@ -99,8 +112,8 @@ namespace tardsplaya_hls_reclock {
         };
 
         for (const auto& name : possible_names) {
-            std::filesystem::path tool_path = exe_dir / name;
-            if (std::filesystem::exists(tool_path)) {
+            fs::path tool_path = exe_dir / name;
+            if (fs::exists(tool_path)) {
                 reclock_tool_path_ = tool_path.string();
                 return true;
             }
@@ -115,8 +128,8 @@ namespace tardsplaya_hls_reclock {
         };
 
         for (const auto& rel_path : relative_paths) {
-            if (std::filesystem::exists(rel_path)) {
-                reclock_tool_path_ = std::filesystem::absolute(rel_path).string();
+            if (fs::exists(rel_path)) {
+                reclock_tool_path_ = fs::absolute(rel_path).string();
                 return true;
             }
         }
@@ -128,11 +141,11 @@ namespace tardsplaya_hls_reclock {
         static int counter = 0;
         std::ostringstream oss;
         
-        std::filesystem::path temp_dir = config_.temp_directory;
+        fs::path temp_dir = config_.temp_directory;
         
         // Create temp directory if it doesn't exist
         try {
-            std::filesystem::create_directories(temp_dir);
+            fs::create_directories(temp_dir);
         } catch (const std::exception&) {
             // Fallback to current directory
             temp_dir = ".";

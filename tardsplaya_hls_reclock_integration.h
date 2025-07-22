@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <vector>
 
 namespace tardsplaya_hls_reclock {
 
