@@ -806,9 +806,11 @@ void HLSToTSConverter::CheckAndCorrectDiscontinuity(TSPacket& packet) {
                     }
                     discontinuity_detected_ = true;
                     
-                    AddDebugLog(L"[PTS_DISCONTINUITY] Video PTS jump detected: " + 
-                               std::to_wstring(pts_delta / 90) + L"ms, applying offset: " + 
-                               std::to_wstring(pts_offset_ / 90) + L"ms");
+                    if (log_callback_) {
+                        log_callback_(L"[PTS_DISCONTINUITY] Video PTS jump detected: " + 
+                                     std::to_wstring(pts_delta / 90) + L"ms, applying offset: " + 
+                                     std::to_wstring(pts_offset_ / 90) + L"ms");
+                    }
                 }
             }
         }
@@ -836,9 +838,11 @@ void HLSToTSConverter::CheckAndCorrectDiscontinuity(TSPacket& packet) {
                     pts_offset_ = last_audio_pts_ - packet.pts;
                     discontinuity_detected_ = true;
                     
-                    AddDebugLog(L"[PTS_DISCONTINUITY] Audio PTS jump detected: " + 
-                               std::to_wstring(pts_delta / 90) + L"ms, applying offset: " + 
-                               std::to_wstring(pts_offset_ / 90) + L"ms");
+                    if (log_callback_) {
+                        log_callback_(L"[PTS_DISCONTINUITY] Audio PTS jump detected: " + 
+                                     std::to_wstring(pts_delta / 90) + L"ms, applying offset: " + 
+                                     std::to_wstring(pts_offset_ / 90) + L"ms");
+                    }
                 }
             }
         }
@@ -911,6 +915,7 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     hls_converter_->Reset();
     hls_converter_->SetPTSDiscontinuityCorrection(config.enable_pts_discontinuity_correction);
     hls_converter_->SetDiscontinuityThreshold(config.discontinuity_threshold_ms);
+    hls_converter_->SetLogCallback(log_callback_);
     ts_buffer_->Reset(); // This will clear packets and reset producer_active
     ts_buffer_->SetLowLatencyMode(config.low_latency_mode); // Configure buffer for latency mode
     

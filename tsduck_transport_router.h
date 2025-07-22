@@ -129,6 +129,9 @@ namespace tsduck_transport {
         void SetPTSDiscontinuityCorrection(bool enable) { pts_correction_enabled_ = enable; }
         void SetDiscontinuityThreshold(int64_t threshold_ms) { discontinuity_threshold_ = threshold_ms * 90; } // Convert ms to 90kHz
         
+        // Set log callback for discontinuity messages
+        void SetLogCallback(std::function<void(const std::wstring&)> log_callback) { log_callback_ = log_callback; }
+        
         // Reset converter state for new stream
         void Reset();
         
@@ -163,6 +166,9 @@ namespace tsduck_transport {
         // Stream type detection state
         uint16_t detected_video_pid_ = 0;
         uint16_t detected_audio_pid_ = 0;
+        
+        // Logging callback
+        std::function<void(const std::wstring&)> log_callback_;
         
         // Generate PAT (Program Association Table)
         TSPacket GeneratePAT();
