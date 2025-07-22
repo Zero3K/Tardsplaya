@@ -71,6 +71,86 @@ namespace tardsplaya_hls_reclock {
         return result;
     }
 
+    bool TardsplayaHLSReclock::ProcessHLSStreamToPipe(const std::string& hls_url,
+                                                    HANDLE write_pipe,
+                                                    const std::string& output_format,
+                                                    ProgressCallback progress_cb) {
+        if (!IsReclockToolAvailable()) {
+            return false;
+        }
+
+        if (progress_cb) {
+            progress_cb(10, "Initializing HLS PTS correction with streaming output...");
+        }
+
+        // Build command line for stdout output
+        std::ostringstream cmd;
+        cmd << "\"" << reclock_tool_path_ << "\"";
+        cmd << " --stdout";
+        cmd << " -i \"" << hls_url << "\"";
+        cmd << " -f " << output_format;
+        
+        if (config_.verbose_logging) {
+            cmd << " --verbose";
+        }
+        
+        cmd << " --threshold " << static_cast<int64_t>(config_.discontinuity_threshold_seconds * 1000000);
+        cmd << " --delta-threshold " << config_.delta_threshold_seconds;
+
+        if (config_.verbose_logging) {
+            std::cout << "Executing streaming command: " << cmd.str() << std::endl;
+        }
+
+        if (progress_cb) {
+            progress_cb(30, "Starting HLS processing with pipe output...");
+        }
+
+        // Set up process with stdout redirection
+        STARTUPINFOA si = {};
+        PROCESS_INFORMATION pi = {};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = write_pipe;
+        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+        std::string command_line = cmd.str();
+        BOOL success = CreateProcessA(
+            nullptr,
+            const_cast<char*>(command_line.c_str()),
+            nullptr,
+            nullptr,
+            TRUE, // Inherit handles
+            0,
+            nullptr,
+            nullptr,
+            &si,
+            &pi
+        );
+
+        if (!success) {
+            if (config_.verbose_logging) {
+                std::cerr << "Failed to start reclock tool process for streaming" << std::endl;
+            }
+            return false;
+        }
+
+        if (progress_cb) {
+            progress_cb(50, "HLS PTS reclock tool streaming started...");
+        }
+
+        // Don't wait for process to complete in streaming mode - let it run
+        // The calling code will manage the process lifetime
+        CloseHandle(pi.hThread);
+        // Keep process handle for caller to manage
+        
+        if (progress_cb) {
+            progress_cb(90, "HLS PTS streaming process initiated");
+        }
+
+        return true;
+    }
+
     bool TardsplayaHLSReclock::IsReclockToolAvailable() const {
         return !reclock_tool_path_.empty() && fs::exists(reclock_tool_path_);
     }

@@ -3,6 +3,295 @@
 #include "tsduck_transport_router.h"
 #include "stream_resource_manager.h"
 #include "tardsplaya_hls_reclock_integration.h"
+#include <fstream>
+#include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+// Helper function to check if a path is a local file vs URL
+static bool IsLocalFile(const std::wstring& path) {
+    // Check if it's a local file path (not HTTP/HTTPS URL)
+    if (path.find(L"http://") == 0 || path.find(L"https://") == 0) {
+        return false;
+    }
+    
+    // Check if it has file extension typical of processed files
+    if (path.find(L".ts") != std::wstring::npos || path.find(L".flv") != std::wstring::npos) {
+        return true;
+    }
+    
+    return false;
+}
+
+// Helper function to stream local file directly to player
+static std::thread StartLocalFileStreamThread(
+    const std::wstring& player_path,
+    const std::wstring& file_path,
+    std::atomic<bool>& cancel_token,
+    std::function<void(const std::wstring&)> log_callback,
+    const std::wstring& channel_name,
+    HWND main_window,
+    size_t tab_index,
+    HANDLE* player_process_handle
+) {
+    return std::thread([=, &cancel_token]() mutable {
+        if (log_callback) {
+            log_callback(L"Starting direct file streaming for corrected HLS stream");
+        }
+        
+        AddDebugLog(L"StartLocalFileStreamThread: File=" + file_path + L", Channel=" + channel_name);
+        
+        try {
+            // Launch the player process with stdin input
+            STARTUPINFOW si = {};
+            PROCESS_INFORMATION pi = {};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdInput = NULL; // We'll create a pipe
+            
+            // Create pipe for streaming
+            HANDLE hReadPipe, hWritePipe;
+            SECURITY_ATTRIBUTES sa = {};
+            sa.nLength = sizeof(sa);
+            sa.bInheritHandle = TRUE;
+            
+            if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+                if (log_callback) {
+                    log_callback(L"Failed to create pipe for player");
+                }
+                return;
+            }
+            
+            si.hStdInput = hReadPipe;
+            
+            // Build command line
+            std::wstring cmdline = L"\"" + player_path + L"\" -";
+            
+            BOOL success = CreateProcessW(
+                NULL,
+                const_cast<wchar_t*>(cmdline.c_str()),
+                NULL, NULL, TRUE,
+                0, NULL, NULL,
+                &si, &pi
+            );
+            
+            CloseHandle(hReadPipe); // Close the read end in parent process
+            
+            if (!success) {
+                CloseHandle(hWritePipe);
+                if (log_callback) {
+                    log_callback(L"Failed to launch player for corrected stream");
+                }
+                return;
+            }
+            
+            if (player_process_handle) {
+                *player_process_handle = pi.hProcess;
+            }
+            
+            if (log_callback) {
+                log_callback(L"Player launched, streaming corrected file data...");
+            }
+            
+            // Open the corrected file and stream it to the player
+            std::string narrow_path(file_path.begin(), file_path.end());
+            std::ifstream file(narrow_path, std::ios::binary);
+            
+            if (!file.is_open()) {
+                CloseHandle(hWritePipe);
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                if (log_callback) {
+                    log_callback(L"Failed to open corrected stream file");
+                }
+                return;
+            }
+            
+            // Stream file data to player
+            const size_t buffer_size = 188 * 1000; // Stream in 1000 TS packet chunks
+            std::vector<char> buffer(buffer_size);
+            DWORD bytes_written;
+            
+            while (!cancel_token.load() && file.good()) {
+                file.read(buffer.data(), buffer_size);
+                std::streamsize bytes_read = file.gcount();
+                
+                if (bytes_read > 0) {
+                    if (!WriteFile(hWritePipe, buffer.data(), static_cast<DWORD>(bytes_read), &bytes_written, NULL)) {
+                        break; // Player closed or error
+                    }
+                }
+            }
+            
+            file.close();
+            CloseHandle(hWritePipe);
+            
+            if (log_callback) {
+                log_callback(L"Corrected stream playback completed");
+            }
+            
+            // Wait a bit for player to finish processing
+            WaitForSingleObject(pi.hProcess, 2000);
+            
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            
+        } catch (const std::exception& e) {
+            if (log_callback) {
+                std::wstring error_msg(e.what(), e.what() + strlen(e.what()));
+                log_callback(L"Error in local file streaming: " + error_msg);
+            }
+        }
+        
+        AddDebugLog(L"StartLocalFileStreamThread: Completed for " + channel_name);
+    });
+}
+
+// Helper function to stream HLS with PTS correction directly to player via pipe
+static std::thread StartHLSReclockPipeThread(
+    const std::wstring& player_path,
+    const std::wstring& hls_url,
+    std::atomic<bool>& cancel_token,
+    std::function<void(const std::wstring&)> log_callback,
+    const std::wstring& channel_name,
+    HWND main_window,
+    size_t tab_index,
+    HANDLE* player_process_handle
+) {
+    return std::thread([=, &cancel_token]() mutable {
+        if (log_callback) {
+            log_callback(L"Starting HLS stream with direct PTS correction piping");
+        }
+        
+        AddDebugLog(L"StartHLSReclockPipeThread: URL=" + hls_url + L", Channel=" + channel_name);
+        
+        try {
+            using namespace tardsplaya_hls_reclock;
+            
+            // Convert wide string to narrow string for the reclock API
+            std::string narrow_url(hls_url.begin(), hls_url.end());
+            
+            // Create configuration for live streams
+            auto config = integration_utils::CreateConfigForStreamType("live");
+            config.verbose_logging = g_verboseDebug;
+            
+            // Create reclock processor
+            TardsplayaHLSReclock reclocker(config);
+            
+            if (!reclocker.IsReclockToolAvailable()) {
+                if (log_callback) {
+                    log_callback(L"HLS PTS reclock tool not available for pipe streaming");
+                }
+                return;
+            }
+            
+            // Create pipe for streaming
+            HANDLE hReadPipe, hWritePipe;
+            SECURITY_ATTRIBUTES sa = {};
+            sa.nLength = sizeof(sa);
+            sa.bInheritHandle = TRUE;
+            
+            if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+                if (log_callback) {
+                    log_callback(L"Failed to create pipe for HLS PTS reclock streaming");
+                }
+                return;
+            }
+            
+            // Launch the player process with stdin input
+            STARTUPINFOW si = {};
+            PROCESS_INFORMATION pi = {};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdInput = hReadPipe;
+            
+            // Build command line
+            std::wstring cmdline = L"\"" + player_path + L"\" -";
+            
+            BOOL success = CreateProcessW(
+                NULL,
+                const_cast<wchar_t*>(cmdline.c_str()),
+                NULL, NULL, TRUE,
+                0, NULL, NULL,
+                &si, &pi
+            );
+            
+            CloseHandle(hReadPipe); // Close the read end in parent process
+            
+            if (!success) {
+                CloseHandle(hWritePipe);
+                if (log_callback) {
+                    log_callback(L"Failed to launch player for HLS PTS reclock streaming");
+                }
+                return;
+            }
+            
+            if (player_process_handle) {
+                *player_process_handle = pi.hProcess;
+            }
+            
+            if (log_callback) {
+                log_callback(L"Player launched, starting HLS PTS reclock streaming...");
+            }
+            
+            // Process progress callback
+            auto progress_cb = [&](int progress, const std::string& status) {
+                if (log_callback && g_verboseDebug) {
+                    std::wstring wide_status(status.begin(), status.end());
+                    log_callback(L"PTS Reclock Pipe: " + wide_status + L" (" + std::to_wstring(progress) + L"%)");
+                }
+            };
+            
+            // Start the HLS PTS reclock tool with pipe output
+            bool reclock_success = reclocker.ProcessHLSStreamToPipe(narrow_url, hWritePipe, "mpegts", progress_cb);
+            
+            if (!reclock_success) {
+                if (log_callback) {
+                    log_callback(L"Failed to start HLS PTS reclock pipe streaming");
+                }
+                CloseHandle(hWritePipe);
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                return;
+            }
+            
+            if (log_callback) {
+                log_callback(L"HLS PTS reclock pipe streaming active");
+            }
+            
+            // Wait for either cancellation or player to finish
+            while (!cancel_token.load()) {
+                DWORD wait_result = WaitForSingleObject(pi.hProcess, 1000);
+                if (wait_result == WAIT_OBJECT_0) {
+                    // Player process finished
+                    break;
+                }
+            }
+            
+            // Cleanup
+            CloseHandle(hWritePipe);
+            
+            if (log_callback) {
+                log_callback(L"HLS PTS reclock pipe streaming completed");
+            }
+            
+            // Wait a bit for player to finish processing
+            WaitForSingleObject(pi.hProcess, 2000);
+            
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            
+        } catch (const std::exception& e) {
+            if (log_callback) {
+                std::wstring error_msg(e.what(), e.what() + strlen(e.what()));
+                log_callback(L"Error in HLS PTS reclock pipe streaming: " + error_msg);
+            }
+        }
+        
+        AddDebugLog(L"StartHLSReclockPipeThread: Completed for " + channel_name);
+    });
+}
 
 // Helper function to process HLS streams with PTS discontinuity correction
 static std::wstring ProcessHLSWithPTSCorrection(
@@ -90,8 +379,42 @@ std::thread StartStreamThread(
     StreamingMode mode,
     HANDLE* player_process_handle
 ) {
-    // Apply HLS PTS discontinuity correction if needed
+    // Check if we should apply HLS PTS correction and prefer pipe streaming
+    using namespace tardsplaya_hls_reclock;
+    std::string narrow_url(playlist_url.begin(), playlist_url.end());
+    
+    if (integration_utils::ShouldApplyPTSCorrection(narrow_url)) {
+        // Create reclock processor to check if tool is available
+        auto config = integration_utils::CreateConfigForStreamType("live");
+        config.verbose_logging = g_verboseDebug;
+        TardsplayaHLSReclock reclocker(config);
+        
+        if (reclocker.IsReclockToolAvailable()) {
+            if (log_callback) {
+                log_callback(L"Using HLS PTS correction with direct pipe streaming for " + channel_name);
+            }
+            
+            // Use direct pipe streaming approach
+            return StartHLSReclockPipeThread(player_path, playlist_url, cancel_token, log_callback,
+                                           channel_name, main_window, tab_index, player_process_handle);
+        } else {
+            if (log_callback) {
+                log_callback(L"HLS PTS reclock tool not available, using standard streaming");
+            }
+        }
+    }
+    
+    // Fallback: Apply HLS PTS discontinuity correction if needed (file-based approach)
     std::wstring processed_url = ProcessHLSWithPTSCorrection(playlist_url, channel_name, log_callback);
+    
+    // Check if we have a corrected local file instead of an HLS URL
+    if (IsLocalFile(processed_url)) {
+        if (log_callback) {
+            log_callback(L"Using corrected stream file for direct playback");
+        }
+        return StartLocalFileStreamThread(player_path, processed_url, cancel_token, log_callback,
+                                         channel_name, main_window, tab_index, player_process_handle);
+    }
     
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
@@ -113,8 +436,17 @@ std::thread StartStreamThread(
                                          base_buffer_packets, channel_name, chunk_count, main_window, tab_index, player_process_handle);
     }
     
-    // Use traditional HLS streaming
+    // Use traditional HLS streaming (but check if it's a local file first)
     return std::thread([=, &cancel_token]() mutable {
+        // If processed_url is a local file, we should have handled it above
+        // This path is for original HLS URLs only
+        if (IsLocalFile(processed_url)) {
+            if (log_callback) {
+                log_callback(L"Error: Local file reached traditional HLS path - this shouldn't happen");
+            }
+            return;
+        }
+        
         if (log_callback)
             log_callback(L"Streaming thread started (HLS fallback mode).");
         

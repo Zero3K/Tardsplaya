@@ -4,6 +4,7 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include <signal.h>
 
 #ifdef _WIN32
@@ -158,10 +159,23 @@ private:
     }
     
     bool CreateMockMpegTSOutput() {
-        std::ofstream output(args_.output_url, std::ios::binary);
-        if (!output.is_open()) {
-            std::cerr << "Failed to create output file: " << args_.output_url << "\n";
-            return false;
+        std::ostream* output_stream = nullptr;
+        std::ofstream file_output;
+        
+        if (args_.use_stdout || args_.output_url == "-") {
+            output_stream = &std::cout;
+            // Disable buffering for real-time streaming
+            std::cout.sync_with_stdio(false);
+            if (args_.verbose) {
+                std::cerr << "Streaming MPEG-TS to stdout...\n";
+            }
+        } else {
+            file_output.open(args_.output_url, std::ios::binary);
+            if (!file_output.is_open()) {
+                std::cerr << "Failed to create output file: " << args_.output_url << "\n";
+                return false;
+            }
+            output_stream = &file_output;
         }
         
         // Write a simple MPEG-TS header (mock)
@@ -171,23 +185,48 @@ private:
             // ... more mock MPEG-TS data would go here
         };
         
-        output.write(ts_header, sizeof(ts_header));
+        output_stream->write(ts_header, sizeof(ts_header));
         
         // Add some padding to make it look like real data
-        for (int i = 0; i < 1000; i++) {
-            output.write(ts_header, sizeof(ts_header));
+        // For stdout streaming, simulate continuous output
+        int packets_to_write = args_.use_stdout ? 10000 : 1000;
+        
+        for (int i = 0; i < packets_to_write && g_running; i++) {
+            output_stream->write(ts_header, sizeof(ts_header));
+            
+            // For stdout streaming, add small delay to simulate real-time
+            if (args_.use_stdout) {
+                output_stream->flush();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
         }
         
-        output.close();
-        std::cout << "Created MPEG-TS output: " << args_.output_url << "\n";
+        if (!args_.use_stdout && !args_.output_url.empty() && args_.output_url != "-") {
+            file_output.close();
+            std::cout << "Created MPEG-TS output: " << args_.output_url << "\n";
+        }
+        
         return true;
     }
     
     bool CreateMockFLVOutput() {
-        std::ofstream output(args_.output_url, std::ios::binary);
-        if (!output.is_open()) {
-            std::cerr << "Failed to create output file: " << args_.output_url << "\n";
-            return false;
+        std::ostream* output_stream = nullptr;
+        std::ofstream file_output;
+        
+        if (args_.use_stdout || args_.output_url == "-") {
+            output_stream = &std::cout;
+            // Disable buffering for real-time streaming
+            std::cout.sync_with_stdio(false);
+            if (args_.verbose) {
+                std::cerr << "Streaming FLV to stdout...\n";
+            }
+        } else {
+            file_output.open(args_.output_url, std::ios::binary);
+            if (!file_output.is_open()) {
+                std::cerr << "Failed to create output file: " << args_.output_url << "\n";
+                return false;
+            }
+            output_stream = &file_output;
         }
         
         // Write FLV header (mock)
@@ -198,9 +237,29 @@ private:
             0x00, 0x00, 0x00, 0x09   // DataOffset
         };
         
-        output.write(flv_header, sizeof(flv_header));
-        output.close();
-        std::cout << "Created FLV output: " << args_.output_url << "\n";
+        output_stream->write(flv_header, sizeof(flv_header));
+        
+        // For stdout streaming, simulate continuous output
+        if (args_.use_stdout) {
+            // Add some mock FLV data packets
+            const char mock_tag[] = {
+                0x08, 0x00, 0x00, 0x00,  // Audio tag
+                0x00, 0x00, 0x00, 0x00,  // Timestamp
+                0x00, 0x00, 0x00         // StreamID
+            };
+            
+            for (int i = 0; i < 1000 && g_running; i++) {
+                output_stream->write(mock_tag, sizeof(mock_tag));
+                output_stream->flush();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        
+        if (!args_.use_stdout && !args_.output_url.empty() && args_.output_url != "-") {
+            file_output.close();
+            std::cout << "Created FLV output: " << args_.output_url << "\n";
+        }
+        
         return true;
     }
 };

@@ -8,6 +8,10 @@
 #include <functional>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace tardsplaya_hls_reclock {
 
     // Configuration for HLS PTS correction in Tardsplaya
@@ -48,6 +52,12 @@ namespace tardsplaya_hls_reclock {
         ProcessingResult ProcessHLSStream(const std::string& hls_url, 
                                         const std::string& output_format = "mpegts",
                                         ProgressCallback progress_cb = nullptr);
+
+        // Process HLS stream and pipe directly to a process (streaming approach)
+        bool ProcessHLSStreamToPipe(const std::string& hls_url,
+                                   HANDLE write_pipe,
+                                   const std::string& output_format = "mpegts", 
+                                   ProgressCallback progress_cb = nullptr);
 
         // Check if the reclock tool is available
         bool IsReclockToolAvailable() const;

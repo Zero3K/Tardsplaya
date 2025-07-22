@@ -118,6 +118,7 @@ namespace hls_pts_reclock {
             std::string output_format = "mpegts"; // or "flv" for RTMP
             bool verbose = false;
             bool debug = false;
+            bool use_stdout = false; // Output to stdout instead of file
             ReclockConfig reclock_config;
         };
         

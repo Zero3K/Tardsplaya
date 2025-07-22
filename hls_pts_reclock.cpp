@@ -200,6 +200,9 @@ namespace hls_pts_reclock {
                 args.output_url = argv[++i];
             } else if (arg == "-f" && i + 1 < argc) {
                 args.output_format = argv[++i];
+            } else if (arg == "--stdout") {
+                args.use_stdout = true;
+                args.output_url = "-"; // Use dash to indicate stdout
             } else if (arg == "--force-monotonicity") {
                 args.reclock_config.force_monotonicity = true;
             } else if (arg == "--no-monotonicity") {
@@ -219,9 +222,14 @@ namespace hls_pts_reclock {
                 return false;
             } else if (args.input_url.empty()) {
                 args.input_url = arg;
-            } else if (args.output_url.empty()) {
+            } else if (args.output_url.empty() && !args.use_stdout) {
                 args.output_url = arg;
             }
+        }
+        
+        // Allow only input URL if using stdout
+        if (args.use_stdout) {
+            return !args.input_url.empty();
         }
         
         return !args.input_url.empty() && !args.output_url.empty();
@@ -229,11 +237,12 @@ namespace hls_pts_reclock {
 
     void CommandLineInterface::PrintUsage(const char* program_name) {
         std::cout << "HLS PTS Discontinuity Reclock Tool\n";
-        std::cout << "Usage: " << program_name << " [options] input_url output_url\n\n";
+        std::cout << "Usage: " << program_name << " [options] input_url [output_url]\n\n";
         std::cout << "Options:\n";
         std::cout << "  -i URL              Input HLS URL\n";
         std::cout << "  -o URL              Output URL (file or stream)\n";
         std::cout << "  -f FORMAT           Output format (mpegts, flv) [default: mpegts]\n";
+        std::cout << "  --stdout            Output to stdout for direct piping\n";
         std::cout << "  --force-monotonicity Enable PTS discontinuity correction [default]\n";
         std::cout << "  --no-monotonicity   Disable PTS discontinuity correction\n";
         std::cout << "  --threshold USEC    Discontinuity threshold in microseconds [default: 1000000]\n";
@@ -245,6 +254,7 @@ namespace hls_pts_reclock {
         std::cout << "Examples:\n";
         std::cout << "  " << program_name << " http://example.com/playlist.m3u8 output.ts\n";
         std::cout << "  " << program_name << " -f flv http://example.com/playlist.m3u8 rtmp://server/stream\n";
+        std::cout << "  " << program_name << " --stdout http://example.com/playlist.m3u8 | player -\n";
     }
 
     void CommandLineInterface::PrintVersion() {
