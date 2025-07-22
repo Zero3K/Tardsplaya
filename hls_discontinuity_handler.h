@@ -25,6 +25,9 @@ namespace hls_discontinuity {
         bool has_scte35_in = false;   // Ad end marker
         uint64_t sequence_number = 0;
         
+        // Ad break timing information
+        std::chrono::milliseconds ad_break_duration{0};  // Duration from SCTE-35 OUT marker
+        
         // Timing information for continuity correction
         std::chrono::steady_clock::time_point expected_start_time;
         std::chrono::steady_clock::time_point actual_start_time;
@@ -152,6 +155,12 @@ namespace hls_discontinuity {
         std::chrono::milliseconds total_gap_time_bridged_{0};
         std::chrono::steady_clock::time_point last_segment_end_time_;
         
+        // Ad break state tracking
+        bool in_ad_break_ = false;
+        std::chrono::steady_clock::time_point ad_break_start_time_;
+        std::chrono::milliseconds ad_break_expected_duration_{0};
+        std::queue<std::vector<TSPacketInfo>> buffered_post_ad_segments_;
+        
         // Output smoothing buffer
         std::queue<TSPacketInfo> output_buffer_;
         mutable std::mutex buffer_mutex_;
@@ -165,6 +174,13 @@ namespace hls_discontinuity {
         void SmoothTimestamps(std::vector<TSPacketInfo>& packets, const SegmentInfo& segment_info);
         void ProcessDiscontinuityMarkers(const SegmentInfo& segment_info);
         std::vector<TSPacketInfo> ExtractTSPackets(const std::vector<uint8_t>& segment_data);
+        
+        // Ad break handling methods
+        void StartAdBreak(const SegmentInfo& segment_info);
+        void EndAdBreak();
+        bool ShouldBufferSegment(const SegmentInfo& segment_info);
+        std::vector<TSPacketInfo> ReleaseBufferedSegments();
+        std::chrono::milliseconds ParseAdBreakDuration(const std::string& scte35_line);
         void BufferPacketsForSmoothOutput(const std::vector<TSPacketInfo>& packets);
         std::vector<TSPacketInfo> GetBufferedPacketsForOutput(size_t max_packets = 100);
     };

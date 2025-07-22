@@ -182,6 +182,10 @@ bool HLSDiscontinuityHandler::ProcessHLSPlaylist(const std::string& playlist_con
             }
             else if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 current_segment.has_scte35_out = true;
+                
+                // Parse ad break duration from SCTE-35 OUT marker
+                current_segment.ad_break_duration = ParseAdBreakDuration(line);
+                
                 if (config_.enable_ad_detection) {
                     std::lock_guard<std::mutex> lock(stats_mutex_);
                     ad_breaks_detected_++;
@@ -238,6 +242,11 @@ std::vector<TSPacketInfo> HLSDiscontinuityHandler::ProcessHLSSegment(const std::
         return result;
     }
     
+    // Handle SCTE-35 ad break markers
+    if (segment_info.has_scte35_out && config_.enable_ad_detection) {
+        StartAdBreak(segment_info);
+    }
+    
     // Handle discontinuity markers
     if (segment_info.has_discontinuity) {
         ProcessDiscontinuityMarkers(segment_info);
@@ -256,6 +265,35 @@ std::vector<TSPacketInfo> HLSDiscontinuityHandler::ProcessHLSSegment(const std::
     // Apply timestamp smoothing if enabled
     if (config_.enable_timestamp_smoothing) {
         SmoothTimestamps(result, segment_info);
+    }
+    
+    // Handle ad break logic
+    if (config_.enable_ad_detection) {
+        // If this segment ends an ad break
+        if (segment_info.has_scte35_in && in_ad_break_) {
+            EndAdBreak();
+            
+            // Release any buffered segments
+            auto buffered_packets = ReleaseBufferedSegments();
+            result.insert(result.end(), buffered_packets.begin(), buffered_packets.end());
+        }
+        // If we should buffer this segment (we're in an ad break and content resumed too early)
+        else if (ShouldBufferSegment(segment_info)) {
+            // Buffer this segment instead of returning it immediately
+            buffered_post_ad_segments_.push(result);
+            result.clear(); // Don't return packets yet
+        }
+        // Check if ad break duration has elapsed
+        else if (in_ad_break_) {
+            auto elapsed = std::chrono::steady_clock::now() - ad_break_start_time_;
+            if (elapsed >= ad_break_expected_duration_) {
+                EndAdBreak();
+                
+                // Release buffered segments along with current segment
+                auto buffered_packets = ReleaseBufferedSegments();
+                result.insert(result.end(), buffered_packets.begin(), buffered_packets.end());
+            }
+        }
     }
     
     segments_processed_++;
@@ -303,6 +341,13 @@ void HLSDiscontinuityHandler::Reset() {
     segment_durations_.clear();
     last_segment_end_time_ = std::chrono::steady_clock::now();
     
+    // Reset ad break state
+    in_ad_break_ = false;
+    ad_break_expected_duration_ = std::chrono::milliseconds(0);
+    while (!buffered_post_ad_segments_.empty()) {
+        buffered_post_ad_segments_.pop();
+    }
+    
     // Clear output buffer
     std::lock_guard<std::mutex> buffer_lock(buffer_mutex_);
     while (!output_buffer_.empty()) {
@@ -339,6 +384,86 @@ void HLSDiscontinuityHandler::ProcessDiscontinuityMarkers(const SegmentInfo& seg
 
 std::vector<TSPacketInfo> HLSDiscontinuityHandler::ExtractTSPackets(const std::vector<uint8_t>& segment_data) {
     return utils::ExtractTSPacketsFromData(segment_data.data(), segment_data.size());
+}
+
+void HLSDiscontinuityHandler::StartAdBreak(const SegmentInfo& segment_info) {
+    in_ad_break_ = true;
+    ad_break_start_time_ = std::chrono::steady_clock::now();
+    ad_break_expected_duration_ = segment_info.ad_break_duration;
+    
+    // Clear any existing buffered segments
+    while (!buffered_post_ad_segments_.empty()) {
+        buffered_post_ad_segments_.pop();
+    }
+}
+
+void HLSDiscontinuityHandler::EndAdBreak() {
+    in_ad_break_ = false;
+    ad_break_expected_duration_ = std::chrono::milliseconds(0);
+}
+
+bool HLSDiscontinuityHandler::ShouldBufferSegment(const SegmentInfo& segment_info) {
+    if (!config_.enable_ad_detection) return false;
+    
+    // If we're in an ad break and this segment has SCTE-35 IN, it's the end of the ad
+    if (in_ad_break_ && segment_info.has_scte35_in) {
+        return false; // Don't buffer the segment that ends the ad break
+    }
+    
+    // If we're in an ad break and the expected duration has elapsed
+    if (in_ad_break_) {
+        auto elapsed = std::chrono::steady_clock::now() - ad_break_start_time_;
+        if (elapsed >= ad_break_expected_duration_) {
+            return false; // Ad break duration has elapsed, don't buffer
+        }
+        return true; // Still in ad break, buffer this segment
+    }
+    
+    return false;
+}
+
+std::vector<TSPacketInfo> HLSDiscontinuityHandler::ReleaseBufferedSegments() {
+    std::vector<TSPacketInfo> result;
+    
+    while (!buffered_post_ad_segments_.empty()) {
+        auto& segment_packets = buffered_post_ad_segments_.front();
+        result.insert(result.end(), segment_packets.begin(), segment_packets.end());
+        buffered_post_ad_segments_.pop();
+    }
+    
+    return result;
+}
+
+std::chrono::milliseconds HLSDiscontinuityHandler::ParseAdBreakDuration(const std::string& scte35_line) {
+    // Try to extract duration from SCTE-35 OUT marker
+    // Format examples:
+    // #EXT-X-SCTE35-OUT:DURATION=30.0
+    // #EXT-X-SCTE35-OUT:30.0
+    std::regex duration_regex(R"(DURATION=([0-9]+\.?[0-9]*))");
+    std::smatch match;
+    
+    if (std::regex_search(scte35_line, match, duration_regex)) {
+        try {
+            double duration_seconds = std::stod(match[1].str());
+            return std::chrono::milliseconds(static_cast<int64_t>(duration_seconds * 1000));
+        } catch (const std::exception&) {
+            // Fall through to default
+        }
+    }
+    
+    // Alternative format - just a number after the colon
+    std::regex simple_duration_regex(R"(#EXT-X-SCTE35-OUT:([0-9]+\.?[0-9]*))");
+    if (std::regex_search(scte35_line, match, simple_duration_regex)) {
+        try {
+            double duration_seconds = std::stod(match[1].str());
+            return std::chrono::milliseconds(static_cast<int64_t>(duration_seconds * 1000));
+        } catch (const std::exception&) {
+            // Fall through to default
+        }
+    }
+    
+    // Default ad break duration if we can't parse it
+    return std::chrono::milliseconds(30000); // 30 seconds
 }
 
 // Utility functions implementation

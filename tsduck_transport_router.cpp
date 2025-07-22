@@ -242,7 +242,7 @@ bool TSBuffer::AddPacket(const TSPacket& packet) {
     // In low-latency mode, more aggressively drop old packets
     if (low_latency_mode_ && packet_queue_.size() >= max_packets_ / 2) {
         // Drop multiple old packets to make room for new ones
-        size_t packets_to_drop = std::min(packet_queue_.size() / 4, size_t(10));
+        size_t packets_to_drop = (packet_queue_.size() / 4 < size_t(10)) ? packet_queue_.size() / 4 : size_t(10);
         for (size_t i = 0; i < packets_to_drop && !packet_queue_.empty(); ++i) {
             packet_queue_.pop();
         }
@@ -565,7 +565,7 @@ std::vector<TSPacket> HLSToTSConverter::WrapDataInTS(const uint8_t* data, size_t
         // Calculate payload size
         size_t payload_offset = 4;
         size_t max_payload = TS_PACKET_SIZE - payload_offset;
-        size_t payload_size = std::min(remaining, max_payload);
+        size_t payload_size = (remaining < max_payload) ? remaining : max_payload;
         
         // Copy payload data
         memcpy(&packet.data[payload_offset], current_data, payload_size);
