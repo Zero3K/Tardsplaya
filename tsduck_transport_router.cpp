@@ -829,27 +829,47 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 break;
             }
             
-            // Parse playlist with enhanced discontinuity detection
+            // Parse playlist with enhanced discontinuity detection and ad skipping
             tsduck_hls::PlaylistParser playlist_parser;
             std::vector<std::wstring> segment_urls;
             bool has_discontinuities = false;
+            bool ads_detected = false;
             
             if (playlist_parser.ParsePlaylist(playlist_content)) {
-                // Extract segment URLs from parsed playlist
-                auto segments = playlist_parser.GetSegments();
-                for (const auto& segment : segments) {
-                    segment_urls.push_back(segment.url);
+                // Perform ad detection first
+                ads_detected = playlist_parser.DetectAds();
+                
+                if (ads_detected) {
+                    // Get only content segments (skip ads)
+                    auto content_segments = playlist_parser.GetContentSegments();
+                    for (const auto& segment : content_segments) {
+                        segment_urls.push_back(segment.url);
+                    }
+                    
+                    auto stats = playlist_parser.GetAdDetectionStats();
+                    if (log_callback_) {
+                        log_callback_(L"[AD_SKIP] Ads detected! Total: " + std::to_wstring(stats.total_segments) + 
+                                     L", Content: " + std::to_wstring(stats.content_segments) + 
+                                     L", Ads: " + std::to_wstring(stats.ad_segments) + L" (skipped)");
+                    }
+                } else {
+                    // No ads detected, use all segments
+                    auto segments = playlist_parser.GetSegments();
+                    for (const auto& segment : segments) {
+                        segment_urls.push_back(segment.url);
+                    }
                 }
                 
                 // Check for discontinuities that indicate ad transitions
                 has_discontinuities = playlist_parser.HasDiscontinuities();
                 
-                if (has_discontinuities) {
+                if (has_discontinuities && !ads_detected) {
+                    // Discontinuities without ad pattern - still do fast restart
                     if (log_callback_) {
-                        log_callback_(L"[DISCONTINUITY] Detected ad transition - implementing fast restart");
+                        log_callback_(L"[DISCONTINUITY] Detected content transition - implementing fast restart");
                     }
                     
-                    // Clear buffer immediately for fast restart after ad break
+                    // Clear buffer immediately for fast restart after content break
                     ts_buffer_->Clear();
                     
                     // Reset frame numbering to prevent frame drop false positives
@@ -859,7 +879,7 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     ResetFrameStatistics();
                     
                     if (log_callback_) {
-                        log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
+                        log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for content transition");
                     }
                     
                     // For fast restart, only process the newest segments

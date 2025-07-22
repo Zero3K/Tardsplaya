@@ -14,11 +14,14 @@ PlaylistParser::PlaylistParser() {
 bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
     segments_.clear();
     has_discontinuities_ = false;
+    ads_detected_ = false;
+    content_stream_group_ = -1;
     
     std::istringstream stream(m3u8_content);
     std::string line;
     MediaSegment current_segment;
     bool expecting_segment_url = false;
+    bool next_segment_follows_discontinuity = false;
     
     while (std::getline(stream, line)) {
         // Remove trailing whitespace
@@ -54,6 +57,7 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
             else if (line.find("#EXT-X-DISCONTINUITY") == 0) {
                 current_segment.has_discontinuity = true;
                 has_discontinuities_ = true;
+                next_segment_follows_discontinuity = true;
             }
             else if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 current_segment.has_scte35_out = true;
@@ -69,17 +73,24 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
             // This is a segment URL
             current_segment.url = std::wstring(line.begin(), line.end());
             current_segment.sequence_number = media_sequence_ + segments_.size();
+            current_segment.follows_discontinuity = next_segment_follows_discontinuity;
             
             segments_.push_back(current_segment);
             
             // Reset for next segment
             current_segment = MediaSegment();
             expecting_segment_url = false;
+            next_segment_follows_discontinuity = false;
         }
     }
     
     // Post-processing: calculate precise timing
     CalculatePreciseTiming();
+    
+    // Perform ad detection if discontinuities were found
+    if (has_discontinuities_) {
+        PerformAdDetection();
+    }
     
     return !segments_.empty();
 }
@@ -226,6 +237,109 @@ std::chrono::milliseconds BufferingOptimizer::CalculatePreloadTime(const std::ve
 bool BufferingOptimizer::ShouldFlushBuffer(const MediaSegment& current, const MediaSegment& next) {
     // TSDuck-style discontinuity analysis
     return next.has_discontinuity;
+}
+
+// Ad detection implementation (inspired by m3u8adskipper algorithm)
+void PlaylistParser::PerformAdDetection() {
+    if (!has_discontinuities_ || segments_.empty()) {
+        return; // No ads to detect
+    }
+    
+    // Step 1: Classify segments by discontinuity patterns
+    ClassifySegmentsByDiscontinuity();
+    
+    // Step 2: Determine which group contains content (larger group wins)
+    content_stream_group_ = DetermineContentGroup();
+    
+    // Step 3: Mark segments as ads or content
+    for (auto& segment : segments_) {
+        segment.is_ad_segment = (segment.stream_group != content_stream_group_);
+    }
+    
+    ads_detected_ = (content_stream_group_ != -1);
+}
+
+void PlaylistParser::ClassifySegmentsByDiscontinuity() {
+    if (segments_.empty()) return;
+    
+    // Following m3u8adskipper logic: separate segments into two groups based on discontinuities
+    int current_stream = 0;  // Start with stream 0
+    
+    for (auto& segment : segments_) {
+        // If this segment follows a discontinuity, switch streams BEFORE assigning
+        if (segment.follows_discontinuity) {
+            current_stream = (current_stream == 0) ? 1 : 0;
+        }
+        
+        // Assign current stream group to this segment
+        segment.stream_group = current_stream;
+    }
+}
+
+int PlaylistParser::DetermineContentGroup() const {
+    if (segments_.empty()) return -1;
+    
+    // Count segments in each group
+    int group0_count = 0;
+    int group1_count = 0;
+    
+    for (const auto& segment : segments_) {
+        if (segment.stream_group == 0) {
+            group0_count++;
+        } else if (segment.stream_group == 1) {
+            group1_count++;
+        }
+    }
+    
+    // Following m3u8adskipper logic: the larger group is assumed to be content
+    // (ads are typically shorter than the actual content)
+    if (group0_count > group1_count) {
+        return 0;
+    } else if (group1_count > group0_count) {
+        return 1;
+    }
+    
+    // If equal, default to group 0 (no clear ad pattern)
+    return 0;
+}
+
+bool PlaylistParser::DetectAds() {
+    PerformAdDetection();
+    return ads_detected_;
+}
+
+std::vector<MediaSegment> PlaylistParser::GetContentSegments() const {
+    std::vector<MediaSegment> content_segments;
+    
+    for (const auto& segment : segments_) {
+        if (!segment.is_ad_segment) {
+            content_segments.push_back(segment);
+        }
+    }
+    
+    return content_segments;
+}
+
+PlaylistParser::AdDetectionStats PlaylistParser::GetAdDetectionStats() const {
+    AdDetectionStats stats;
+    stats.total_segments = static_cast<int>(segments_.size());
+    stats.discontinuity_count = 0;
+    stats.content_segments = 0;
+    stats.ad_segments = 0;
+    stats.ads_detected = ads_detected_;
+    
+    for (const auto& segment : segments_) {
+        if (segment.has_discontinuity) {
+            stats.discontinuity_count++;
+        }
+        if (segment.is_ad_segment) {
+            stats.ad_segments++;
+        } else {
+            stats.content_segments++;
+        }
+    }
+    
+    return stats;
 }
 
 } // namespace tsduck_hls
