@@ -873,10 +873,14 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         segment_urls.push_back(segment.url);
                     }
                     
-                    // Check if we're transitioning from no ads to ads, or continuing with ads
-                    bool transitioning_to_content = last_playlist_had_ads_.load() && stats.ad_segments > 0;
-                    if (transitioning_to_content) {
-                        // We skipped ads in this playlist and are now processing content
+                    // Check if we're transitioning from previous ad skipping to content processing
+                    // Only trigger sync reset if we previously had ads and now we have content to process
+                    bool had_ads_before = last_playlist_had_ads_.load();
+                    bool has_content_now = !content_segments.empty();
+                    bool skipped_ads_this_time = stats.ad_segments > 0;
+                    
+                    if (had_ads_before && has_content_now && skipped_ads_this_time) {
+                        // We're processing content after skipping ads - enable sync monitoring
                         EnablePostAdSkipSync();
                     }
                     
@@ -1052,13 +1056,16 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                         if (expecting_post_ad_sync_.load()) {
                             post_ad_packets_processed_++;
                             
-                            // Check for video freeze condition
-                            CheckVideoFreeze();
+                            // Check for video freeze condition (only if we have video packets to monitor)
+                            if (packet.is_video_packet || packet.is_audio_packet) {
+                                CheckVideoFreeze();
+                            }
                             
-                            // Reset sync after processing a few packets
+                            // Reset sync after processing enough packets, preferring to wait for video packets
                             if (ShouldResetAfterAdSkip()) {
                                 if (log_callback_) {
-                                    log_callback_(L"[" + stream_id_ + L":SYNC] Resetting synchronization after ad sequence");
+                                    log_callback_(L"[" + stream_id_ + L":SYNC] Resetting synchronization after ad sequence (" + 
+                                                 std::to_wstring(post_ad_packets_processed_.load()) + L" packets processed)");
                                 }
                                 ts_buffer_->Clear();
                                 ResetFrameStatistics();
@@ -1610,11 +1617,23 @@ void TransportStreamRouter::CheckVideoFreeze() {
         ResetFrameStatistics();
         expecting_post_ad_sync_ = false;
     }
+    
+    // Timeout post-ad sync after 30 seconds to prevent it from staying enabled indefinitely
+    if (expecting_post_ad_sync_.load()) {
+        auto time_since_ad_skip = std::chrono::duration_cast<std::chrono::seconds>(now - last_ad_skip_time_);
+        if (time_since_ad_skip.count() > 30) {
+            if (log_callback_) {
+                log_callback_(L"[" + stream_id_ + L":SYNC] Post-ad sync timeout - disabling");
+            }
+            expecting_post_ad_sync_ = false;
+        }
+    }
 }
 
 bool TransportStreamRouter::ShouldResetAfterAdSkip() const {
-    // Reset sync after processing a few packets following an ad skip
-    return expecting_post_ad_sync_.load() && post_ad_packets_processed_.load() >= 5;
+    // Reset sync after processing several packets following an ad skip
+    // Use a higher threshold to ensure we have enough content to stabilize
+    return expecting_post_ad_sync_.load() && post_ad_packets_processed_.load() >= 10;
 }
 
 bool TransportStreamRouter::IsVideoStreamHealthy() const {
