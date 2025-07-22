@@ -74,22 +74,22 @@ bool ContinuityCounterManager::ProcessPacket(TSPacketInfo& packet) {
         // Handle packets after discontinuity differently
         auto disc_it = pid_seen_after_discontinuity_.find(packet.pid);
         if (disc_it != pid_seen_after_discontinuity_.end() && !disc_it->second) {
-            // First packet for this PID after discontinuity - maintain continuous sequence
-            // Instead of resetting to match the incoming stream, correct it to continue the sequence
-            if (packet.original_continuity_counter != expected_counter) {
-                packet.SetContinuityCounter(expected_counter);
-                stats_.continuity_corrections_made++;
-            }
+            // First packet for this PID after discontinuity - accept the new continuity value
+            // Discontinuities are meant to allow stream parameter changes, including new continuity sequences
+            // Don't force corrections across discontinuity boundaries
+            pid_continuity_counters_[packet.pid] = packet.original_continuity_counter;
             pid_seen_after_discontinuity_[packet.pid] = true;
-            pid_continuity_counters_[packet.pid] = expected_counter;
         } else {
-            // Normal packet processing - check for continuity breaks
+            // Normal packet processing within a continuous segment - check for continuity breaks
             if (packet.original_continuity_counter != expected_counter) {
-                // Discontinuity in continuity counter - correct it
+                // Genuine discontinuity in continuity counter within a segment - correct it
                 packet.SetContinuityCounter(expected_counter);
                 stats_.continuity_corrections_made++;
+                pid_continuity_counters_[packet.pid] = expected_counter;
+            } else {
+                // Continuity is correct, update tracking
+                pid_continuity_counters_[packet.pid] = packet.continuity_counter;
             }
-            pid_continuity_counters_[packet.pid] = packet.continuity_counter;
         }
     } else {
         // First packet ever for this PID - initialize tracking
@@ -109,10 +109,14 @@ void ContinuityCounterManager::HandleDiscontinuity() {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     stats_.discontinuities_handled++;
     
-    // Mark all PIDs as not seen after discontinuity
-    for (auto& pair : pid_continuity_counters_) {
-        pid_seen_after_discontinuity_[pair.first] = false;
-    }
+    // For discontinuities, clear the continuity tracking entirely
+    // This allows the new stream segment to start with fresh continuity counters
+    // without forcing artificial continuity across the discontinuity boundary
+    pid_continuity_counters_.clear();
+    pid_seen_after_discontinuity_.clear();
+    
+    // This approach respects the MPEG-TS standard where discontinuities
+    // indicate stream parameter changes and allow continuity counter resets
 }
 
 void ContinuityCounterManager::Reset() {
@@ -128,9 +132,27 @@ ContinuityCounterManager::Stats ContinuityCounterManager::GetStats() const {
 }
 
 bool ContinuityCounterManager::ShouldHaveContinuityCounter(uint16_t pid) const {
-    // PIDs that should have continuity counters (exclude NULL packets)
-    // According to ISO/IEC 13818-1, continuity counter applies to all PIDs except NULL packets
-    return pid != 0x1FFF; // Not NULL packet
+    // PIDs that should have continuity counters according to MPEG-TS standard
+    // Exclude NULL packets (0x1FFF) and focus on essential media PIDs
+    
+    if (pid == 0x1FFF) {
+        return false; // NULL packets don't need continuity tracking
+    }
+    
+    // Include common media PIDs:
+    // - Program Association Table (PAT): 0x0000
+    // - Program Map Table (PMT): typically 0x0100 but can vary
+    // - Video PIDs: typically in range 0x0100-0x1FFE
+    // - Audio PIDs: typically in range 0x0100-0x1FFE
+    // - PCR PIDs: need continuity tracking
+    
+    // For better compatibility, include all non-NULL PIDs but exclude
+    // some known system PIDs that don't need continuity tracking
+    if (pid >= 0x0010 && pid <= 0x001F) {
+        return false; // DVB-SI tables that may not need strict continuity
+    }
+    
+    return true; // Track continuity for all other PIDs
 }
 
 uint8_t ContinuityCounterManager::GetNextContinuityCounter(uint16_t pid) {
@@ -144,6 +166,11 @@ uint8_t ContinuityCounterManager::GetNextContinuityCounter(uint16_t pid) {
 // HLSDiscontinuityHandler implementation
 HLSDiscontinuityHandler::HLSDiscontinuityHandler() {
     last_segment_end_time_ = std::chrono::steady_clock::now();
+    
+    // Set optimized defaults for discontinuity handling
+    config_.reset_continuity_on_discontinuity = true;  // Essential for proper discontinuity handling
+    config_.strict_pid_filtering = true;               // Reduce unnecessary corrections
+    config_.enable_ad_detection = false;               // Focus on discontinuity markers first
 }
 
 HLSDiscontinuityHandler::~HLSDiscontinuityHandler() {
@@ -406,10 +433,18 @@ void HLSDiscontinuityHandler::SmoothTimestamps(std::vector<TSPacketInfo>& packet
 
 void HLSDiscontinuityHandler::ProcessDiscontinuityMarkers(const SegmentInfo& segment_info) {
     if (segment_info.has_discontinuity) {
+        if (debug_log_callback_) {
+            debug_log_callback_(L"[DISCONTINUITY] Processing discontinuity marker - resetting continuity tracking");
+        }
+        
         continuity_manager_.HandleDiscontinuity();
         
         std::lock_guard<std::mutex> lock(stats_mutex_);
         discontinuities_smoothed_++;
+        
+        if (debug_log_callback_) {
+            debug_log_callback_(L"[DISCONTINUITY] Continuity tracking reset for seamless stream transition");
+        }
     }
 }
 

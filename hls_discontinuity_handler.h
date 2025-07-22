@@ -102,7 +102,7 @@ namespace hls_discontinuity {
         
         // Configuration for discontinuity handling
         struct Config {
-            bool enable_continuity_correction = true;      // Enable continuity counter correction
+            bool enable_continuity_correction = true;      // Enable continuity counter correction within segments
             bool enable_timestamp_smoothing = true;        // Enable timestamp smoothing across discontinuities
             bool enable_ad_detection = false;              // Enable SCTE-35 ad marker detection (secondary to discontinuity markers)
             bool preserve_stream_timing = false;           // Preserve original timing vs smooth output
@@ -112,6 +112,10 @@ namespace hls_discontinuity {
             // Buffer settings for smooth output
             size_t output_buffer_packets = 1000;           // Number of packets to buffer for smooth output
             std::chrono::milliseconds min_buffer_time{100}; // Minimum buffer time before starting output
+            
+            // Discontinuity-specific settings
+            bool reset_continuity_on_discontinuity = true; // Reset continuity tracking on discontinuity markers (recommended)
+            bool strict_pid_filtering = true;              // Use stricter PID filtering to avoid unnecessary corrections
         };
         
         // Process HLS playlist and convert to continuous stream
