@@ -54,7 +54,7 @@ using namespace hls_pts_reclock;
 static std::atomic<bool> g_running{true};
 
 void SignalHandler(int signal) {
-    std::cout << "\nReceived signal " << signal << ", shutting down gracefully...\n";
+    std::cerr << "\nReceived signal " << signal << ", shutting down gracefully...\n";
     g_running = false;
 }
 
@@ -377,18 +377,21 @@ public:
         : reclocker_(args.reclock_config), args_(args) {}
     
     bool ProcessStream() {
-        std::cout << "Processing HLS stream: " << args_.input_url << "\n";
-        std::cout << "Output: " << args_.output_url << " (format: " << args_.output_format << ")\n";
+        // Use stderr for informational output when stdout is used for stream data
+        std::ostream* info_out = (args_.use_stdout || args_.output_url == "-") ? &std::cerr : &std::cout;
+        
+        *info_out << "Processing HLS stream: " << args_.input_url << "\n";
+        *info_out << "Output: " << args_.output_url << " (format: " << args_.output_format << ")\n";
         
         if (args_.verbose) {
-            std::cout << "Configuration:\n";
-            std::cout << "  Force monotonicity: " << (args_.reclock_config.force_monotonicity ? "yes" : "no") << "\n";
-            std::cout << "  Discontinuity threshold: " << args_.reclock_config.discontinuity_threshold << " μs\n";
-            std::cout << "  Delta threshold: " << args_.reclock_config.delta_threshold << " s\n";
+            *info_out << "Configuration:\n";
+            *info_out << "  Force monotonicity: " << (args_.reclock_config.force_monotonicity ? "yes" : "no") << "\n";
+            *info_out << "  Discontinuity threshold: " << args_.reclock_config.discontinuity_threshold << " μs\n";
+            *info_out << "  Delta threshold: " << args_.reclock_config.delta_threshold << " s\n";
         }
         
         // Download and parse HLS playlist
-        std::cout << "Downloading playlist from: " << args_.input_url << "\n";
+        *info_out << "Downloading playlist from: " << args_.input_url << "\n";
         auto playlist_data = downloader_.DownloadData(args_.input_url);
         if (playlist_data.empty()) {
             std::cerr << "Failed to download HLS playlist from: " << args_.input_url << "\n";
@@ -400,14 +403,14 @@ public:
             return false;
         }
         
-        std::cout << "Downloaded " << playlist_data.size() << " bytes of playlist data\n";
+        *info_out << "Downloaded " << playlist_data.size() << " bytes of playlist data\n";
         
         std::string playlist_content(playlist_data.begin(), playlist_data.end());
         if (args_.verbose) {
-            std::cout << "Playlist content preview:\n";
-            std::cout << playlist_content.substr(0, 500) << "\n";
+            *info_out << "Playlist content preview:\n";
+            *info_out << playlist_content.substr(0, 500) << "\n";
             if (playlist_content.size() > 500) {
-                std::cout << "...\n";
+                *info_out << "...\n";
             }
         }
         
@@ -422,16 +425,16 @@ public:
             return false;
         }
         
-        std::cout << "Found " << playlist.segments.size() << " segments in playlist\n";
+        *info_out << "Found " << playlist.segments.size() << " segments in playlist\n";
         if (args_.verbose) {
-            std::cout << "Target duration: " << playlist.target_duration << "s\n";
-            std::cout << "Media sequence: " << playlist.media_sequence << "\n";
-            std::cout << "Is live: " << (playlist.is_live ? "yes" : "no") << "\n";
+            *info_out << "Target duration: " << playlist.target_duration << "s\n";
+            *info_out << "Media sequence: " << playlist.media_sequence << "\n";
+            *info_out << "Is live: " << (playlist.is_live ? "yes" : "no") << "\n";
             
             // Show first few segment URLs for debugging
-            std::cout << "First few segment URLs:\n";
+            *info_out << "First few segment URLs:\n";
             for (size_t i = 0; i < playlist.segments.size() && i < 3; ++i) {
-                std::cout << "  " << (i + 1) << ": " << playlist.segments[i].url << "\n";
+                *info_out << "  " << (i + 1) << ": " << playlist.segments[i].url << "\n";
             }
         }
         
@@ -751,8 +754,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    std::cout << "HLS PTS Discontinuity Reclock Tool\n";
-    std::cout << "==================================\n\n";
+    // Only output header to stderr when using stdout for stream data
+    std::ostream* info_out = (args.use_stdout || args.output_url == "-") ? &std::cerr : &std::cout;
+    
+    *info_out << "HLS PTS Discontinuity Reclock Tool\n";
+    *info_out << "==================================\n\n";
     
     try {
         HLSProcessor processor(args);
@@ -761,7 +767,12 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        std::cout << "\nStream processing completed successfully.\n";
+        // Only output completion message to stderr when streaming to stdout
+        if (args.use_stdout || args.output_url == "-") {
+            std::cerr << "\nStream processing completed successfully.\n";
+        } else {
+            std::cout << "\nStream processing completed successfully.\n";
+        }
         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
