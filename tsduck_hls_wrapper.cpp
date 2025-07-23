@@ -14,11 +14,16 @@ PlaylistParser::PlaylistParser() {
 bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
     segments_.clear();
     has_discontinuities_ = false;
+    ads_detected_ = false;
+    detection_reliable_ = true;
+    detection_reason_.clear();
+    content_stream_group_ = -1;
     
     std::istringstream stream(m3u8_content);
     std::string line;
     MediaSegment current_segment;
     bool expecting_segment_url = false;
+    bool next_segment_follows_discontinuity = false;
     
     while (std::getline(stream, line)) {
         // Remove trailing whitespace
@@ -54,6 +59,7 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
             else if (line.find("#EXT-X-DISCONTINUITY") == 0) {
                 current_segment.has_discontinuity = true;
                 has_discontinuities_ = true;
+                next_segment_follows_discontinuity = true;
             }
             else if (line.find("#EXT-X-SCTE35-OUT") == 0) {
                 current_segment.has_scte35_out = true;
@@ -69,17 +75,25 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
             // This is a segment URL
             current_segment.url = std::wstring(line.begin(), line.end());
             current_segment.sequence_number = media_sequence_ + segments_.size();
+            current_segment.follows_discontinuity = next_segment_follows_discontinuity;
             
             segments_.push_back(current_segment);
             
             // Reset for next segment
             current_segment = MediaSegment();
             expecting_segment_url = false;
+            next_segment_follows_discontinuity = false;
         }
     }
     
     // Post-processing: calculate precise timing
     CalculatePreciseTiming();
+    
+    // Perform ad detection if discontinuities were found
+    if (has_discontinuities_) {
+        // Use conservative mode for initial implementation to ensure stability
+        PerformAdDetection(true);
+    }
     
     return !segments_.empty();
 }
@@ -226,6 +240,207 @@ std::chrono::milliseconds BufferingOptimizer::CalculatePreloadTime(const std::ve
 bool BufferingOptimizer::ShouldFlushBuffer(const MediaSegment& current, const MediaSegment& next) {
     // TSDuck-style discontinuity analysis
     return next.has_discontinuity;
+}
+
+// Ad detection implementation (inspired by m3u8adskipper algorithm)
+// Enhanced with multi-stream awareness and conservative fallbacks
+void PlaylistParser::PerformAdDetection(bool conservative_mode) {
+    if (!has_discontinuities_ || segments_.empty()) {
+        detection_reason_ = L"No discontinuities found - no ads to detect";
+        return; // No ads to detect
+    }
+    
+    // Step 1: Classify segments by discontinuity patterns
+    ClassifySegmentsByDiscontinuity();
+    
+    // Count segments in each group for detailed logging
+    int group0_count = 0, group1_count = 0;
+    int discontinuity_count = 0;
+    for (const auto& segment : segments_) {
+        if (segment.stream_group == 0) group0_count++;
+        else if (segment.stream_group == 1) group1_count++;
+        if (segment.has_discontinuity) discontinuity_count++;
+    }
+    
+    // Step 2: Determine which group contains content (larger group wins)
+    content_stream_group_ = DetermineContentGroup();
+    
+    // Step 3: Validate detection result before applying
+    bool is_valid = ValidateAdDetectionResult();
+    
+    // Add detailed logging for debugging ad detection failures
+    detection_reason_ = L"Discontinuities: " + std::to_wstring(discontinuity_count) + 
+                       L", Group0: " + std::to_wstring(group0_count) + 
+                       L", Group1: " + std::to_wstring(group1_count) + 
+                       L", Content group: " + std::to_wstring(content_stream_group_) + 
+                       L", Valid: " + (is_valid ? L"yes" : L"no") + 
+                       L", Conservative: " + (conservative_mode ? L"yes" : L"no");
+    
+    if (!is_valid || conservative_mode) {
+        // Only apply ad detection if there's a very clear distinction between groups
+        double ratio = (group0_count > group1_count) ? 
+            (double)group0_count / (group1_count + 1) : 
+            (double)group1_count / (group0_count + 1);
+            
+        if (conservative_mode && ratio < 3.0) {
+            // In conservative mode, require 3:1 ratio for ad detection
+            ads_detected_ = false;
+            detection_reliable_ = false;
+            detection_reason_ += L" - Conservative mode: insufficient confidence (ratio " + 
+                               std::to_wstring(ratio) + L" < 3.0)";
+            
+            // Clear ad markings - treat all segments as content
+            for (auto& segment : segments_) {
+                segment.is_ad_segment = false;
+            }
+            return;
+        } else if (!conservative_mode && ratio < 2.0) {
+            // In normal mode, require 2:1 ratio for ad detection
+            ads_detected_ = false;
+            detection_reliable_ = false;
+            detection_reason_ += L" - Normal mode: insufficient confidence (ratio " + 
+                               std::to_wstring(ratio) + L" < 2.0)";
+            
+            // Clear ad markings - treat all segments as content
+            for (auto& segment : segments_) {
+                segment.is_ad_segment = false;
+            }
+            return;
+        }
+    }
+    
+    // Step 4: Apply ad detection result
+    for (auto& segment : segments_) {
+        segment.is_ad_segment = (segment.stream_group != content_stream_group_);
+    }
+    
+    ads_detected_ = (content_stream_group_ != -1);
+    detection_reason_ += ads_detected_ ? 
+        L" - Ads detected with confidence" : 
+        L" - No clear ad pattern found";
+}
+
+void PlaylistParser::ClassifySegmentsByDiscontinuity() {
+    if (segments_.empty()) return;
+    
+    // Following m3u8adskipper logic: separate segments into two groups based on discontinuities
+    int current_stream = 0;  // Start with stream 0
+    
+    for (auto& segment : segments_) {
+        // If this segment follows a discontinuity, switch streams BEFORE assigning
+        if (segment.follows_discontinuity) {
+            current_stream = (current_stream == 0) ? 1 : 0;
+        }
+        
+        // Assign current stream group to this segment
+        segment.stream_group = current_stream;
+    }
+}
+
+int PlaylistParser::DetermineContentGroup() const {
+    if (segments_.empty()) return -1;
+    
+    // Count segments in each group
+    int group0_count = 0;
+    int group1_count = 0;
+    
+    for (const auto& segment : segments_) {
+        if (segment.stream_group == 0) {
+            group0_count++;
+        } else if (segment.stream_group == 1) {
+            group1_count++;
+        }
+    }
+    
+    // Following m3u8adskipper logic: the larger group is assumed to be content
+    // (ads are typically shorter than the actual content)
+    if (group0_count > group1_count) {
+        return 0;
+    } else if (group1_count > group0_count) {
+        return 1;
+    }
+    
+    // If equal, default to group 0 (no clear ad pattern)
+    return 0;
+}
+
+bool PlaylistParser::ValidateAdDetectionResult() const {
+    if (segments_.empty() || content_stream_group_ == -1) {
+        return false;
+    }
+    
+    // Count segments in each group
+    int group0_count = 0, group1_count = 0;
+    int discontinuity_count = 0;
+    
+    for (const auto& segment : segments_) {
+        if (segment.stream_group == 0) group0_count++;
+        else if (segment.stream_group == 1) group1_count++;
+        if (segment.has_discontinuity) discontinuity_count++;
+    }
+    
+    // Validation checks:
+    
+    // 1. Must have at least 2 segments in each group for valid ad detection
+    if (group0_count < 2 || group1_count < 2) {
+        return false; // Not enough segments in each group
+    }
+    
+    // 2. Must have reasonable number of discontinuities (not too many or too few)
+    if (discontinuity_count < 1 || discontinuity_count > segments_.size() / 2) {
+        return false; // Too many or too few discontinuities
+    }
+    
+    // 3. The content group should be significantly larger than the ad group
+    int content_count = (content_stream_group_ == 0) ? group0_count : group1_count;
+    int ad_count = (content_stream_group_ == 0) ? group1_count : group0_count;
+    
+    if (content_count <= ad_count) {
+        return false; // Content should be larger than ads
+    }
+    
+    return true;
+}
+
+bool PlaylistParser::DetectAds(bool conservative_mode) {
+    PerformAdDetection(conservative_mode);
+    return ads_detected_ && detection_reliable_;
+}
+
+std::vector<MediaSegment> PlaylistParser::GetContentSegments() const {
+    std::vector<MediaSegment> content_segments;
+    
+    for (const auto& segment : segments_) {
+        if (!segment.is_ad_segment) {
+            content_segments.push_back(segment);
+        }
+    }
+    
+    return content_segments;
+}
+
+PlaylistParser::AdDetectionStats PlaylistParser::GetAdDetectionStats() const {
+    AdDetectionStats stats;
+    stats.total_segments = static_cast<int>(segments_.size());
+    stats.discontinuity_count = 0;
+    stats.content_segments = 0;
+    stats.ad_segments = 0;
+    stats.ads_detected = ads_detected_;
+    stats.detection_reliable = detection_reliable_;
+    stats.detection_reason = detection_reason_;
+    
+    for (const auto& segment : segments_) {
+        if (segment.has_discontinuity) {
+            stats.discontinuity_count++;
+        }
+        if (segment.is_ad_segment) {
+            stats.ad_segments++;
+        } else {
+            stats.content_segments++;
+        }
+    }
+    
+    return stats;
 }
 
 } // namespace tsduck_hls

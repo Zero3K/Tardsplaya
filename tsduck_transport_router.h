@@ -226,6 +226,7 @@ namespace tsduck_transport {
         RouterConfig current_config_;
         std::function<void(const std::wstring&)> log_callback_;
         HANDLE player_process_handle_;
+        std::wstring stream_id_; // Unique ID for this stream instance
         
         // Frame Number Tagging statistics
         std::atomic<uint64_t> total_frames_processed_{0};
@@ -244,6 +245,12 @@ namespace tsduck_transport {
         std::chrono::steady_clock::time_point last_video_packet_time_;
         std::chrono::steady_clock::time_point last_audio_packet_time_;
         
+        // Ad sequence tracking for video/audio sync management
+        std::atomic<bool> expecting_post_ad_sync_{false};
+        std::atomic<bool> last_playlist_had_ads_{false};
+        std::chrono::steady_clock::time_point last_ad_skip_time_;
+        std::atomic<uint32_t> post_ad_packets_processed_{0};
+        
         // HLS fetching thread - downloads segments and converts to TS
         void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
         
@@ -252,6 +259,11 @@ namespace tsduck_transport {
         
         // Reset frame statistics (for discontinuities)
         void ResetFrameStatistics();
+        
+        // Post-ad-skip synchronization management
+        void EnablePostAdSkipSync();
+        void CheckVideoFreeze();
+        bool ShouldResetAfterAdSkip() const;
         
         // Video stream health monitoring
         bool IsVideoStreamHealthy() const;
