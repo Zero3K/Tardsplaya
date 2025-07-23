@@ -149,6 +149,9 @@ namespace tsduck_transport {
         
         // Detect and classify stream types (video/audio)
         void DetectStreamTypes(TSPacket& packet);
+        
+        // Generate null packets for discontinuity handling
+        TSPacket GenerateNullPacket();
     };
     
     // Transport Stream Router - main component for re-routing streams to media players
@@ -173,6 +176,10 @@ namespace tsduck_transport {
             size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
             std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
             bool skip_old_segments = true;  // Skip older segments when catching up
+            
+            // Discontinuity handling
+            bool enable_null_packet_insertion = true;  // Insert null packets during discontinuities for smoother playback
+            size_t null_packet_duration_ms = 1000;     // Duration of null packets to insert during discontinuities
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -272,6 +279,12 @@ namespace tsduck_transport {
         
         // Insert PCR (Program Clock Reference) for timing
         void InsertPCR(TSPacket& packet, uint64_t pcr_value);
+        
+        // Generate null packets for discontinuity padding
+        TSPacket GenerateNullPacket();
+        
+        // Insert null packets during discontinuities to maintain stream continuity
+        void InsertNullPacketsPadding(size_t duration_ms = 1000);
     };
     
 

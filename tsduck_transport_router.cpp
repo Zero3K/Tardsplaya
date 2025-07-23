@@ -642,6 +642,30 @@ void HLSToTSConverter::DetectStreamTypes(TSPacket& packet) {
     }
 }
 
+TSPacket HLSToTSConverter::GenerateNullPacket() {
+    TSPacket packet;
+    
+    // MPEG-TS null packet format with PID 0x1FFF
+    packet.data[0] = 0x47; // Sync byte
+    packet.data[1] = 0x1F; // PID high bits (0x1FFF for null packets)
+    packet.data[2] = 0xFF; // PID low bits
+    packet.data[3] = 0x10 | (continuity_counter_ & 0x0F); // No adaptation, payload present, continuity
+    
+    // Fill entire payload with 0xFF (standard null packet padding)
+    for (size_t i = 4; i < TS_PACKET_SIZE; ++i) {
+        packet.data[i] = 0xFF;
+    }
+    
+    packet.pid = 0x1FFF; // Null packet PID
+    packet.payload_unit_start = false;
+    packet.discontinuity = false;
+    packet.timestamp = std::chrono::steady_clock::now();
+    
+    // Don't increment continuity counter for null packets (they have their own sequence)
+    continuity_counter_ = (continuity_counter_ + 1) & 0x0F;
+    
+    return packet;
+
 // TransportStreamRouter implementation
 TransportStreamRouter::TransportStreamRouter() {
     // Initialize member variables
@@ -845,32 +869,66 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                 has_discontinuities = playlist_parser.HasDiscontinuities();
                 
                 if (has_discontinuities) {
-                    if (log_callback_) {
-                        log_callback_(L"[DISCONTINUITY] Detected ad transition - implementing fast restart");
-                    }
-                    
-                    // Clear buffer immediately for fast restart after ad break
-                    ts_buffer_->Clear();
-                    
-                    // Reset frame numbering to prevent frame drop false positives
-                    hls_converter_->Reset();
-                    
-                    // Reset frame statistics to prevent false drop alerts after discontinuity
-                    ResetFrameStatistics();
-                    
-                    if (log_callback_) {
-                        log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
-                    }
-                    
-                    // For fast restart, only process the newest segments
-                    if (segment_urls.size() > 1) {
-                        // Keep only the last segment for immediate restart
-                        std::vector<std::wstring> restart_segments;
-                        restart_segments.push_back(segment_urls.back());
-                        segment_urls = restart_segments;
+                    if (current_config_.enable_null_packet_insertion) {
+                        if (log_callback_) {
+                            log_callback_(L"[DISCONTINUITY] Detected ad transition - inserting null packets for continuity");
+                        }
+                        
+                        // Insert null packets to maintain stream continuity during discontinuity
+                        // instead of just clearing the buffer which can cause player issues
+                        InsertNullPacketsPadding(current_config_.null_packet_duration_ms);
+                        
+                        // Reset frame numbering to prevent frame drop false positives
+                        hls_converter_->Reset();
+                        
+                        // Reset frame statistics to prevent false drop alerts after discontinuity
+                        ResetFrameStatistics();
                         
                         if (log_callback_) {
-                            log_callback_(L"[FAST_RESTART] Using only newest segment for immediate playback");
+                            log_callback_(L"[NULL_CONTINUITY] Null packets inserted and frame tracking reset for smooth transition");
+                        }
+                        
+                        // For smoother transition, still process newer segments but don't clear everything
+                        if (segment_urls.size() > 2) {
+                            // Keep the last 2 segments instead of just 1 for better continuity
+                            std::vector<std::wstring> restart_segments;
+                            restart_segments.push_back(segment_urls[segment_urls.size() - 2]);
+                            restart_segments.push_back(segment_urls.back());
+                            segment_urls = restart_segments;
+                            
+                            if (log_callback_) {
+                                log_callback_(L"[NULL_CONTINUITY] Using last 2 segments for smooth transition");
+                            }
+                        }
+                    } else {
+                        // Fallback to original behavior if null packet insertion is disabled
+                        if (log_callback_) {
+                            log_callback_(L"[DISCONTINUITY] Detected ad transition - implementing fast restart (legacy mode)");
+                        }
+                        
+                        // Clear buffer immediately for fast restart after ad break
+                        ts_buffer_->Clear();
+                        
+                        // Reset frame numbering to prevent frame drop false positives
+                        hls_converter_->Reset();
+                        
+                        // Reset frame statistics to prevent false drop alerts after discontinuity
+                        ResetFrameStatistics();
+                        
+                        if (log_callback_) {
+                            log_callback_(L"[FAST_RESTART] Buffer cleared and frame tracking reset for ad transition");
+                        }
+                        
+                        // For fast restart, only process the newest segments
+                        if (segment_urls.size() > 1) {
+                            // Keep only the last segment for immediate restart
+                            std::vector<std::wstring> restart_segments;
+                            restart_segments.push_back(segment_urls.back());
+                            segment_urls = restart_segments;
+                            
+                            if (log_callback_) {
+                                log_callback_(L"[FAST_RESTART] Using only newest segment for immediate playback");
+                            }
                         }
                     }
                 }
@@ -1527,6 +1585,80 @@ void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
             log_callback_(L"[STREAM_HEALTH] WARNING: Audio stream appears unhealthy");
         }
         last_health_check = now;
+    }
+}
+
+TSPacket TransportStreamRouter::GenerateNullPacket() {
+    TSPacket packet;
+    
+    // MPEG-TS null packet format with PID 0x1FFF
+    packet.data[0] = 0x47; // Sync byte
+    packet.data[1] = 0x1F; // PID high bits (0x1FFF for null packets)
+    packet.data[2] = 0xFF; // PID low bits
+    packet.data[3] = 0x10; // No adaptation, payload present, continuity counter 0 for null packets
+    
+    // Fill entire payload with 0xFF (standard null packet padding)
+    for (size_t i = 4; i < TS_PACKET_SIZE; ++i) {
+        packet.data[i] = 0xFF;
+    }
+    
+    packet.pid = 0x1FFF; // Null packet PID
+    packet.payload_unit_start = false;
+    packet.discontinuity = false;
+    packet.timestamp = std::chrono::steady_clock::now();
+    
+    // Null packets don't need frame tagging
+    packet.frame_number = 0;
+    packet.segment_frame_number = 0;
+    packet.is_key_frame = false;
+    packet.is_video_packet = false;
+    packet.is_audio_packet = false;
+    
+    return packet;
+}
+
+void TransportStreamRouter::InsertNullPacketsPadding(size_t duration_ms) {
+    if (!ts_buffer_ || !routing_active_) {
+        return;
+    }
+    
+    // Calculate number of null packets to insert based on typical TS bitrate
+    // Standard broadcast rate is ~27 Mbps, which is approximately ~180 packets per millisecond
+    // For streaming, we'll use a more conservative rate of ~50 packets per millisecond
+    size_t packets_per_ms = 50;
+    size_t total_null_packets = duration_ms * packets_per_ms;
+    
+    // Limit to reasonable amount to prevent excessive buffering
+    if (total_null_packets > 10000) {
+        total_null_packets = 10000; // Cap at ~1.8MB of null data
+    }
+    
+    if (log_callback_) {
+        log_callback_(L"[NULL_PADDING] Inserting " + std::to_wstring(total_null_packets) + 
+                     L" null packets for " + std::to_wstring(duration_ms) + L"ms discontinuity gap");
+    }
+    
+    // Insert null packets into the buffer
+    for (size_t i = 0; i < total_null_packets && routing_active_; ++i) {
+        TSPacket null_packet = GenerateNullPacket();
+        
+        // Add small delay between null packets to maintain proper timing
+        if (i > 0 && i % 100 == 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(20)); // ~50 packets per ms
+        }
+        
+        // Try to add to buffer, but don't block if buffer is full
+        if (!ts_buffer_->AddPacket(null_packet)) {
+            if (log_callback_) {
+                log_callback_(L"[NULL_PADDING] Buffer full, stopping null packet insertion at " + 
+                             std::to_wstring(i) + L" packets");
+            }
+            break;
+        }
+    }
+    
+    if (log_callback_) {
+        log_callback_(L"[NULL_PADDING] Null packet insertion completed");
     }
 }
 
