@@ -253,20 +253,30 @@ void PlaylistParser::PerformAdDetection(bool conservative_mode) {
     // Step 1: Classify segments by discontinuity patterns
     ClassifySegmentsByDiscontinuity();
     
+    // Count segments in each group for detailed logging
+    int group0_count = 0, group1_count = 0;
+    int discontinuity_count = 0;
+    for (const auto& segment : segments_) {
+        if (segment.stream_group == 0) group0_count++;
+        else if (segment.stream_group == 1) group1_count++;
+        if (segment.has_discontinuity) discontinuity_count++;
+    }
+    
     // Step 2: Determine which group contains content (larger group wins)
     content_stream_group_ = DetermineContentGroup();
     
     // Step 3: Validate detection result before applying
     bool is_valid = ValidateAdDetectionResult();
     
+    // Add detailed logging for debugging ad detection failures
+    detection_reason_ = L"Discontinuities: " + std::to_wstring(discontinuity_count) + 
+                       L", Group0: " + std::to_wstring(group0_count) + 
+                       L", Group1: " + std::to_wstring(group1_count) + 
+                       L", Content group: " + std::to_wstring(content_stream_group_) + 
+                       L", Valid: " + (is_valid ? L"yes" : L"no") + 
+                       L", Conservative: " + (conservative_mode ? L"yes" : L"no");
+    
     if (!is_valid || conservative_mode) {
-        // In conservative mode or if detection is questionable, be more cautious
-        int group0_count = 0, group1_count = 0;
-        for (const auto& segment : segments_) {
-            if (segment.stream_group == 0) group0_count++;
-            else if (segment.stream_group == 1) group1_count++;
-        }
-        
         // Only apply ad detection if there's a very clear distinction between groups
         double ratio = (group0_count > group1_count) ? 
             (double)group0_count / (group1_count + 1) : 
@@ -276,7 +286,7 @@ void PlaylistParser::PerformAdDetection(bool conservative_mode) {
             // In conservative mode, require 3:1 ratio for ad detection
             ads_detected_ = false;
             detection_reliable_ = false;
-            detection_reason_ = L"Conservative mode: insufficient confidence (ratio " + 
+            detection_reason_ += L" - Conservative mode: insufficient confidence (ratio " + 
                                std::to_wstring(ratio) + L" < 3.0)";
             
             // Clear ad markings - treat all segments as content
@@ -288,7 +298,7 @@ void PlaylistParser::PerformAdDetection(bool conservative_mode) {
             // In normal mode, require 2:1 ratio for ad detection
             ads_detected_ = false;
             detection_reliable_ = false;
-            detection_reason_ = L"Normal mode: insufficient confidence (ratio " + 
+            detection_reason_ += L" - Normal mode: insufficient confidence (ratio " + 
                                std::to_wstring(ratio) + L" < 2.0)";
             
             // Clear ad markings - treat all segments as content
@@ -305,9 +315,9 @@ void PlaylistParser::PerformAdDetection(bool conservative_mode) {
     }
     
     ads_detected_ = (content_stream_group_ != -1);
-    detection_reason_ = ads_detected_ ? 
-        L"Ads detected with confidence" : 
-        L"No clear ad pattern found";
+    detection_reason_ += ads_detected_ ? 
+        L" - Ads detected with confidence" : 
+        L" - No clear ad pattern found";
 }
 
 void PlaylistParser::ClassifySegmentsByDiscontinuity() {
@@ -373,12 +383,12 @@ bool PlaylistParser::ValidateAdDetectionResult() const {
     
     // 1. Must have at least 2 segments in each group for valid ad detection
     if (group0_count < 2 || group1_count < 2) {
-        return false;
+        return false; // Not enough segments in each group
     }
     
     // 2. Must have reasonable number of discontinuities (not too many or too few)
     if (discontinuity_count < 1 || discontinuity_count > segments_.size() / 2) {
-        return false;
+        return false; // Too many or too few discontinuities
     }
     
     // 3. The content group should be significantly larger than the ad group

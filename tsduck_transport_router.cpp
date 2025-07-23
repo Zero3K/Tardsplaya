@@ -932,6 +932,12 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                     // Discontinuities without ad pattern - still do fast restart
                     if (log_callback_) {
                         log_callback_(L"[DISCONTINUITY] Detected content transition - implementing fast restart");
+                        
+                        // Show why ad detection didn't trigger
+                        auto stats = playlist_parser.GetAdDetectionStats();
+                        if (!stats.detection_reason.empty()) {
+                            log_callback_(L"[AD_DETECTION] " + stats.detection_reason);
+                        }
                     }
                     
                     // Clear buffer immediately for fast restart after content break
