@@ -665,6 +665,7 @@ TSPacket HLSToTSConverter::GenerateNullPacket() {
     continuity_counter_ = (continuity_counter_ + 1) & 0x0F;
     
     return packet;
+}
 
 // TransportStreamRouter implementation
 TransportStreamRouter::TransportStreamRouter() {
@@ -672,19 +673,19 @@ TransportStreamRouter::TransportStreamRouter() {
     player_process_handle_ = INVALID_HANDLE_VALUE;
     
     // Frame Number Tagging: Initialize frame tracking
-    total_frames_processed_ = 0;
-    frames_dropped_ = 0;
-    frames_duplicated_ = 0;
-    last_frame_number_ = 0;
+    total_frames_processed_.store(0);
+    frames_dropped_.store(0);
+    frames_duplicated_.store(0);
+    last_frame_number_.store(0);
     last_frame_time_ = std::chrono::steady_clock::now();
     stream_start_time_ = std::chrono::steady_clock::now();
     
     // Initialize video/audio stream tracking
-    video_packets_processed_ = 0;
-    audio_packets_processed_ = 0;
-    video_frames_processed_ = 0;
-    last_video_frame_number_ = 0;
-    video_sync_loss_count_ = 0;
+    video_packets_processed_.store(0);
+    audio_packets_processed_.store(0);
+    video_frames_processed_.store(0);
+    last_video_frame_number_.store(0);
+    video_sync_loss_count_.store(0);
     last_video_packet_time_ = std::chrono::steady_clock::now();
     last_audio_packet_time_ = std::chrono::steady_clock::now();
     
