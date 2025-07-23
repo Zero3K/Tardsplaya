@@ -276,30 +276,31 @@ void PlaylistParser::PerformAdDetection(bool conservative_mode) {
                        L", Valid: " + (is_valid ? L"yes" : L"no") + 
                        L", Conservative: " + (conservative_mode ? L"yes" : L"no");
     
-    if (!is_valid || conservative_mode) {
-        // Only apply ad detection if there's a very clear distinction between groups
+    // If validation failed, do not apply ad detection regardless of mode
+    if (!is_valid) {
+        ads_detected_ = false;
+        detection_reliable_ = false;
+        detection_reason_ += L" - Validation failed: insufficient segment distribution for reliable detection";
+        
+        // Clear ad markings - treat all segments as content
+        for (auto& segment : segments_) {
+            segment.is_ad_segment = false;
+        }
+        return;
+    }
+    
+    // If in conservative mode, apply stricter ratio requirements
+    if (conservative_mode) {
         double ratio = (group0_count > group1_count) ? 
             (double)group0_count / (group1_count + 1) : 
             (double)group1_count / (group0_count + 1);
             
-        if (conservative_mode && ratio < 3.0) {
+        if (ratio < 3.0) {
             // In conservative mode, require 3:1 ratio for ad detection
             ads_detected_ = false;
             detection_reliable_ = false;
             detection_reason_ += L" - Conservative mode: insufficient confidence (ratio " + 
                                std::to_wstring(ratio) + L" < 3.0)";
-            
-            // Clear ad markings - treat all segments as content
-            for (auto& segment : segments_) {
-                segment.is_ad_segment = false;
-            }
-            return;
-        } else if (!conservative_mode && ratio < 2.0) {
-            // In normal mode, require 2:1 ratio for ad detection
-            ads_detected_ = false;
-            detection_reliable_ = false;
-            detection_reason_ += L" - Normal mode: insufficient confidence (ratio " + 
-                               std::to_wstring(ratio) + L" < 2.0)";
             
             // Clear ad markings - treat all segments as content
             for (auto& segment : segments_) {
