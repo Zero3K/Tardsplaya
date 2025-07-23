@@ -107,7 +107,18 @@ wine Tardsplaya.exe
 6. Close tabs (Ctrl+W) ✓
 ```
 
-### **Phase 3: Error Handling**
+### **Phase 3: Discontinuity Handling (NEW)**
+```
+1. Start stream on channel with frequent ads ✓
+2. Monitor logs for [DISCONTINUITY] messages ✓
+3. Verify [NULL_PADDING] insertion during ad breaks ✓
+4. Observe smooth playback during transitions ✓
+5. Check no buffering issues during ad changes ✓
+6. Test quality change discontinuities ✓
+7. Verify null packets (PID 0x1FFF) in stream ✓
+```
+
+### **Phase 4: Error Handling**
 ```
 1. Invalid channel names ✓
 2. Offline channels ✓
@@ -116,7 +127,7 @@ wine Tardsplaya.exe
 5. Malformed API responses ✓
 ```
 
-### **Phase 4: Windows 7 Specific**
+### **Phase 5: Windows 7 Specific**
 ```
 1. Run on clean Windows 7 VM ✓
 2. Test without updated certificates ✓
@@ -135,6 +146,22 @@ wine Tardsplaya.exe
 - Track file/registry access
 - Monitor network connections
 - Verify no missing dependencies
+
+### **Discontinuity Handling Debug**
+```bash
+# Enable verbose debug logging
+1. Settings → Enable "Verbose Debug" 
+2. Settings → Enable "Log to File"
+3. Monitor debug.log for:
+   - [DISCONTINUITY] messages
+   - [NULL_PADDING] insertion logs
+   - [NULL_CONTINUITY] completion messages
+```
+
+**Key Log Messages:**
+- `Detected ad transition - inserting null packets`
+- `Inserting X null packets for Yms discontinuity gap`
+- `Null packets inserted and frame tracking reset`
 
 ### **Network Analysis**
 ```bash

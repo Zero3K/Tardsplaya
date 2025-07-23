@@ -70,6 +70,31 @@ The TSDuck integration includes:
 | **Lag Analysis** | **Basic logging only** | **Detailed frame statistics and timing data** |
 | **Stream Format** | **HLS segments only** | **HLS segments + Transport Stream routing** |
 | **Player Compatibility** | **Basic stdin piping** | **Professional TS format support** |
+| **Discontinuity Handling** | **Buffer clearing during ads** | **Null packet insertion for smooth transitions** |
+
+### NEW: Null Packet Discontinuity Handling
+
+**Smooth Ad Transitions** - Advanced discontinuity handling system:
+
+- **Null Packet Insertion**: During stream discontinuities (ad breaks, quality changes), null MPEG-TS packets (PID 0x1FFF) are inserted instead of clearing the buffer
+- **Maintains Stream Continuity**: Prevents media player buffering issues and playback interruptions during transitions
+- **Configurable Duration**: Adjustable null packet insertion duration (default: 1000ms) for optimal balance between smoothness and responsiveness
+- **Standards Compliant**: Uses proper MPEG-TS null packet format with 0xFF padding
+- **Backward Compatible**: Can be disabled to fall back to legacy buffer clearing behavior
+
+### Technical Benefits of Null Packet Insertion
+
+**Before (Buffer Clearing)**:
+- Stream discontinuities caused buffer emptying
+- Media players experienced buffering delays during ad transitions
+- Abrupt stream restarts could cause audio/video sync issues
+- Player-dependent behavior during transitions
+
+**After (Null Packet Insertion)**:
+- Continuous stream flow maintained during discontinuities
+- Media players receive consistent data rate preventing buffering
+- Smooth transitions with minimal playback interruption
+- Professional broadcast-quality discontinuity handling
 
 The integration works transparently:
 1. **Primary**: TSDuck-enhanced parsing for optimal performance
