@@ -4,6 +4,7 @@
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
+#include "datapath_ipc.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -634,6 +635,37 @@ static void SetPlayerWindowTitle(DWORD processId, const std::wstring& title) {
 }
 
 bool BufferAndPipeStreamToPlayer(
+    const std::wstring& player_path,
+    const std::wstring& playlist_url,
+    std::atomic<bool>& cancel_token,
+    int buffer_segments,
+    const std::wstring& channel_name,
+    std::atomic<int>* chunk_count,
+    const std::wstring& selected_quality,
+    HANDLE* player_process_handle
+) {
+    // Configuration flag to choose IPC method
+    // Set to true to use new Datapath IPC (high performance)
+    // Set to false to use legacy Windows pipes
+    static const bool USE_DATAPATH_IPC = true;
+    
+    if (USE_DATAPATH_IPC) {
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Using Datapath IPC for " + channel_name);
+        return BufferAndPipeStreamToPlayerDatapath(
+            player_path, playlist_url, cancel_token, buffer_segments,
+            channel_name, chunk_count, selected_quality, player_process_handle
+        );
+    } else {
+        AddDebugLog(L"BufferAndPipeStreamToPlayer: Using legacy Windows pipes for " + channel_name);
+        return BufferAndPipeStreamToPlayerLegacy(
+            player_path, playlist_url, cancel_token, buffer_segments,
+            channel_name, chunk_count, selected_quality, player_process_handle
+        );
+    }
+}
+
+// Renamed original function to preserve legacy functionality
+bool BufferAndPipeStreamToPlayerLegacy(
     const std::wstring& player_path,
     const std::wstring& playlist_url,
     std::atomic<bool>& cancel_token,
