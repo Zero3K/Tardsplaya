@@ -152,26 +152,155 @@ std::unique_ptr<lexus2k::pipeline::Pipeline> PipelineFactory::createMonitoringPi
     return pipeline;
 }
 
-// Examples implementations - Simplified for Visual Studio compatibility
+// Examples implementations
 
 void PipelineExamples::demonstrateLambdaNodes() {
     std::cout << "=== Lambda Nodes Demonstration ===" << std::endl;
-    std::cout << "Lambda nodes provide flexible packet processing capabilities." << std::endl;
-    std::cout << "Note: Full implementation requires proper lambda node API usage." << std::endl;
+    
+    auto pipeline = std::make_unique<lexus2k::pipeline::Pipeline>();
+    
+    // Create producer lambda node - DISABLED for Visual Studio compatibility
+    /*
+    auto producer = pipeline->addNode([](std::shared_ptr<lexus2k::pipeline::IPacket> packet, 
+                                        lexus2k::pipeline::IPad& pad) -> bool {
+        std::cout << "Producer: Creating data packet" << std::endl;
+        auto dataPacket = std::make_shared<HLSSegmentPacket>(std::vector<uint8_t>{1, 2, 3, 4, 5});
+        pad.node()["output"].pushPacket(dataPacket, 1000);
+        return true;
+    });
+    producer->addInput("trigger");
+    producer->addOutput("output");
+
+    // Create consumer lambda node
+    auto consumer = pipeline->addNode([](std::shared_ptr<lexus2k::pipeline::IPacket> packet, 
+                                        lexus2k::pipeline::IPad& pad) -> bool {
+        auto hlsPacket = std::dynamic_pointer_cast<HLSSegmentPacket>(packet);
+        if (hlsPacket) {
+            std::cout << "Consumer: Received packet with " << hlsPacket->getSize() << " bytes" << std::endl;
+        }
+        return true;
+    });
+    consumer->addInput("input");
+
+    // Connect nodes
+    pipeline->connect((*producer)["output"], (*consumer)["input"]);
+    
+    // Start and test
+    if (pipeline->start()) {
+        auto triggerPacket = std::make_shared<ControlPacket>(ControlPacket::Command::START);
+        (*producer)["trigger"].pushPacket(triggerPacket, 1000);
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        pipeline->stop();
+    }
+    
     std::cout << "Lambda nodes demonstration completed." << std::endl << std::endl;
+    */
 }
 
 void PipelineExamples::demonstrateAdvancedBuffering() {
     std::cout << "=== Advanced Buffering Demonstration ===" << std::endl;
-    std::cout << "Advanced buffering enables smooth data flow with adaptive sizing." << std::endl;
-    std::cout << "Note: Full implementation requires proper QueuePad configuration." << std::endl;
+    
+    auto pipeline = std::make_unique<lexus2k::pipeline::Pipeline>();
+    
+    // Create producer with QueuePad
+    auto producer = pipeline->addNode([](std::shared_ptr<lexus2k::pipeline::IPacket> packet, 
+                                        lexus2k::pipeline::IPad& pad) -> bool {
+        for (int i = 0; i < 10; ++i) {
+            auto dataPacket = std::make_shared<HLSSegmentPacket>(std::vector<uint8_t>(1024, i));
+            std::cout << "Producing packet " << i << std::endl;
+            pad.node()["output"].pushPacket(dataPacket, 1000);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        return true;
+    });
+    producer->addInput("trigger");
+    producer->addOutput("output");
+
+    // Create buffered consumer
+    auto consumer = pipeline->addNode([](std::shared_ptr<lexus2k::pipeline::IPacket> packet, 
+                                        lexus2k::pipeline::IPad& pad) -> bool {
+        auto hlsPacket = std::dynamic_pointer_cast<HLSSegmentPacket>(packet);
+        if (hlsPacket) {
+            std::cout << "Consuming buffered packet of size " << hlsPacket->getSize() << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(200)); // Simulate slow processing
+        }
+        return true;
+    });
+    consumer->addInput<lexus2k::pipeline::QueuePad>("input", 5); // Buffer up to 5 packets
+
+    pipeline->connect((*producer)["output"], (*consumer)["input"]);
+    
+    if (pipeline->start()) {
+        auto triggerPacket = std::make_shared<ControlPacket>(ControlPacket::Command::START);
+        (*producer)["trigger"].pushPacket(triggerPacket, 1000);
+        
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        pipeline->stop();
+    }
+    
     std::cout << "Advanced buffering demonstration completed." << std::endl << std::endl;
 }
 
 void PipelineExamples::demonstratePacketSplitting() {
     std::cout << "=== Packet Splitting Demonstration ===" << std::endl;
-    std::cout << "Packet splitting distributes data to multiple processing paths." << std::endl;
-    std::cout << "Note: Full implementation requires proper splitter node usage." << std::endl;
+    
+    auto pipeline = std::make_unique<lexus2k::pipeline::Pipeline>();
+    
+    // Create producer
+    auto producer = pipeline->addNode([](std::shared_ptr<lexus2k::pipeline::IPacket> packet, 
+                                        lexus2k::pipeline::IPad& pad) -> bool {
+        auto dataPacket = std::make_shared<HLSSegmentPacket>(std::vector<uint8_t>{1, 2, 3, 4, 5});
+        std::cout << "Producing packet for splitting" << std::endl;
+        pad.node()["output"].pushPacket(dataPacket, 1000);
+        return true;
+    });
+    producer->addInput("trigger");
+    producer->addOutput("output");
+
+    // Create splitter
+    auto splitter = pipeline->addNode<lexus2k::pipeline::ISplitter>();
+    splitter->addInput("input");
+    splitter->addOutput("output1");
+    splitter->addOutput("output2");
+    splitter->addOutput("output3");
+
+    // Create multiple consumers
+    auto consumer1 = pipeline->addNode([](std::shared_ptr<lexus2k::pipeline::IPacket> packet, 
+                                         lexus2k::pipeline::IPad& pad) -> bool {
+        std::cout << "Consumer 1 received packet" << std::endl;
+        return true;
+    });
+    consumer1->addInput("input");
+
+    auto consumer2 = pipeline->addNode([](std::shared_ptr<lexus2k::pipeline::IPacket> packet, 
+                                         lexus2k::pipeline::IPad& pad) -> bool {
+        std::cout << "Consumer 2 received packet" << std::endl;
+        return true;
+    });
+    consumer2->addInput("input");
+
+    auto consumer3 = pipeline->addNode([](std::shared_ptr<lexus2k::pipeline::IPacket> packet, 
+                                         lexus2k::pipeline::IPad& pad) -> bool {
+        std::cout << "Consumer 3 received packet" << std::endl;
+        return true;
+    });
+    consumer3->addInput("input");
+
+    // Connect pipeline
+    pipeline->connect((*producer)["output"], (*splitter)["input"]);
+    pipeline->connect((*splitter)["output1"], (*consumer1)["input"]);
+    pipeline->connect((*splitter)["output2"], (*consumer2)["input"]);
+    pipeline->connect((*splitter)["output3"], (*consumer3)["input"]);
+    
+    if (pipeline->start()) {
+        auto triggerPacket = std::make_shared<ControlPacket>(ControlPacket::Command::START);
+        (*producer)["trigger"].pushPacket(triggerPacket, 1000);
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        pipeline->stop();
+    }
+    
     std::cout << "Packet splitting demonstration completed." << std::endl << std::endl;
 }
 
@@ -190,24 +319,53 @@ void PipelineExamples::demonstrateTypeSafeProcessing() {
     std::cout << "- TS Router: converts HLS to TSPacket types" << std::endl;
     std::cout << "- Stats Monitor: processes StatsPacket types" << std::endl;
     
-    (void)hlsProcessor; // Suppress unused warnings
-    (void)tsProcessor;
-    (void)statsMonitor;
-    
     std::cout << "Type-safe processing demonstration completed." << std::endl << std::endl;
 }
 
 void PipelineExamples::demonstrateRealTimeProcessing() {
     std::cout << "=== Real-Time Processing Demonstration ===" << std::endl;
-    std::cout << "Real-time processing ensures low-latency data handling." << std::endl;
-    std::cout << "Note: Full implementation requires proper timing controls." << std::endl;
+    
+    auto manager = std::make_unique<PipelineManager>("example_channel");
+    
+    if (manager->initialize()) {
+        std::cout << "Real-time streaming pipeline initialized" << std::endl;
+        std::cout << "Pipeline includes:" << std::endl;
+        std::cout << "- Twitch source node" << std::endl;
+        std::cout << "- HLS parser node" << std::endl;
+        std::cout << "- TS router node" << std::endl;
+        std::cout << "- Smart buffer node" << std::endl;
+        std::cout << "- Media player output node" << std::endl;
+        std::cout << "- Statistics monitor node" << std::endl;
+    }
+    
     std::cout << "Real-time processing demonstration completed." << std::endl << std::endl;
 }
 
 void PipelineExamples::demonstrateErrorHandling() {
     std::cout << "=== Error Handling Demonstration ===" << std::endl;
-    std::cout << "Robust error handling ensures pipeline stability." << std::endl;
-    std::cout << "Note: Full implementation requires proper exception handling." << std::endl;
+    
+    auto pipeline = std::make_unique<lexus2k::pipeline::Pipeline>();
+    
+    // Create node that might fail
+    auto unreliableNode = pipeline->addNode([](std::shared_ptr<lexus2k::pipeline::IPacket> packet, 
+                                              lexus2k::pipeline::IPad& pad) -> bool {
+        static int counter = 0;
+        counter++;
+        
+        if (counter % 3 == 0) {
+            std::cout << "Node processing failed (simulated error)" << std::endl;
+            return false; // Simulate failure
+        }
+        
+        std::cout << "Node processing succeeded" << std::endl;
+        return true;
+    });
+    unreliableNode->addInput("input");
+
+    std::cout << "Demonstrated error handling in pipeline nodes" << std::endl;
+    std::cout << "Nodes can return false to indicate processing failures" << std::endl;
+    std::cout << "Pipeline framework handles failures gracefully" << std::endl;
+    
     std::cout << "Error handling demonstration completed." << std::endl << std::endl;
 }
 

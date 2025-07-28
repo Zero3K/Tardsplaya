@@ -196,7 +196,7 @@ public:
 
     bool start() noexcept override {
         m_router = std::make_unique<TSDuckTransportRouter>();
-        return m_router->initialize();
+        return m_router ? m_router->initialize() : false;
     }
 
     void stop() noexcept override {

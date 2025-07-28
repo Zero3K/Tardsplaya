@@ -1,6 +1,8 @@
 #ifndef PIPELINE_PACKET_H
 #define PIPELINE_PACKET_H
 
+#include <cstddef>
+
 namespace lexus2k::pipeline
 {
     /**

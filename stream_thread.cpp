@@ -259,15 +259,15 @@ std::thread StartPipelineStreamThread(
             // Set up statistics callback to update chunk count and logging
             pipeline_manager->setStatsCallback([=](const Tardsplaya::StatsPacket::Stats& stats) mutable {
                 if (chunk_count) {
-                    *chunk_count = static_cast<int>(stats.buffer_level_percent * buffer_segments / 100.0f);
+                    *chunk_count = static_cast<int>(stats.bufferLevel * buffer_segments);
                 }
                 
-                if (log_callback && stats.processed_packets % 500 == 0) {
-                    std::wstring status_msg = L"[PIPELINE] Buffer: " + std::to_wstring(static_cast<int>(stats.buffer_level_percent)) + L"%" +
-                                             L", FPS: " + std::to_wstring(static_cast<int>(stats.fps)) + 
-                                             L", Packets: " + std::to_wstring(stats.processed_packets);
-                    if (stats.dropped_packets > 0) {
-                        status_msg += L", Dropped: " + std::to_wstring(stats.dropped_packets);
+                if (log_callback && stats.packetsProcessed % 500 == 0) {
+                    std::wstring status_msg = L"[PIPELINE] Buffer: " + std::to_wstring(static_cast<int>(stats.bufferLevel * 100.0)) + L"%" +
+                                             L", FPS: " + std::to_wstring(static_cast<int>(stats.currentFPS)) + 
+                                             L", Packets: " + std::to_wstring(stats.packetsProcessed);
+                    if (stats.droppedFrames > 0) {
+                        status_msg += L", Dropped: " + std::to_wstring(stats.droppedFrames);
                     }
                     log_callback(status_msg);
                 }
@@ -319,7 +319,7 @@ std::thread StartPipelineStreamThread(
                 
                 // Update chunk count for status bar
                 if (chunk_count) {
-                    *chunk_count = static_cast<int>(stats.buffer_level_percent * buffer_segments / 100.0f);
+                    *chunk_count = static_cast<int>(stats.bufferLevel * buffer_segments);
                 }
             }
             

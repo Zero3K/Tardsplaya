@@ -94,6 +94,11 @@ public:
         std::string url;
         int bandwidth;
         std::string resolution;
+        
+        bool operator==(const QualityInfo& other) const {
+            return name == other.name && url == other.url && 
+                   bandwidth == other.bandwidth && resolution == other.resolution;
+        }
     };
 
     explicit PlaylistPacket(const std::string& channel, const std::vector<QualityInfo>& qualities)
