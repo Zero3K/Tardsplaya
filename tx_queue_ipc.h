@@ -88,8 +88,22 @@ public:
     // Check if end of stream was signaled
     bool IsEndOfStream() const { return end_of_stream_.load(); }
     
+// Custom deleter for aligned tx_queue_sp_t allocation
+struct AlignedTxQueueDeleter {
+    void operator()(qcstudio::tx_queue_sp_t* ptr) {
+        if (ptr) {
+            ptr->~tx_queue_sp_t();  // Call destructor explicitly
+#ifdef _WIN32
+            _aligned_free(ptr);
+#else
+            free(ptr);
+#endif
+        }
+    }
+};
+
 private:
-    std::unique_ptr<qcstudio::tx_queue_sp_t> queue_;
+    std::unique_ptr<qcstudio::tx_queue_sp_t, AlignedTxQueueDeleter> queue_;
     std::atomic<uint64_t> produced_count_{0};
     std::atomic<uint64_t> consumed_count_{0};
     std::atomic<uint64_t> dropped_count_{0};

@@ -63,8 +63,23 @@ TxQueueIPC::~TxQueueIPC() {
 
 bool TxQueueIPC::Initialize() {
     try {
-        // Create single-process tx-queue
-        queue_ = std::make_unique<tx_queue_sp_t>(queue_capacity_);
+        // Create single-process tx-queue with proper alignment
+        // Use aligned allocation to avoid C4316 warning
+#ifdef _WIN32
+        void* aligned_ptr = _aligned_malloc(sizeof(qcstudio::tx_queue_sp_t), 64);
+        if (!aligned_ptr) {
+            AddDebugLog(L"[TX-QUEUE] Failed to allocate aligned memory for tx-queue");
+            return false;
+        }
+        queue_.reset(new(aligned_ptr) qcstudio::tx_queue_sp_t(queue_capacity_));
+#else
+        void* aligned_ptr = aligned_alloc(64, sizeof(qcstudio::tx_queue_sp_t));
+        if (!aligned_ptr) {
+            AddDebugLog(L"[TX-QUEUE] Failed to allocate aligned memory for tx-queue");
+            return false;
+        }
+        queue_.reset(new(aligned_ptr) qcstudio::tx_queue_sp_t(queue_capacity_));
+#endif
         
         if (!queue_ || !queue_->is_ok()) {
             AddDebugLog(L"[TX-QUEUE] Failed to create tx-queue");
