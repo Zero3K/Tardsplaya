@@ -117,8 +117,9 @@ private:
     std::vector<std::shared_ptr<datapath::isocket>> connected_clients_;
     std::mutex clients_mutex_;
 
-    // Named pipe bridge for media player compatibility
-    HANDLE named_pipe_handle_;
+    // Named pipe bridge for media player compatibility (stdin pipe approach)
+    HANDLE named_pipe_handle_;      // Write handle for stdin pipe
+    HANDLE stdin_read_handle_;      // Read handle for stdin pipe (passed to media player)
     std::thread named_pipe_thread_;
     std::atomic<bool> named_pipe_active_;
 

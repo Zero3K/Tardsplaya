@@ -104,6 +104,7 @@ static std::pair<std::vector<std::wstring>, bool> ParseSegmentsLocal(const std::
 
 DatapathIPC::DatapathIPC()
     : named_pipe_handle_(INVALID_HANDLE_VALUE)
+    , stdin_read_handle_(INVALID_HANDLE_VALUE)
     , named_pipe_active_(false)
     , is_active_(false)
     , end_of_stream_(false)
@@ -135,15 +136,10 @@ bool DatapathIPC::Initialize(const Config& config) {
         config_.datapath_name = GenerateDatapathName(config_.channel_name);
         AddDebugLog(L"[DATAPATH] Generated datapath name: " + config_.datapath_name);
     }
-    
-    if (config_.named_pipe_path.empty()) {
-        config_.named_pipe_path = GenerateNamedPipeName(config_.channel_name);
-        AddDebugLog(L"[DATAPATH] Generated named pipe path: " + config_.named_pipe_path);
-    }
 
     AddDebugLog(L"[DATAPATH] DatapathIPC::Initialize: Initializing for channel " + config_.channel_name +
                L", datapath_name=" + config_.datapath_name +
-               L", named_pipe=" + config_.named_pipe_path);
+               L", using stdin pipe for media player");
 
     // Create Datapath server
     AddDebugLog(L"[DATAPATH] Attempting to create Datapath server...");
@@ -194,12 +190,12 @@ bool DatapathIPC::StartStreaming(
 
     // Start named pipe thread BEFORE launching media player to ensure pipe is ready
     if (config_.use_named_pipe_bridge) {
-        AddDebugLog(L"DatapathIPC::StartStreaming: Starting named pipe thread before media player");
+        AddDebugLog(L"DatapathIPC::StartStreaming: Starting stdin pipe thread before media player");
         named_pipe_thread_ = std::thread(&DatapathIPC::NamedPipeThreadProc, this);
         
-        // Give the named pipe thread time to start and call ConnectNamedPipe()
+        // Give the stdin pipe thread time to start and be ready
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        AddDebugLog(L"DatapathIPC::StartStreaming: Named pipe thread started, now launching media player");
+        AddDebugLog(L"DatapathIPC::StartStreaming: Stdin pipe thread started, now launching media player");
     }
 
     // Launch media player after named pipe is ready
@@ -428,48 +424,53 @@ bool DatapathIPC::CreateDatapathServer() {
 }
 
 bool DatapathIPC::CreateNamedPipeBridge() {
-    // Create named pipe for media player connectivity
-    named_pipe_handle_ = CreateNamedPipeW(
-        config_.named_pipe_path.c_str(),
-        PIPE_ACCESS_OUTBOUND,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        1, // max instances
-        65536, // out buffer size
-        0, // in buffer size
-        0, // default timeout
-        nullptr // security attributes
-    );
-
-    if (named_pipe_handle_ == INVALID_HANDLE_VALUE) {
-        AddDebugLog(L"DatapathIPC::CreateNamedPipeBridge: Failed to create named pipe: " + 
-                   config_.named_pipe_path + L", Error=" + std::to_wstring(GetLastError()));
+    // Create anonymous pipe for stdin communication with media player (like transport stream mode)
+    SECURITY_ATTRIBUTES saAttr;
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+    
+    // Create pipe with larger buffer for streaming
+    DWORD pipe_buffer_size = 65536; // 64KB buffer
+    
+    if (!CreatePipe(&stdin_read_handle_, &named_pipe_handle_, &saAttr, pipe_buffer_size)) {
+        AddDebugLog(L"DatapathIPC::CreateNamedPipeBridge: Failed to create stdin pipe, Error=" + 
+                   std::to_wstring(GetLastError()));
+        return false;
+    }
+    
+    // Ensure the write handle is not inherited
+    if (!SetHandleInformation(named_pipe_handle_, HANDLE_FLAG_INHERIT, 0)) {
+        AddDebugLog(L"DatapathIPC::CreateNamedPipeBridge: Failed to set handle information, Error=" + 
+                   std::to_wstring(GetLastError()));
+        CloseHandle(stdin_read_handle_);
+        CloseHandle(named_pipe_handle_);
+        stdin_read_handle_ = INVALID_HANDLE_VALUE;
+        named_pipe_handle_ = INVALID_HANDLE_VALUE;
         return false;
     }
 
     named_pipe_active_.store(true);
-    AddDebugLog(L"DatapathIPC::CreateNamedPipeBridge: Created named pipe: " + config_.named_pipe_path);
+    AddDebugLog(L"DatapathIPC::CreateNamedPipeBridge: Created stdin pipe for media player");
     return true;
 }
 
 bool DatapathIPC::LaunchMediaPlayer() {
-    // Build command line for media player to read from named pipe
-    std::wstring cmd;
-    if (config_.use_named_pipe_bridge) {
-        cmd = L"\"" + config_.player_path + L"\" \"" + config_.named_pipe_path + L"\"";
-    } else {
-        // For direct Datapath connection, we'd need a custom media player or helper
-        cmd = L"\"" + config_.player_path + L"\" -";
-    }
+    // Build command line for media player to read from stdin (like transport stream mode)
+    std::wstring cmd = L"\"" + config_.player_path + L"\" -";
 
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = stdin_read_handle_; // Connect our pipe to media player's stdin
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
 
-    AddDebugLog(L"DatapathIPC::LaunchMediaPlayer: Launching: " + cmd);
+    AddDebugLog(L"DatapathIPC::LaunchMediaPlayer: Launching with stdin pipe: " + cmd);
 
     BOOL success = CreateProcessW(
         nullptr, const_cast<LPWSTR>(cmd.c_str()),
-        nullptr, nullptr, FALSE,
+        nullptr, nullptr, TRUE, // bInheritHandles = TRUE for stdin redirection
         CREATE_NEW_CONSOLE,
         nullptr, nullptr, &si, &player_process_info_
     );
@@ -480,8 +481,12 @@ bool DatapathIPC::LaunchMediaPlayer() {
         return false;
     }
 
+    // Close the read handle in parent process since child now owns it
+    CloseHandle(stdin_read_handle_);
+    stdin_read_handle_ = INVALID_HANDLE_VALUE;
+
     player_started_ = true;
-    AddDebugLog(L"DatapathIPC::LaunchMediaPlayer: Successfully launched player, PID=" + 
+    AddDebugLog(L"DatapathIPC::LaunchMediaPlayer: Successfully launched player with stdin pipe, PID=" + 
                std::to_wstring(player_process_info_.dwProcessId));
     return true;
 }
@@ -510,44 +515,27 @@ void DatapathIPC::ServerThreadProc() {
 }
 
 void DatapathIPC::NamedPipeThreadProc() {
-    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Starting named pipe thread for " + config_.channel_name);
+    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Starting stdin pipe monitor for " + config_.channel_name);
 
-    // Wait for client connection
-    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Waiting for client to connect to pipe: " + config_.named_pipe_path);
+    // No need to wait for connection with anonymous pipes - they're immediately ready
+    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Stdin pipe ready for streaming");
     
-    BOOL connect_result = ConnectNamedPipe(named_pipe_handle_, nullptr);
-    DWORD error = GetLastError();
-    
-    // ConnectNamedPipe can return FALSE but still be successful if client is already connected
-    if (connect_result || error == ERROR_PIPE_CONNECTED) {
-        AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Client connected to named pipe successfully");
-        
-        // Keep the connection alive while streaming
-        while (!should_stop_.load() && named_pipe_active_.load()) {
-            // Check if pipe is still connected
-            DWORD bytes_available = 0;
-            BOOL peek_result = PeekNamedPipe(named_pipe_handle_, nullptr, 0, nullptr, &bytes_available, nullptr);
-            if (!peek_result) {
-                DWORD peek_error = GetLastError();
-                // Only treat ERROR_BROKEN_PIPE as a disconnection
-                // ERROR_NO_DATA is normal for outbound-only pipes and doesn't indicate disconnection
-                if (peek_error == ERROR_BROKEN_PIPE) {
-                    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Client disconnected from pipe (broken pipe)");
-                    named_pipe_active_.store(false);
-                    break;
-                }
-                // For other errors, just log them but don't treat as disconnection
-                AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: PeekNamedPipe returned error " + std::to_wstring(peek_error) + L" (not treating as disconnection)");
+    // Keep the connection monitor active while streaming
+    while (!should_stop_.load() && named_pipe_active_.load()) {
+        // Check if media player process is still running
+        if (player_started_ && player_process_info_.hProcess != INVALID_HANDLE_VALUE) {
+            DWORD wait_result = WaitForSingleObject(player_process_info_.hProcess, 0);
+            if (wait_result == WAIT_OBJECT_0) {
+                AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Media player process ended");
+                named_pipe_active_.store(false);
+                break;
             }
-            
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-    } else {
-        AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Failed to connect named pipe, Error=" + 
-                   std::to_wstring(error));
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Named pipe thread ending for " + config_.channel_name);
+    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Stdin pipe monitor ending for " + config_.channel_name);
 }
 
 void DatapathIPC::BufferManagerThreadProc() {
@@ -636,10 +624,14 @@ void DatapathIPC::CleanupResources() {
         connected_clients_.clear();
     }
 
-    // Close named pipe
+    // Close named pipe handles
     if (named_pipe_handle_ != INVALID_HANDLE_VALUE) {
         CloseHandle(named_pipe_handle_);
         named_pipe_handle_ = INVALID_HANDLE_VALUE;
+    }
+    if (stdin_read_handle_ != INVALID_HANDLE_VALUE) {
+        CloseHandle(stdin_read_handle_);
+        stdin_read_handle_ = INVALID_HANDLE_VALUE;
     }
     named_pipe_active_.store(false);
 
@@ -749,7 +741,7 @@ bool DatapathIPC::WriteToDatapathClients(const std::vector<char>& data) {
 
 bool DatapathIPC::WriteToNamedPipe(const std::vector<char>& data) {
     if (named_pipe_handle_ == INVALID_HANDLE_VALUE || !named_pipe_active_.load()) {
-        AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Pipe not available (handle=" + 
+        AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Stdin pipe not available (handle=" + 
                    std::to_wstring(reinterpret_cast<uintptr_t>(named_pipe_handle_)) + 
                    L", active=" + (named_pipe_active_.load() ? L"true" : L"false") + L")");
         return false;
@@ -766,14 +758,9 @@ bool DatapathIPC::WriteToNamedPipe(const std::vector<char>& data) {
 
     if (!result || bytes_written != data.size()) {
         DWORD error = GetLastError();
-        if (error == ERROR_BROKEN_PIPE) {
-            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Pipe disconnected (broken pipe, error=" + std::to_wstring(error) + L")");
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Stdin pipe disconnected (error=" + std::to_wstring(error) + L")");
             named_pipe_active_.store(false);
-        } else if (error == ERROR_NO_DATA) {
-            // ERROR_NO_DATA during write doesn't necessarily mean disconnection
-            // This can happen due to timing issues or buffer states - just log and retry
-            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Write returned ERROR_NO_DATA (error=" + std::to_wstring(error) + L"), retrying...");
-            // Don't mark pipe as inactive - keep trying
         } else {
             AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Write failed, Error=" + std::to_wstring(error) + 
                        L", BytesWritten=" + std::to_wstring(bytes_written) + L"/" + std::to_wstring(data.size()));
@@ -781,7 +768,7 @@ bool DatapathIPC::WriteToNamedPipe(const std::vector<char>& data) {
         return false;
     }
 
-    AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Successfully wrote " + std::to_wstring(bytes_written) + L" bytes to pipe");
+    AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Successfully wrote " + std::to_wstring(bytes_written) + L" bytes to stdin pipe");
     return true;
 }
 
