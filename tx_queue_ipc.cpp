@@ -12,7 +12,14 @@
 extern std::string WideToUtf8(const std::wstring& w);
 extern std::wstring Utf8ToWide(const std::string& s);
 extern bool HttpGetText(const std::wstring& url, std::string& out, std::atomic<bool>* cancel_token);
-extern std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel);
+
+// Helper function to join URLs
+static std::wstring JoinUrl(const std::wstring& base, const std::wstring& rel) {
+    if (rel.find(L"http") == 0) return rel;
+    size_t pos = base.rfind(L'/');
+    if (pos == std::wstring::npos) return rel;
+    return base.substr(0, pos + 1) + rel;
+}
 
 #pragma comment(lib, "winhttp.lib")
 
