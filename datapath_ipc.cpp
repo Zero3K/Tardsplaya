@@ -204,6 +204,10 @@ bool DatapathIPC::StartStreaming(
         return false;
     }
 
+    // Give the media player time to start up and be ready to receive stdin data
+    AddDebugLog(L"DatapathIPC::StartStreaming: Giving media player 500ms to start up...");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
     if (player_process_handle) {
         *player_process_handle = player_process_info_.hProcess;
     }
@@ -342,16 +346,31 @@ void DatapathIPC::StopStreaming() {
 bool DatapathIPC::WriteSegmentData(const std::vector<char>& data, std::atomic<bool>& cancel_token) {
     if (!is_active_.load() || data.empty()) return false;
 
-    // Write to Datapath clients
-    bool datapath_success = WriteToDatapathClients(data);
+    bool any_success = false;
+
+    // Write to Datapath clients if any are connected
+    if (!connected_clients_.empty()) {
+        bool datapath_success = WriteToDatapathClients(data);
+        if (datapath_success) {
+            any_success = true;
+            AddDebugLog(L"DatapathIPC::WriteSegmentData: Successfully wrote to Datapath clients");
+        }
+    }
     
     // Write to named pipe if available
-    bool pipe_success = true;
-    if (config_.use_named_pipe_bridge && named_pipe_handle_ != INVALID_HANDLE_VALUE) {
-        pipe_success = WriteToNamedPipe(data);
+    if (config_.use_named_pipe_bridge && named_pipe_handle_ != INVALID_HANDLE_VALUE && named_pipe_active_.load()) {
+        bool pipe_success = WriteToNamedPipe(data);
+        if (pipe_success) {
+            any_success = true;
+            AddDebugLog(L"DatapathIPC::WriteSegmentData: Successfully wrote to stdin pipe");
+        }
     }
 
-    return datapath_success || pipe_success;
+    if (!any_success) {
+        AddDebugLog(L"DatapathIPC::WriteSegmentData: No successful writes - no clients or pipe available");
+    }
+
+    return any_success;
 }
 
 bool DatapathIPC::IsActive() const {
@@ -563,13 +582,19 @@ void DatapathIPC::BufferManagerThreadProc() {
         if (!segment_data.empty()) {
             // Send data to all connected clients
             std::atomic<bool> dummy_cancel(false);
-            WriteSegmentData(segment_data, dummy_cancel);
             
-            AddDebugLog(L"DatapathIPC::BufferManagerThreadProc: Sent segment, buffer=" + 
+            AddDebugLog(L"DatapathIPC::BufferManagerThreadProc: About to send segment (" + 
+                       std::to_wstring(segment_data.size()) + L" bytes), buffer=" + 
+                       std::to_wstring(buffer_size_.load()));
+            
+            bool write_success = WriteSegmentData(segment_data, dummy_cancel);
+            
+            AddDebugLog(L"DatapathIPC::BufferManagerThreadProc: Sent segment, success=" + 
+                       std::to_wstring(write_success) + L", buffer=" + 
                        std::to_wstring(buffer_size_.load()));
                        
             // Add small delay between segments to prevent overwhelming the media player
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
 
         if (end_of_stream_.load() && buffer_size_.load() == 0) {
@@ -747,29 +772,49 @@ bool DatapathIPC::WriteToNamedPipe(const std::vector<char>& data) {
         return false;
     }
 
-    DWORD bytes_written = 0;
-    BOOL result = WriteFile(
-        named_pipe_handle_,
-        data.data(),
-        static_cast<DWORD>(data.size()),
-        &bytes_written,
-        nullptr
-    );
+    // Use retry logic similar to legacy pipe writing
+    const int max_write_attempts = 3;
+    for (int write_attempt = 1; write_attempt <= max_write_attempts; ++write_attempt) {
+        DWORD bytes_written = 0;
+        BOOL result = WriteFile(
+            named_pipe_handle_,
+            data.data(),
+            static_cast<DWORD>(data.size()),
+            &bytes_written,
+            nullptr
+        );
 
-    if (!result || bytes_written != data.size()) {
-        DWORD error = GetLastError();
-        if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
-            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Stdin pipe disconnected (error=" + std::to_wstring(error) + L")");
-            named_pipe_active_.store(false);
-        } else {
-            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Write failed, Error=" + std::to_wstring(error) + 
-                       L", BytesWritten=" + std::to_wstring(bytes_written) + L"/" + std::to_wstring(data.size()));
+        if (result && bytes_written == data.size()) {
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Successfully wrote " + 
+                       std::to_wstring(bytes_written) + L" bytes to stdin pipe");
+            return true;
         }
-        return false;
+
+        DWORD error = GetLastError();
+        
+        // Only treat ERROR_BROKEN_PIPE as immediate disconnection
+        if (error == ERROR_BROKEN_PIPE) {
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Stdin pipe broken (error=" + 
+                       std::to_wstring(error) + L")");
+            named_pipe_active_.store(false);
+            return false;
+        }
+        
+        // For other errors (including ERROR_NO_DATA), retry with delay
+        if (write_attempt < max_write_attempts) {
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Write attempt " + 
+                       std::to_wstring(write_attempt) + L"/" + std::to_wstring(max_write_attempts) + 
+                       L" failed (error=" + std::to_wstring(error) + L"), retrying...");
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } else {
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: All write attempts failed, Error=" + 
+                       std::to_wstring(error) + L", BytesWritten=" + std::to_wstring(bytes_written) + 
+                       L"/" + std::to_wstring(data.size()));
+            return false;
+        }
     }
 
-    AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Successfully wrote " + std::to_wstring(bytes_written) + L" bytes to stdin pipe");
-    return true;
+    return false;
 }
 
 // Compatibility function
