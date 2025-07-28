@@ -2,6 +2,7 @@
 #include "stream_thread.h"
 #include "stream_pipe.h"
 #include <sstream>
+#include <iomanip>
 #include <regex>
 #include <chrono>
 #include <winhttp.h>
@@ -140,8 +141,10 @@ bool TxQueueIPC::ConsumeSegment(StreamSegment& segment) {
             AddDebugLog(L"[TX-QUEUE] WARNING: Checksum mismatch for segment #" + 
                        std::to_wstring(segment.sequence_number));
         }
-        AddDebugLog(L"[TX-QUEUE] Consumed segment #" + std::to_wstring(segment.sequence_number) + 
+        AddDebugLog(L"[DEBUG] [TX-QUEUE] Consumed segment #" + std::to_wstring(segment.sequence_number) + 
                    L", size: " + std::to_wstring(segment.data.size()) + L" bytes");
+    } else {
+        AddDebugLog(L"[DEBUG] [TX-QUEUE] Failed to read segment from queue");
     }
     
     return success;
@@ -200,15 +203,36 @@ bool TxQueueIPC::ReadSegmentFromQueue(StreamSegment& segment) {
         if (auto read_op = tx_read_t<qcstudio::tx_queue_sp_t>(*queue_)) {
             // Read segment header
             uint32_t data_size;
-            read_op.read(segment.sequence_number);
-            read_op.read(segment.checksum);
-            read_op.read(segment.is_end_marker);
-            read_op.read(data_size);
+            if (!read_op.read(segment.sequence_number)) {
+                AddDebugLog(L"[TX-QUEUE] Failed to read sequence number");
+                return false;
+            }
+            if (!read_op.read(segment.checksum)) {
+                AddDebugLog(L"[TX-QUEUE] Failed to read checksum");
+                return false;
+            }
+            if (!read_op.read(segment.is_end_marker)) {
+                AddDebugLog(L"[TX-QUEUE] Failed to read end marker");
+                return false;
+            }
+            if (!read_op.read(data_size)) {
+                AddDebugLog(L"[TX-QUEUE] Failed to read data size");
+                return false;
+            }
+            
+            // Validate data size is reasonable (prevent buffer overflow)
+            if (data_size > 16 * 1024 * 1024) { // 16MB max segment size
+                AddDebugLog(L"[TX-QUEUE] Invalid data size: " + std::to_wstring(data_size) + L" bytes");
+                return false;
+            }
             
             // Read segment data
             if (data_size > 0) {
                 segment.data.resize(data_size);
-                read_op.read(segment.data.data(), data_size);
+                if (!read_op.read(segment.data.data(), data_size)) {
+                    AddDebugLog(L"[TX-QUEUE] Failed to read segment data (" + std::to_wstring(data_size) + L" bytes)");
+                    return false;
+                }
             } else {
                 segment.data.clear();
             }
@@ -557,7 +581,11 @@ void TxQueueStreamManager::ProducerThreadFunction(const std::wstring& playlist_u
         // Update chunk count for UI
         if (chunk_count_ptr_) {
             auto stats = GetStats();
-            chunk_count_ptr_->store(static_cast<int>(stats.segments_produced - stats.segments_consumed));
+            uint64_t queue_depth = 0;
+            if (stats.segments_produced >= stats.segments_consumed) {
+                queue_depth = stats.segments_produced - stats.segments_consumed;
+            }
+            chunk_count_ptr_->store(static_cast<int>(queue_depth));
         }
         
         // Wait before next playlist fetch
@@ -622,13 +650,21 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
         // Wait for initial buffer to fill before starting playback
         if (!initial_buffer_filled) {
             auto stats = GetStats();
-            if ((stats.segments_produced - stats.segments_consumed) >= initial_buffer_size) {
+            // Use safer arithmetic to avoid underflow
+            uint64_t queue_depth = 0;
+            if (stats.segments_produced >= stats.segments_consumed) {
+                queue_depth = stats.segments_produced - stats.segments_consumed;
+            }
+            
+            if (queue_depth >= static_cast<uint64_t>(initial_buffer_size)) {
                 initial_buffer_filled = true;
                 LogMessage(L"[CONSUMER] Initial buffer filled (" + 
-                          std::to_wstring(stats.segments_produced - stats.segments_consumed) + 
+                          std::to_wstring(queue_depth) + 
                           L" segments), starting playback");
             } else {
-                LogMessage(L"[CONSUMER] Waiting for initial buffer to fill...");
+                LogMessage(L"[CONSUMER] Waiting for initial buffer to fill (" + 
+                          std::to_wstring(queue_depth) + L"/" + 
+                          std::to_wstring(initial_buffer_size) + L" segments)...");
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
@@ -638,8 +674,19 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             if (is_mpc) {
                 // For MPC-HC: Validate TS format before adding to buffer
                 if (!segment.has_valid_ts_headers()) {
-                    LogMessage(L"[CONSUMER] WARNING: Invalid TS headers detected, skipping segment #" + 
-                              std::to_wstring(segment.sequence_number));
+                    LogMessage(L"[CONSUMER] WARNING: Invalid TS headers detected in segment #" + 
+                              std::to_wstring(segment.sequence_number) + L" (" + 
+                              std::to_wstring(segment.data.size()) + L" bytes), skipping");
+                    // Log first few bytes for debugging
+                    if (segment.data.size() >= 4) {
+                        std::wstringstream hex_dump;
+                        hex_dump << L"First 4 bytes: ";
+                        for (int i = 0; i < 4; ++i) {
+                            hex_dump << std::hex << std::setfill(L'0') << std::setw(2) 
+                                    << static_cast<unsigned char>(segment.data[i]) << L" ";
+                        }
+                        LogMessage(L"[CONSUMER] " + hex_dump.str());
+                    }
                     continue;
                 }
                 
@@ -658,7 +705,11 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
                 } else if (first_write_done && combined_buffer.size() >= 1024 * 1024) { // Subsequent writes at 1MB minimum
                     // Check if we have a significant pause in new data
                     auto stats = GetStats();
-                    if ((stats.segments_produced - stats.segments_consumed) < 3) {
+                    uint64_t queue_depth = 0;
+                    if (stats.segments_produced >= stats.segments_consumed) {
+                        queue_depth = stats.segments_produced - stats.segments_consumed;
+                    }
+                    if (queue_depth < 3) {
                         should_write = true; // Queue is getting low, send what we have
                     }
                 }

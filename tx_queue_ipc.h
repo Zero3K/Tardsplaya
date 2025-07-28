@@ -56,12 +56,18 @@ struct StreamSegment {
         if (data.size() < 188) return false; // Minimum TS packet size
         
         // Check for TS sync bytes at 188-byte intervals
+        // Allow up to 10% bad packets to handle corrupted/encrypted content
+        size_t total_packets = data.size() / 188;
+        size_t valid_packets = 0;
+        
         for (size_t i = 0; i < data.size() - 188; i += 188) {
-            if (static_cast<unsigned char>(data[i]) != 0x47) {
-                return false;
+            if (static_cast<unsigned char>(data[i]) == 0x47) {
+                valid_packets++;
             }
         }
-        return true;
+        
+        // Require at least 90% valid sync bytes
+        return (total_packets > 0) && ((valid_packets * 100 / total_packets) >= 90);
     }
 };
 
