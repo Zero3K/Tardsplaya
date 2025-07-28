@@ -853,30 +853,41 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
 void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Starting for tab " + std::to_wstring(tabIndex) + 
                L", channel=" + tab.channel + L", isStreaming=" + std::to_wstring(tab.isStreaming));
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Entry point reached");
     
     if (tab.isStreaming) {
         AddDebugLog(L"WatchStream: Stream already running, stopping first for tab " + std::to_wstring(tabIndex));
+        AddDebugLog(L"***TEST*** WATCHSTREAM: Stream already running - stopping and returning");
         StopStream(tab, true); // User clicked watch to stop current stream
         return;
     }
 
-
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Stream not running, proceeding with new stream");
 
     // Check if player path exists
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Checking player path: " + g_playerPath);
     DWORD dwAttrib = GetFileAttributesW(g_playerPath.c_str());
     if (dwAttrib == INVALID_FILE_ATTRIBUTES || (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
+        AddDebugLog(L"***TEST*** WATCHSTREAM: Player path invalid - showing error and returning");
         MessageBoxW(tab.hChild, L"Media player not found. Please check the player path in Settings.", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Player path valid, continuing");
 
     int sel = (int)SendMessage(tab.hQualities, LB_GETCURSEL, 0, 0);
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Quality selection index: " + std::to_wstring(sel));
     if (sel == LB_ERR) {
+        AddDebugLog(L"***TEST*** WATCHSTREAM: No quality selected - showing error and returning");
         MessageBoxW(tab.hChild, L"Select a quality.", L"Error", MB_OK | MB_ICONERROR);
         return;
     }
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Quality selected, getting quality text");
+    
     wchar_t qual[64];
     SendMessage(tab.hQualities, LB_GETTEXT, sel, (LPARAM)qual);
     qual[63] = L'\0'; // Ensure null termination
+    
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Quality text retrieved: " + std::wstring(qual));
     
     // Find the original quality name from the standardized name
     std::wstring standardQuality = qual;
@@ -887,6 +898,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     } else {
         originalQuality = standardQuality; // fallback
     }
+    
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Quality mapping complete - Standard: " + standardQuality + L", Original: " + originalQuality);
     
     auto it = tab.qualityToUrl.find(originalQuality);
     if (it == tab.qualityToUrl.end()) {
@@ -908,24 +921,29 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     }
     AddDebugLog(L"WatchStream: Starting new stream " + tab.channel + L" when " + std::to_wstring(active_streams) + 
                L" streams already active:" + active_channels);
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Ready to start new stream");
     
     // Add small delay between stream starts to reduce resource contention
     if (active_streams > 0) {
         AddDebugLog(L"WatchStream: Adding startup delay for multi-stream scenario");
+        AddDebugLog(L"***TEST*** WATCHSTREAM: Adding multi-stream startup delay");
         std::this_thread::sleep_for(std::chrono::milliseconds(1000 + active_streams * 500));
     }
     
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Resetting cancel token and user stop flag");
     // Reset cancel token and user requested stop flag
     tab.cancelToken = false;
     tab.userRequestedStop = false;
     
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
+    AddDebugLog(L"***TEST*** WATCHSTREAM: About to create stream thread");
     
     // TSDuck TS Mode is now the default streaming mode
     StreamingMode mode = StreamingMode::TRANSPORT_STREAM;
     
     AddLog(L"[TS_MODE] Starting TSDuck transport stream routing for " + tab.channel + L" (" + standardQuality + L")");
+    AddDebugLog(L"***TEST*** WATCHSTREAM: About to call StartStreamThread");
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -948,6 +966,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     );
     
     AddDebugLog(L"WatchStream: Stream thread created successfully for tab " + std::to_wstring(tabIndex));
+    AddDebugLog(L"***TEST*** WATCHSTREAM: StartStreamThread call completed successfully");
     
     tab.isStreaming = true;
     tab.playerStarted = false;
@@ -961,6 +980,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     UpdateStatusBar(L"Buffer: Buffering... | Frame Tagging Active");
     
     AddDebugLog(L"WatchStream: UI updated, stream starting for tab " + std::to_wstring(tabIndex));
+    AddDebugLog(L"***TEST*** WATCHSTREAM: Function complete - UI updated and timers set");
     
     // Set a timer to update the button text after 3 seconds (player should be started by then)
     SetTimer(g_hMainWnd, TIMER_PLAYER_CHECK, 3000, nullptr);
