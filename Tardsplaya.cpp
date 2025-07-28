@@ -939,10 +939,10 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
     AddDebugLog(L"***TEST*** WATCHSTREAM: About to create stream thread");
     
-    // TSDuck TS Mode is now the default streaming mode
-    StreamingMode mode = StreamingMode::TRANSPORT_STREAM;
+    // Use traditional HLS streaming with Datapath IPC for high performance
+    StreamingMode mode = StreamingMode::HLS_SEGMENTS;
     
-    AddLog(L"[TS_MODE] Starting TSDuck transport stream routing for " + tab.channel + L" (" + standardQuality + L")");
+    AddLog(L"[DATAPATH_HLS] Starting high-performance streaming with Datapath IPC for " + tab.channel + L" (" + standardQuality + L")");
     AddDebugLog(L"***TEST*** WATCHSTREAM: About to call StartStreamThread");
     
     // Start the buffering thread
