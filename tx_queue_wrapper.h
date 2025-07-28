@@ -29,7 +29,9 @@ namespace qcstudio {
 
     using namespace std;
 
-    constexpr auto CACHE_LINE_SIZE = std::hardware_destructive_interference_size;
+    // Use a compile-time constant for cache line size since std::hardware_destructive_interference_size
+    // is not always a constant expression in MSVC
+    constexpr size_t CACHE_LINE_SIZE = 64;
 
     class base_tx_queue_t {
     public:
