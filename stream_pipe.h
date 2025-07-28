@@ -20,18 +20,7 @@ bool BufferAndPipeStreamToPlayer(
     HANDLE* player_process_handle = nullptr // Optional pointer to store player process handle
 );
 
-// NEW: Datapath-based IPC implementation for improved performance
-// This function uses the Datapath library for high-performance IPC to media players
-bool BufferAndPipeStreamToPlayerDatapath(
-    const std::wstring& player_path,
-    const std::wstring& playlist_url,
-    std::atomic<bool>& cancel_token,
-    int buffer_segments = 3,
-    const std::wstring& channel_name = L"",
-    std::atomic<int>* chunk_count = nullptr,
-    const std::wstring& selected_quality = L"",
-    HANDLE* player_process_handle = nullptr
-);
+// NOTE: BufferAndPipeStreamToPlayerDatapath is now declared in datapath_ipc.h
 
 // Legacy Windows pipes implementation (preserved for compatibility)
 bool BufferAndPipeStreamToPlayerLegacy(
