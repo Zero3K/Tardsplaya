@@ -50,6 +50,19 @@ struct StreamSegment {
         }
         return calculated == checksum;
     }
+    
+    // Check if data contains valid MPEG-TS packets (sync byte 0x47)
+    bool has_valid_ts_headers() const {
+        if (data.size() < 188) return false; // Minimum TS packet size
+        
+        // Check for TS sync bytes at 188-byte intervals
+        for (size_t i = 0; i < data.size() - 188; i += 188) {
+            if (static_cast<unsigned char>(data[i]) != 0x47) {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 // TX-Queue based IPC manager for high-performance streaming

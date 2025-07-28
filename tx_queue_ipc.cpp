@@ -327,8 +327,9 @@ bool NamedPipeManager::CreatePlayerProcess(const std::wstring& channel_name) {
                    L"\" --file-caching=5000 -";
     } else if (player_path_.find(L"mpc") != std::wstring::npos || 
                player_path_.find(L"MPC") != std::wstring::npos) {
-        // For MPC-HC/BE, use specific parameters to help with stream format detection
-        cmd_line = L"\"" + player_path_ + L"\" - /play";
+        // For MPC-HC/BE, use optimized parameters for stdin streaming
+        // /dubdelay helps with sync, /audiorenderer can help with buffering
+        cmd_line = L"\"" + player_path_ + L"\" /play /dubdelay 0 -";
         use_named_pipe_ = false;
     } else {
         // Generic player - use stdin
@@ -347,7 +348,12 @@ bool NamedPipeManager::CreatePlayerProcess(const std::wstring& channel_name) {
         HANDLE hStdinRead, hStdinWrite;
         SECURITY_ATTRIBUTES saAttr = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
         
-        if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, 1024 * 1024)) { // 1MB buffer
+        // Use larger pipe buffer for MPC-HC to improve streaming reliability
+        DWORD pipe_buffer_size = (player_path_.find(L"mpc") != std::wstring::npos || 
+                                 player_path_.find(L"MPC") != std::wstring::npos) ? 
+                                (4 * 1024 * 1024) : (1024 * 1024); // 4MB for MPC-HC, 1MB for others
+        
+        if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, pipe_buffer_size)) {
             AddDebugLog(L"[PIPE] Failed to create stdin pipe");
             return false;
         }
@@ -568,13 +574,15 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
     
     StreamSegment segment;
     bool initial_buffer_filled = false;
-    const int initial_buffer_size = 8; // Increased buffer for MPC-HC
     
     // For MPC-HC, collect multiple segments before writing
     bool is_mpc = (player_path_.find(L"mpc") != std::wstring::npos || 
                    player_path_.find(L"MPC") != std::wstring::npos);
+    
+    // Different initial buffer sizes based on player
+    const int initial_buffer_size = is_mpc ? 12 : 8; // Larger buffer for MPC-HC stability
     std::vector<char> combined_buffer;
-    const size_t max_combined_size = 2 * 1024 * 1024; // 2MB max buffer
+    const size_t max_combined_size = is_mpc ? (3 * 1024 * 1024) : (2 * 1024 * 1024); // 3MB for MPC-HC, 2MB for others
     
     while (!should_stop_.load() && (!cancel_token_ptr_ || !cancel_token_ptr_->load())) {
         // Try to consume a segment from tx-queue
@@ -616,7 +624,9 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             auto stats = GetStats();
             if ((stats.segments_produced - stats.segments_consumed) >= initial_buffer_size) {
                 initial_buffer_filled = true;
-                LogMessage(L"[CONSUMER] Initial buffer filled, starting playback");
+                LogMessage(L"[CONSUMER] Initial buffer filled (" + 
+                          std::to_wstring(stats.segments_produced - stats.segments_consumed) + 
+                          L" segments), starting playback");
             } else {
                 LogMessage(L"[CONSUMER] Waiting for initial buffer to fill...");
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -626,17 +636,44 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
         
         if (initial_buffer_filled && !segment.data.empty()) {
             if (is_mpc) {
+                // For MPC-HC: Validate TS format before adding to buffer
+                if (!segment.has_valid_ts_headers()) {
+                    LogMessage(L"[CONSUMER] WARNING: Invalid TS headers detected, skipping segment #" + 
+                              std::to_wstring(segment.sequence_number));
+                    continue;
+                }
+                
                 // For MPC-HC: Combine segments into larger chunks for better compatibility
                 combined_buffer.insert(combined_buffer.end(), segment.data.begin(), segment.data.end());
                 
-                // Write when buffer is large enough or after timeout
-                if (combined_buffer.size() >= max_combined_size || 
-                    (combined_buffer.size() >= 512 * 1024 && segment.data.size() < 100 * 1024)) {
-                    
+                // Track if this is the first write to MPC-HC
+                static bool first_write_done = false;
+                
+                // More aggressive buffering for MPC-HC - wait for larger chunks or timeout
+                bool should_write = false;
+                if (combined_buffer.size() >= max_combined_size) {
+                    should_write = true; // Hit max buffer size
+                } else if (!first_write_done && combined_buffer.size() >= 512 * 1024) { // First write at 512KB
+                    should_write = true; // Send first chunk quickly for format detection
+                } else if (first_write_done && combined_buffer.size() >= 1024 * 1024) { // Subsequent writes at 1MB minimum
+                    // Check if we have a significant pause in new data
+                    auto stats = GetStats();
+                    if ((stats.segments_produced - stats.segments_consumed) < 3) {
+                        should_write = true; // Queue is getting low, send what we have
+                    }
+                }
+                
+                if (should_write) {
                     if (pipe_manager_->WriteToPlayer(combined_buffer.data(), combined_buffer.size())) {
                         bytes_transferred_ += combined_buffer.size();
-                        LogMessage(L"[CONSUMER] Fed combined buffer to MPC-HC (" + 
-                                  std::to_wstring(combined_buffer.size()) + L" bytes)");
+                        if (!first_write_done) {
+                            LogMessage(L"[CONSUMER] Fed FIRST buffer to MPC-HC (" + 
+                                      std::to_wstring(combined_buffer.size()) + L" bytes) for format detection");
+                            first_write_done = true;
+                        } else {
+                            LogMessage(L"[CONSUMER] Fed combined buffer to MPC-HC (" + 
+                                      std::to_wstring(combined_buffer.size()) + L" bytes)");
+                        }
                     } else {
                         LogMessage(L"[CONSUMER] Failed to write to MPC-HC - may have disconnected");
                         if (!pipe_manager_->IsPlayerRunning()) {
@@ -663,8 +700,12 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
         }
         
         // Adaptive timing based on segment size and player type
-        if (is_mpc && !combined_buffer.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20)); // Faster for MPC-HC buffering
+        if (is_mpc) {
+            if (!combined_buffer.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Faster buffering for MPC-HC
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(25)); // Slightly slower when buffer is empty
+            }
         } else if (segment.data.size() > 100 * 1024) { // >100KB = normal content
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         } else { // Small segment = likely ad content
