@@ -25,20 +25,19 @@ A Twitch stream player for Windows with enhanced TLS support.
 
 The Datapath IPC system replaces traditional Windows pipes with a high-performance IPC library:
 
-- `datapath_ipc.h/cpp` - Main Datapath IPC implementation
-- `datapath_bridge.h/cpp` - Bridge utility for stdin-based media players
-- `DatapathBridge.exe` - Standalone bridge executable
+- `datapath_ipc.h/cpp` - Main Datapath IPC implementation with integrated named pipe support
 - Enhanced multi-stream support with unique named paths per channel
 - Event-driven asynchronous architecture for better responsiveness
 
 ### Usage
 
 ```
-# Named Pipe Mode (default)
+# Named Pipe Mode (default and only mode)
 Media Player connects to: \\.\pipe\TardsplayaStream_<channel_name>
 
-# Stdin Mode (via bridge)
-DatapathBridge.exe TardsplayaDatapath_<channel> | mpv.exe -
+# Examples:
+mpv.exe \\.\pipe\TardsplayaStream_channelname
+vlc.exe \\.\pipe\TardsplayaStream_channelname
 ```
 
 ## TSDuck Integration for Enhanced Performance

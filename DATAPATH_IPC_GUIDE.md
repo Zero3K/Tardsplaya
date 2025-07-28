@@ -18,14 +18,12 @@ This document describes the new Datapath-based IPC implementation that replaces 
 
 1. **DatapathIPC Class**: Main IPC implementation using Datapath library
 2. **Named Pipe Bridge**: Translates Datapath data to named pipes for media player compatibility
-3. **DatapathBridge Utility**: Standalone executable for media players that need stdin input
-4. **Legacy Fallback**: Original Windows pipe implementation preserved for compatibility
+3. **Legacy Fallback**: Original Windows pipe implementation preserved for compatibility
 
 ### Data Flow
 
 ```
 HLS Stream → Tardsplaya → Datapath Server → Named Pipe → Media Player
-                     ↘ → Datapath Client → stdout → Media Player (via bridge)
 ```
 
 ## Configuration
@@ -67,15 +65,9 @@ Tardsplaya creates: \\.\pipe\TardsplayaStream_<channel_name>
 Media Player command: mpv.exe \\.\pipe\TardsplayaStream_<channel_name>
 ```
 
-### Scenario 2: Stdin-Based Media Players
+The named pipe is created automatically when streaming starts and remains available until streaming stops.
 
-For media players that read from stdin, use the DatapathBridge utility:
-
-```
-DatapathBridge.exe TardsplayaDatapath_<channel>_<timestamp> | mpv.exe -
-```
-
-### Scenario 3: Custom Integration
+### Scenario 2: Custom Integration
 
 For applications with direct Datapath support:
 
@@ -94,10 +86,9 @@ socket->on_message.add([](const std::vector<char>& data) {
 
 ### Visual Studio Projects
 
-The solution includes two projects:
+The solution includes the main application:
 
-1. **Tardsplaya.vcxproj**: Main application with Datapath integration
-2. **DatapathBridge.vcxproj**: Standalone bridge utility
+1. **Tardsplaya.vcxproj**: Main application with integrated Datapath IPC and named pipe support
 
 ### Dependencies
 
@@ -124,16 +115,6 @@ datapath\source
 - `size_t GetBufferSize()`: Get current buffer size
 - `std::wstring GetStatusInfo()`: Get status information
 
-### DatapathBridge Utility
-
-#### Command Line
-
-```
-DatapathBridge.exe <datapath_server_name> [output_file]
-```
-
-- `datapath_server_name`: Name of Datapath server to connect to
-- `output_file`: Optional file output (default: stdout)
 
 ## Error Handling
 
