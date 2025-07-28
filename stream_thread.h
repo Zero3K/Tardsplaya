@@ -15,7 +15,8 @@ void AddDebugLog(const std::wstring& msg);
 // Streaming mode enumeration
 enum class StreamingMode {
     HLS_SEGMENTS,      // Traditional HLS segment-based streaming (fallback)
-    TRANSPORT_STREAM   // TSDuck-inspired transport stream routing (default)
+    TRANSPORT_STREAM,  // TSDuck-inspired transport stream routing 
+    TX_QUEUE_IPC      // NEW: TX-Queue based IPC streaming (high-performance)
 };
 
 // Launches a thread to buffer and pipe the stream.
@@ -33,7 +34,7 @@ std::thread StartStreamThread(
     HWND main_window = nullptr,
     size_t tab_index = 0,
     const std::wstring& selected_quality = L"",
-    StreamingMode mode = StreamingMode::TRANSPORT_STREAM,
+    StreamingMode mode = StreamingMode::TX_QUEUE_IPC,
     HANDLE* player_process_handle = nullptr
 );
 

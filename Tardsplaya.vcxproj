@@ -110,7 +110,6 @@
     <ClCompile Include="stream_memory_map.cpp" />
     <ClCompile Include="stream_pipe.cpp" />
     <ClCompile Include="stream_resource_manager.cpp" />
-
     <ClCompile Include="stream_thread.cpp" />
     <ClCompile Include="Tardsplaya.cpp" />
     <ClCompile Include="tlsclient\tlsclient.cpp" />
@@ -118,6 +117,7 @@
     <ClCompile Include="tsduck_hls_wrapper.cpp" />
     <ClCompile Include="tsduck_transport_router.cpp" />
     <ClCompile Include="twitch_api.cpp" />
+    <ClCompile Include="tx_queue_ipc.cpp" />
     <ClCompile Include="urlencode.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -129,13 +129,14 @@
     <ClInclude Include="stream_memory_map.h" />
     <ClInclude Include="stream_pipe.h" />
     <ClInclude Include="stream_resource_manager.h" />
-
     <ClInclude Include="stream_thread.h" />
     <ClInclude Include="tlsclient\tls.h" />
     <ClInclude Include="tlsclient\tlsclient.h" />
     <ClInclude Include="tsduck_hls_wrapper.h" />
     <ClInclude Include="tsduck_transport_router.h" />
     <ClInclude Include="twitch_api.h" />
+    <ClInclude Include="tx_queue_ipc.h" />
+    <ClInclude Include="tx_queue_wrapper.h" />
     <ClInclude Include="urlencode.h" />
   </ItemGroup>
   <ItemGroup>
@@ -143,6 +144,9 @@
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="Tardsplaya.manifest" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="tx-queue-impl.inl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

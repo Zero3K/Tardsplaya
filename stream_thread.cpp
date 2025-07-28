@@ -2,6 +2,7 @@
 #include "stream_pipe.h"
 #include "tsduck_transport_router.h"
 #include "stream_resource_manager.h"
+#include "tx_queue_ipc.h"
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
@@ -18,6 +19,123 @@ std::thread StartStreamThread(
     StreamingMode mode,
     HANDLE* player_process_handle
 ) {
+    // Check for TX-Queue IPC mode (new high-performance mode)
+    if (mode == StreamingMode::TX_QUEUE_IPC) {
+        return std::thread([=, &cancel_token]() mutable {
+            if (log_callback)
+                log_callback(L"Starting TX-Queue IPC streaming thread for " + channel_name);
+            
+            AddDebugLog(L"StartStreamThread: TX-Queue IPC mode - Channel=" + channel_name + 
+                       L", Tab=" + std::to_wstring(tab_index) + 
+                       L", BufferSegs=" + std::to_wstring(buffer_segments));
+            
+            try {
+                // Create TX-Queue stream manager
+                auto stream_manager = std::make_unique<tardsplaya::TxQueueStreamManager>(player_path, channel_name);
+                
+                // Initialize the streaming system
+                if (!stream_manager->Initialize()) {
+                    if (log_callback) {
+                        log_callback(L"[TX-QUEUE] Failed to initialize streaming system");
+                    }
+                    return;
+                }
+                
+                // Store player process handle if pointer provided
+                if (player_process_handle) {
+                    *player_process_handle = stream_manager->GetPlayerProcess();
+                }
+                
+                // Start streaming
+                if (!stream_manager->StartStreaming(playlist_url, cancel_token, log_callback, chunk_count)) {
+                    if (log_callback) {
+                        log_callback(L"[TX-QUEUE] Failed to start streaming");
+                    }
+                    return;
+                }
+                
+                if (log_callback) {
+                    log_callback(L"[TX-QUEUE] TX-Queue IPC streaming active for " + channel_name);
+                }
+                
+                // Monitor streaming while active
+                while (stream_manager->IsStreaming() && !cancel_token.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    
+                    // Report statistics
+                    auto stats = stream_manager->GetStats();
+                    
+                    // Update chunk count for status bar
+                    if (chunk_count) {
+                        *chunk_count = static_cast<int>(stats.segments_produced - stats.segments_consumed);
+                    }
+                    
+                    // Periodic logging with detailed statistics
+                    if (log_callback && stats.segments_produced % 10 == 0 && stats.segments_produced > 0) {
+                        std::wstring status_msg = L"[TX-QUEUE] Segments: " + std::to_wstring(stats.segments_produced) + 
+                                   L" produced, " + std::to_wstring(stats.segments_consumed) + L" consumed";
+                        
+                        if (stats.segments_dropped > 0) {
+                            status_msg += L", " + std::to_wstring(stats.segments_dropped) + L" dropped";
+                        }
+                        
+                        status_msg += L", " + std::to_wstring(stats.bytes_transferred / 1024) + L"KB transferred";
+                        
+                        if (!stats.player_running) {
+                            status_msg += L" [PLAYER_DEAD]";
+                        }
+                        if (!stats.queue_ready) {
+                            status_msg += L" [QUEUE_ERROR]";
+                        }
+                        
+                        log_callback(status_msg);
+                    }
+                    
+                    // Check if player died
+                    if (!stats.player_running) {
+                        if (log_callback) {
+                            log_callback(L"[TX-QUEUE] Player process died, stopping streaming");
+                        }
+                        break;
+                    }
+                }
+                
+                // Stop streaming
+                stream_manager->StopStreaming();
+                
+                if (log_callback) {
+                    log_callback(L"[TX-QUEUE] TX-Queue IPC streaming completed for " + channel_name);
+                }
+                
+            } catch (const std::exception& e) {
+                std::string error_msg = e.what();
+                if (log_callback) {
+                    log_callback(L"[TX-QUEUE] Error: " + std::wstring(error_msg.begin(), error_msg.end()));
+                }
+                AddDebugLog(L"StartStreamThread: TX-Queue exception: " + 
+                           std::wstring(error_msg.begin(), error_msg.end()));
+            }
+            
+            AddDebugLog(L"StartStreamThread: TX-Queue stream finished, Channel=" + channel_name + 
+                       L", Tab=" + std::to_wstring(tab_index));
+            
+            if (log_callback) {
+                bool user_stopped = user_requested_stop && user_requested_stop->load();
+                
+                if (user_stopped) {
+                    log_callback(L"[TX-QUEUE] Streaming stopped by user.");
+                } else {
+                    log_callback(L"[TX-QUEUE] Stream ended normally.");
+                    // Post auto-stop message for this specific tab
+                    if (main_window && tab_index != SIZE_MAX) {
+                        AddDebugLog(L"StartStreamThread: Posting auto-stop for tab " + std::to_wstring(tab_index));
+                        PostMessage(main_window, WM_USER + 2, (WPARAM)tab_index, 0);
+                    }
+                }
+            }
+        });
+    }
+    
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
         // For low-latency streaming, use smaller buffers to reduce delay

@@ -9,85 +9,54 @@ A Twitch stream player for Windows with enhanced TLS support.
 - Windows 7+ compatibility
 - **Enhanced TLS Client Support** - Custom TLS implementation for better compatibility with older Windows versions
 
-## TSDuck Integration for Enhanced Performance
+## TX-Queue IPC Integration for Enhanced Performance
 
-This version includes **TSDuck-inspired HLS processing** for improved streaming performance and reduced lag.
+**TX-Queue IPC Mode** - Advanced high-performance inter-process communication system:
 
-### Performance Enhancements
+- **Lock-Free Queues**: Uses tx-queue's transactional lock-free circular queues for maximum throughput
+- **Producer/Consumer Pattern**: Separate threads for downloading segments and feeding to media player
+- **Named Pipe Integration**: Maintains compatibility with media players via stdin piping  
+- **Checksum Validation**: Built-in data integrity verification for reliable streaming
+- **Zero-Copy Operations**: Minimizes memory allocations and data copying
+- **Cross-Stream Isolation**: Each stream uses independent tx-queue for optimal multi-stream performance
 
-- **Advanced HLS Parsing**: TSDuck-inspired playlist analysis with precise timing calculations
-- **Smart Buffering**: Dynamic buffer sizing based on stream characteristics
-- **Enhanced Ad Detection**: Sophisticated SCTE-35 and pattern-based ad detection
-- **Optimized Timing**: Better segment timing for smoother playback
+### TX-Queue Technical Details
 
-### NEW: Frame Number Tagging for Lag Reduction
+The TX-Queue integration includes:
 
-**Frame Number Tagging** - Advanced frame tracking and monitoring system:
-
-- **Frame Sequence Tracking**: Each transport stream packet receives unique frame numbers for precise ordering
-- **Drop Detection**: Automatically detects and reports dropped frames that can cause lag
-- **Duplicate Detection**: Identifies duplicate or reordered frames that may indicate network issues  
-- **Key Frame Identification**: Marks I-frames and key frames for better buffering decisions
-- **Real-time Statistics**: Displays current FPS, frame drops, and timing information
-- **Lag Analysis**: Provides detailed frame timing data to help identify lag sources
-
-### Technical Details
-
-Frame Number Tagging enhances the existing TSDuck transport stream system:
-
-- **TSPacket Enhancement**: Added frame numbering, timing, and metadata to each packet
-- **HLS Converter Integration**: Assigns frame numbers during segment conversion
-- **Statistical Monitoring**: Tracks frame rates, drops, and timing across all streams
-- **Debug Logging**: Detailed frame information for troubleshooting lag issues
-- **Status Display**: Real-time frame statistics in the status bar
-
-- **Stream Re-routing**: Routes HLS streams through transport stream format to media players
-- **Built-in by Default**: TSDuck TS Mode is now the standard streaming method
-- **Smart Buffering**: Packet-level buffering (~5000 packets default, ~940KB) for smoother playback
-- **PAT/PMT Generation**: Proper MPEG-TS structure with Program Association and Program Map tables
-- **PCR Insertion**: Program Clock Reference timing for better synchronization
-
-### Technical Details
-
-The TSDuck integration includes:
-
-- `tsduck_hls_wrapper.h/cpp` - Lightweight TSDuck-inspired HLS parser
-- `tsduck_transport_router.h/cpp` - **NEW** Transport stream re-routing engine
-- Enhanced playlist analysis with precise duration calculations  
-- Dynamic buffer optimization based on stream characteristics
-- Advanced ad detection using multiple detection patterns
-- SCTE-35 processing for professional-grade ad handling
+- `tx_queue_ipc.h/cpp` - High-level IPC management with tx-queue integration
+- `tx_queue_wrapper.h` - Wrapper for tx-queue headers with proper Windows compatibility
+- Enhanced segment buffering with transactional semantics
+- Real-time statistics and performance monitoring
+- Adaptive buffer sizing based on stream characteristics
 
 ### Performance Benefits
 
 | Feature | Before | After |
 |---------|--------|--------|
-| Buffer Management | Static 3 segments | Dynamic 2-8 segments based on content |
-| Ad Detection | Basic pattern matching | TSDuck-style multi-pattern analysis |
-| Timing Precision | Basic duration parsing | Millisecond-precise calculations |
-| Lag Reduction | Manual tuning | Automatic optimization + Frame Number Tagging |
-| **Frame Tracking** | **No frame monitoring** | **Real-time frame numbering and drop detection** |
-| **Lag Analysis** | **Basic logging only** | **Detailed frame statistics and timing data** |
-| **Stream Format** | **HLS segments only** | **HLS segments + Transport Stream routing** |
-| **Player Compatibility** | **Basic stdin piping** | **Professional TS format support** |
+| IPC Method | `std::queue` with mutexes | Lock-free tx-queue transactions |
+| Memory Efficiency | Standard allocations | Cache-line aligned zero-copy operations |
+| Thread Safety | Mutex-based synchronization | Lock-free atomic operations |
+| **Multi-Stream Performance** | **Degrades with concurrent streams** | **Scales linearly with isolated tx-queues** |
+| **Data Integrity** | **Basic error handling** | **Built-in checksum validation** |
+| **Throughput** | **Limited by lock contention** | **High-performance lock-free design** |
 
 The integration works transparently:
-1. **Primary**: TSDuck-enhanced parsing for optimal performance
-2. **Fallback**: Original parsing if TSDuck analysis fails
-3. **Dynamic**: Buffer sizes adjust automatically based on content
-4. **NEW**: Optional transport stream re-routing for professional media players
+1. **Primary**: TX-Queue IPC mode for optimal performance (default)
+2. **Fallback**: TSDuck transport stream mode for professional compatibility  
+3. **Legacy**: Traditional HLS segment streaming for maximum compatibility
 
-### TSDuck Transport Stream Mode (Default)
+### TX-Queue IPC Mode (Default)
 
-**Default Streaming Mode**: TSDuck TS Mode is now the standard streaming method:
+**Default Streaming Mode**: TX-Queue IPC Mode is now the standard streaming method:
 
-- **Automatic Conversion**: HLS segments → MPEG Transport Stream packets
-- **Professional Format**: Standard broadcast-quality TS format
-- **Enhanced Buffering**: Packet-level buffering instead of segment buffering  
-- **Better Compatibility**: Works with professional media players expecting TS format
-- **Reduced Latency**: Continuous stream instead of segment-based delivery
+- **High-Performance IPC**: Lock-free producer/consumer queues between download and playback threads
+- **Transactional Semantics**: Guaranteed data integrity with automatic rollback on errors
+- **Named Pipe Output**: Maintains compatibility with all media players expecting stdin input
+- **Adaptive Buffering**: Dynamic buffer sizing based on stream characteristics and system load
+- **Zero-Copy Design**: Minimizes memory allocations and data movement
 
-TSDuck TS Mode provides superior performance and compatibility compared to traditional HLS segment streaming.
+TX-Queue IPC Mode provides superior performance and reliability compared to traditional mutex-based streaming.
 
 ## TLS Client Integration
 
