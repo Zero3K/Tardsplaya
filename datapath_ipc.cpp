@@ -245,6 +245,7 @@ bool DatapathIPC::StartStreaming(
     std::set<std::wstring> seen_urls;
     int consecutive_errors = 0;
     const int max_consecutive_errors = 15;
+    bool sequence_initialized = false;
 
     while (!cancel_token.load() && !should_stop_.load() && consecutive_errors < max_consecutive_errors) {
         // Download playlist
@@ -273,6 +274,19 @@ bool DatapathIPC::StartStreaming(
         AddDebugLog(L"DatapathIPC::StartStreaming: Parsed " + std::to_wstring(segments.size()) + 
                    L" segments from playlist, should_clear_buffer=" + (should_clear_buffer ? L"true" : L"false"));
 
+        // Initialize sequence tracking on first playlist parse or discontinuity
+        if (!sequence_initialized || should_clear_buffer) {
+            if (!segments.empty()) {
+                std::lock_guard<std::mutex> lock(sequence_mutex_);
+                next_expected_sequence_ = segments[0].sequence_number;
+                last_processed_sequence_ = segments[0].sequence_number - 1;
+                sequence_initialized = true;
+                AddDebugLog(L"DatapathIPC::StartStreaming: Initialized sequence tracking - next_expected=" + 
+                           std::to_wstring(next_expected_sequence_) + L", last_processed=" + 
+                           std::to_wstring(last_processed_sequence_));
+            }
+        }
+
         // Handle discontinuities by clearing buffers
         if (should_clear_buffer) {
             AddDebugLog(L"DatapathIPC::StartStreaming: Clearing buffers due to discontinuity");
@@ -287,13 +301,7 @@ bool DatapathIPC::StartStreaming(
                 std::lock_guard<std::mutex> lock(sequence_mutex_);
                 sequence_ordered_segments_.clear();
                 seen_urls.clear();
-                // Reset sequence tracking on discontinuity
-                if (!segments.empty()) {
-                    next_expected_sequence_ = segments[0].sequence_number;
-                    last_processed_sequence_ = segments[0].sequence_number - 1;
-                    AddDebugLog(L"DatapathIPC::StartStreaming: Reset sequence tracking to " + 
-                               std::to_wstring(next_expected_sequence_));
-                }
+                // Note: sequence tracking was already reset above in the initialization block
             }
         }
 
