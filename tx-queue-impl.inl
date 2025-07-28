@@ -132,21 +132,32 @@ QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const void* _buffer, uint64_t
 }
 
 template<typename QTYPE>
+template<typename QTYPE>
 template<typename T>
-QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T& _item) -> bool {
-    // Use C++14 compatible type checking instead of if constexpr
-    return std::is_same<T, string>::value ? 
-        imp_write(_item.data(), _item.length()) :
-        imp_write(&_item, sizeof(T));
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T& _item) 
+    -> typename std::enable_if<std::is_same<T, string>::value, bool>::type {
+    return imp_write(_item.data(), _item.length());
+}
+
+template<typename QTYPE>
+template<typename T>
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T& _item) 
+    -> typename std::enable_if<!std::is_same<T, string>::value, bool>::type {
+    return imp_write(&_item, sizeof(T));
 }
 
 template<typename QTYPE>
 template<typename T, uint64_t N>
-QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T (&_array)[N]) -> bool {
-    // Use C++14 compatible type checking instead of if constexpr
-    return (std::is_same<T, char>::value || std::is_same<T, wchar_t>::value) ?
-        (N > 1 && imp_write(&_array[0], (N - 1) * sizeof(T))) :  // no "\0" included
-        imp_write(&_array[0], N * sizeof(T));
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T (&_array)[N]) 
+    -> typename std::enable_if<std::is_same<T, char>::value || std::is_same<T, wchar_t>::value, bool>::type {
+    return N > 1 && imp_write(&_array[0], (N - 1) * sizeof(T));  // no "\0" included
+}
+
+template<typename QTYPE>
+template<typename T, uint64_t N>
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T (&_array)[N]) 
+    -> typename std::enable_if<!(std::is_same<T, char>::value || std::is_same<T, wchar_t>::value), bool>::type {
+    return imp_write(&_array[0], N * sizeof(T));
 }
 
 template<typename QTYPE>
