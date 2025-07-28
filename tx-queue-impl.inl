@@ -206,7 +206,8 @@ QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::imp_write(const void* _buffer, uint
 
     // reset producer_core_ to -1 only if it was previously set (i.e., not -1)
 
-    if (auto prev_core = reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.producer_core_)->load(std::memory_order_relaxed); prev_core != -1) {
+    auto prev_core = reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.producer_core_)->load(std::memory_order_relaxed);
+    if (prev_core != -1) {
         reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.producer_core_)->store(-1, std::memory_order_relaxed);
     }
 
@@ -316,7 +317,8 @@ QCS_INLINE auto qcstudio::tx_read_t<QTYPE>::imp_read(void* _buffer, uint64_t _si
 
     // reset producer_core_ to -1 only if it was previously set (i.e., not -1)
 
-    if (auto prev_core = reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.consumer_core_)->load(std::memory_order_relaxed); prev_core != -1) {
+    auto prev_core = reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.consumer_core_)->load(std::memory_order_relaxed);
+    if (prev_core != -1) {
         reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.consumer_core_)->store(-1, std::memory_order_relaxed);
     }
 
