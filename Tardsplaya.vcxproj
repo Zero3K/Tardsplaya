@@ -79,6 +79,7 @@
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <LanguageStandard_C>Default</LanguageStandard_C>
+      <AdditionalIncludeDirectories>$(ProjectDir)pipeline\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <TargetMachine>MachineX86</TargetMachine>
@@ -94,6 +95,7 @@
       <WarningLevel>Level3</WarningLevel>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <LanguageStandard_C>Default</LanguageStandard_C>
+      <AdditionalIncludeDirectories>$(ProjectDir)pipeline\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <TargetMachine>MachineX86</TargetMachine>
@@ -106,6 +108,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="favorites.cpp" />
+    <ClCompile Include="pipeline\src\pipeline.cpp" />
+    <ClCompile Include="pipeline\src\pipeline_node.cpp" />
+    <ClCompile Include="pipeline\src\pipeline_nodes.cpp" />
+    <ClCompile Include="pipeline\src\pipeline_pad.cpp" />
+    <ClCompile Include="pipeline\src\pipeline_pads.cpp" />
+    <ClCompile Include="pipeline_manager.cpp" />
     <ClCompile Include="playlist_parser.cpp" />
     <ClCompile Include="stream_memory_map.cpp" />
     <ClCompile Include="stream_pipe.cpp" />
@@ -123,6 +131,15 @@
   <ItemGroup>
     <ClInclude Include="favorites.h" />
     <ClInclude Include="json_minimal.h" />
+    <ClInclude Include="pipeline\include\pipeline\pipeline.h" />
+    <ClInclude Include="pipeline\include\pipeline\pipeline_node.h" />
+    <ClInclude Include="pipeline\include\pipeline\pipeline_nodes.h" />
+    <ClInclude Include="pipeline\include\pipeline\pipeline_packet.h" />
+    <ClInclude Include="pipeline\include\pipeline\pipeline_pad.h" />
+    <ClInclude Include="pipeline\include\pipeline\pipeline_pads.h" />
+    <ClInclude Include="pipeline_manager.h" />
+    <ClInclude Include="pipeline_stream_nodes.h" />
+    <ClInclude Include="pipeline_stream_packets.h" />
     <ClInclude Include="tlsclient\lock.h" />
     <ClInclude Include="playlist_parser.h" />
     <ClInclude Include="resource.h" />

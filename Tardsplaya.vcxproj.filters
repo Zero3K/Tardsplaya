@@ -16,10 +16,37 @@
     <Filter Include="TLSClient">
       <UniqueIdentifier>{B12AB1C2-D345-4567-8901-234567890ABC}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Pipeline Library">
+      <UniqueIdentifier>{C23BC2D3-E456-5678-9012-345678901DEF}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Pipeline Library\Core">
+      <UniqueIdentifier>{D34CD3E4-F567-6789-0123-456789012EF0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Pipeline Library\Streaming">
+      <UniqueIdentifier>{E45DE4F5-G678-7890-1234-567890123F01}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="favorites.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline\src\pipeline.cpp">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline\src\pipeline_node.cpp">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline\src\pipeline_nodes.cpp">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline\src\pipeline_pad.cpp">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline\src\pipeline_pads.cpp">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="pipeline_manager.cpp">
+      <Filter>Pipeline Library\Streaming</Filter>
     </ClCompile>
     <ClCompile Include="playlist_parser.cpp">
       <Filter>Source Files</Filter>
@@ -51,10 +78,43 @@
     <ClCompile Include="tlsclient\tlsclient_source.cpp">
       <Filter>TLSClient</Filter>
     </ClCompile>
+    <ClCompile Include="tsduck_hls_wrapper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tsduck_transport_router.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="favorites.h">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline\include\pipeline\pipeline.h">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline\include\pipeline\pipeline_node.h">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline\include\pipeline\pipeline_nodes.h">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline\include\pipeline\pipeline_packet.h">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline\include\pipeline\pipeline_pad.h">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline\include\pipeline\pipeline_pads.h">
+      <Filter>Pipeline Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline_manager.h">
+      <Filter>Pipeline Library\Streaming</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline_stream_nodes.h">
+      <Filter>Pipeline Library\Streaming</Filter>
+    </ClInclude>
+    <ClInclude Include="pipeline_stream_packets.h">
+      <Filter>Pipeline Library\Streaming</Filter>
     </ClInclude>
     <ClInclude Include="playlist_parser.h">
       <Filter>Header Files</Filter>
@@ -91,6 +151,12 @@
     </ClInclude>
     <ClInclude Include="tlsclient\tlsclient.h">
       <Filter>TLSClient</Filter>
+    </ClInclude>
+    <ClInclude Include="tsduck_hls_wrapper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="tsduck_transport_router.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

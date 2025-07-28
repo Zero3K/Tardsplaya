@@ -2,6 +2,7 @@
 #include "stream_pipe.h"
 #include "tsduck_transport_router.h"
 #include "stream_resource_manager.h"
+#include "pipeline_manager.h"
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
@@ -18,6 +19,12 @@ std::thread StartStreamThread(
     StreamingMode mode,
     HANDLE* player_process_handle
 ) {
+    // Check if pipeline mode is requested
+    if (mode == StreamingMode::PIPELINE) {
+        return StartPipelineStreamThread(player_path, playlist_url, cancel_token, log_callback,
+                                        buffer_segments, channel_name, chunk_count, main_window, tab_index, selected_quality, player_process_handle);
+    }
+    
     // Check if transport stream mode is requested
     if (mode == StreamingMode::TRANSPORT_STREAM) {
         // For low-latency streaming, use smaller buffers to reduce delay
@@ -214,6 +221,142 @@ std::thread StartTransportStreamThread(
                 // Post auto-stop message for this specific tab
                 if (main_window && tab_index != SIZE_MAX) {
                     AddDebugLog(L"StartTransportStreamThread: Posting auto-stop for tab " + std::to_wstring(tab_index));
+                    PostMessage(main_window, WM_USER + 2, (WPARAM)tab_index, 0);
+                }
+            }
+        }
+    });
+}
+
+std::thread StartPipelineStreamThread(
+    const std::wstring& player_path,
+    const std::wstring& playlist_url,
+    std::atomic<bool>& cancel_token,
+    std::function<void(const std::wstring&)> log_callback,
+    int buffer_segments,
+    const std::wstring& channel_name,
+    std::atomic<int>* chunk_count,
+    HWND main_window,
+    size_t tab_index,
+    const std::wstring& selected_quality,
+    HANDLE* player_process_handle
+) {
+    return std::thread([=, &cancel_token]() mutable {
+        if (log_callback)
+            log_callback(L"Pipeline streaming thread started.");
+        
+        AddDebugLog(L"StartPipelineStreamThread: Channel=" + channel_name + 
+                   L", Tab=" + std::to_wstring(tab_index) + 
+                   L", BufferSegs=" + std::to_wstring(buffer_segments));
+        
+        try {
+            // Convert channel name to string for Pipeline
+            std::string channel_str(channel_name.begin(), channel_name.end());
+            
+            // Create Pipeline manager for this channel
+            auto pipeline_manager = std::make_unique<Tardsplaya::PipelineManager>(channel_str);
+            
+            // Set up statistics callback to update chunk count and logging
+            pipeline_manager->setStatsCallback([=](const Tardsplaya::StatsPacket::Stats& stats) mutable {
+                if (chunk_count) {
+                    *chunk_count = static_cast<int>(stats.buffer_level_percent * buffer_segments / 100.0f);
+                }
+                
+                if (log_callback && stats.processed_packets % 500 == 0) {
+                    std::wstring status_msg = L"[PIPELINE] Buffer: " + std::to_wstring(static_cast<int>(stats.buffer_level_percent)) + L"%" +
+                                             L", FPS: " + std::to_wstring(static_cast<int>(stats.fps)) + 
+                                             L", Packets: " + std::to_wstring(stats.processed_packets);
+                    if (stats.dropped_packets > 0) {
+                        status_msg += L", Dropped: " + std::to_wstring(stats.dropped_packets);
+                    }
+                    log_callback(status_msg);
+                }
+            });
+            
+            // Set up quality change callback
+            pipeline_manager->setQualityCallback([=](const std::vector<Tardsplaya::PlaylistPacket::QualityInfo>& qualities) mutable {
+                if (log_callback && !qualities.empty()) {
+                    log_callback(L"[PIPELINE] Found " + std::to_wstring(qualities.size()) + L" quality options");
+                }
+            });
+            
+            if (log_callback) {
+                log_callback(L"[PIPELINE] Initializing streaming pipeline...");
+            }
+            
+            // Initialize the pipeline
+            if (!pipeline_manager->initialize()) {
+                if (log_callback) {
+                    log_callback(L"[PIPELINE] Failed to initialize pipeline");
+                }
+                AddDebugLog(L"StartPipelineStreamThread: Pipeline initialization failed for " + channel_name);
+                return;
+            }
+            
+            if (log_callback) {
+                log_callback(L"[PIPELINE] Starting pipeline processing...");
+            }
+            
+            // Start the pipeline
+            if (!pipeline_manager->start()) {
+                if (log_callback) {
+                    log_callback(L"[PIPELINE] Failed to start pipeline");
+                }
+                AddDebugLog(L"StartPipelineStreamThread: Pipeline start failed for " + channel_name);
+                return;
+            }
+            
+            if (log_callback) {
+                log_callback(L"[PIPELINE] Pipeline streaming active");
+            }
+            
+            // Monitor pipeline while running
+            while (pipeline_manager->isRunning() && !cancel_token) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                
+                // Get current statistics
+                auto stats = pipeline_manager->getCurrentStats();
+                
+                // Update chunk count for status bar
+                if (chunk_count) {
+                    *chunk_count = static_cast<int>(stats.buffer_level_percent * buffer_segments / 100.0f);
+                }
+            }
+            
+            if (log_callback) {
+                log_callback(L"[PIPELINE] Stopping pipeline...");
+            }
+            
+            // Stop the pipeline
+            pipeline_manager->stop();
+            
+            if (log_callback) {
+                log_callback(L"[PIPELINE] Pipeline streaming completed");
+            }
+            
+        } catch (const std::exception& e) {
+            std::string error_msg = e.what();
+            if (log_callback) {
+                log_callback(L"[PIPELINE] Pipeline error: " + 
+                           std::wstring(error_msg.begin(), error_msg.end()));
+            }
+            AddDebugLog(L"StartPipelineStreamThread: Exception: " + 
+                       std::wstring(error_msg.begin(), error_msg.end()));
+        }
+        
+        AddDebugLog(L"StartPipelineStreamThread: Stream finished, Channel=" + channel_name + 
+                   L", Tab=" + std::to_wstring(tab_index));
+        
+        if (log_callback) {
+            bool user_stopped = cancel_token.load();
+            
+            if (user_stopped) {
+                log_callback(L"[PIPELINE] Pipeline streaming stopped by user.");
+            } else {
+                log_callback(L"[PIPELINE] Pipeline streaming ended normally.");
+                // Post auto-stop message for this specific tab
+                if (main_window && tab_index != SIZE_MAX) {
+                    AddDebugLog(L"StartPipelineStreamThread: Posting auto-stop for tab " + std::to_wstring(tab_index));
                     PostMessage(main_window, WM_USER + 2, (WPARAM)tab_index, 0);
                 }
             }

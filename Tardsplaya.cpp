@@ -27,6 +27,7 @@
 #include "favorites.h"
 #include "playlist_parser.h"
 #include "tsduck_transport_router.h"
+#include "pipeline_manager.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 

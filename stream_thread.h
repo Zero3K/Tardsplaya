@@ -15,7 +15,8 @@ void AddDebugLog(const std::wstring& msg);
 // Streaming mode enumeration
 enum class StreamingMode {
     HLS_SEGMENTS,      // Traditional HLS segment-based streaming (fallback)
-    TRANSPORT_STREAM   // TSDuck-inspired transport stream routing (default)
+    TRANSPORT_STREAM,  // TSDuck-inspired transport stream routing (default)
+    PIPELINE           // Pipeline library-based streaming (new integrated system)
 };
 
 // Launches a thread to buffer and pipe the stream.
@@ -33,7 +34,7 @@ std::thread StartStreamThread(
     HWND main_window = nullptr,
     size_t tab_index = 0,
     const std::wstring& selected_quality = L"",
-    StreamingMode mode = StreamingMode::TRANSPORT_STREAM,
+    StreamingMode mode = StreamingMode::PIPELINE,
     HANDLE* player_process_handle = nullptr
 );
 
@@ -48,5 +49,20 @@ std::thread StartTransportStreamThread(
     std::atomic<int>* chunk_count = nullptr,
     HWND main_window = nullptr,
     size_t tab_index = 0,
+    HANDLE* player_process_handle = nullptr
+);
+
+// Start Pipeline-based streaming (modern modular streaming system)
+std::thread StartPipelineStreamThread(
+    const std::wstring& player_path,
+    const std::wstring& playlist_url,
+    std::atomic<bool>& cancel_token,
+    std::function<void(const std::wstring&)> log_callback = nullptr,
+    int buffer_segments = 3,
+    const std::wstring& channel_name = L"",
+    std::atomic<int>* chunk_count = nullptr,
+    HWND main_window = nullptr,
+    size_t tab_index = 0,
+    const std::wstring& selected_quality = L"",
     HANDLE* player_process_handle = nullptr
 );
