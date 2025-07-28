@@ -131,41 +131,32 @@ QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const void* _buffer, uint64_t
     return imp_write(_buffer, _size);
 }
 
-// General template for non-string types
+// SFINAE overload for string types
 template<typename QTYPE>
 template<typename T>
-QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T& _item) -> bool {
-    // Default implementation for non-string types
-    return imp_write(&_item, sizeof(T));
-}
-
-// Explicit specialization for string type
-template<typename QTYPE>
-template<>
-QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write<string>(const string& _item) -> bool {
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T& _item) -> typename std::enable_if<std::is_same<T, string>::value, bool>::type {
     return imp_write(_item.data(), _item.length());
 }
 
-// General template for non-character arrays
+// SFINAE overload for non-string types
+template<typename QTYPE>
+template<typename T>
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T& _item) -> typename std::enable_if<!std::is_same<T, string>::value, bool>::type {
+    return imp_write(&_item, sizeof(T));
+}
+
+// SFINAE overload for character array types
 template<typename QTYPE>
 template<typename T, uint64_t N>
-QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T (&_array)[N]) -> bool {
-    // Default implementation for non-character arrays
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T (&_array)[N]) -> typename std::enable_if<std::is_same<T, char>::value || std::is_same<T, wchar_t>::value, bool>::type {
+    return N > 1 && imp_write(&_array[0], (N - 1) * sizeof(T));  // no "\0" included
+}
+
+// SFINAE overload for non-character array types
+template<typename QTYPE>
+template<typename T, uint64_t N>
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T (&_array)[N]) -> typename std::enable_if<!std::is_same<T, char>::value && !std::is_same<T, wchar_t>::value, bool>::type {
     return imp_write(&_array[0], N * sizeof(T));
-}
-
-// Explicit specialization for char arrays
-template<typename QTYPE>
-template<uint64_t N>
-QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write<char, N>(const char (&_array)[N]) -> bool {
-    return N > 1 && imp_write(&_array[0], (N - 1) * sizeof(char));  // no "\0" included
-}
-
-// Explicit specialization for wchar_t arrays
-template<typename QTYPE>
-template<uint64_t N>
-QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write<wchar_t, N>(const wchar_t (&_array)[N]) -> bool {
-    return N > 1 && imp_write(&_array[0], (N - 1) * sizeof(wchar_t));  // no "\0" included
 }
 
 template<typename QTYPE>
