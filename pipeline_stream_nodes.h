@@ -1,6 +1,19 @@
 #ifndef TARDSPLAYA_PIPELINE_NODES_H
 #define TARDSPLAYA_PIPELINE_NODES_H
 
+// Prevent Windows macros from interfering with our code
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifdef ERROR
+#undef ERROR
+#endif
+#endif
+
 #include "pipeline/pipeline.h"
 #include "pipeline_stream_packets.h"
 #include "tardsplaya_mocks.h"
@@ -8,6 +21,8 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <memory>
+#include <cstddef>
 
 namespace Tardsplaya {
 
@@ -196,12 +211,12 @@ public:
 
     bool start() noexcept override {
         m_router = std::make_unique<TSDuckTransportRouter>();
-        return m_router ? m_router->initialize() : false;
+        return m_router ? (m_router->initialize()) : false;
     }
 
     void stop() noexcept override {
         if (m_router) {
-            m_router->shutdown();
+            (m_router->shutdown());
         }
     }
 
@@ -211,7 +226,7 @@ protected:
 
         try {
             // Convert HLS segment to Transport Stream packets
-            auto tsPackets = m_router->convertToTS(packet->getData());
+            auto tsPackets = (m_router->convertToTS(packet->getData()));
             
             uint32_t frameNumber = m_currentFrameNumber;
             for (const auto& tsData : tsPackets) {

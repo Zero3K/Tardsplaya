@@ -24,8 +24,8 @@ namespace Tardsplaya {
  */
 class PipelineManager {
 public:
-    using StatsCallback = std::function<void(const StatsPacket::Stats&)>;
-    using QualityCallback = std::function<void(const std::vector<PlaylistPacket::QualityInfo>&)>;
+    using StatsCallback = std::function<void(const Tardsplaya::StatsPacket::Stats&)>;
+    using QualityCallback = std::function<void(const std::vector<Tardsplaya::PlaylistPacket::QualityInfo>&)>;
 
     /**
      * @brief Constructs a Pipeline Manager for the specified channel
@@ -83,7 +83,7 @@ public:
     /**
      * @brief Gets current pipeline statistics
      */
-    StatsPacket::Stats getCurrentStats() const { return m_currentStats; }
+    Tardsplaya::StatsPacket::Stats getCurrentStats() const { return m_currentStats; }
 
     /**
      * @brief Gets available stream qualities
@@ -120,7 +120,7 @@ private:
     // Control and monitoring
     bool m_isRunning = false;
     bool m_isPaused = false;
-    StatsPacket::Stats m_currentStats;
+    Tardsplaya::StatsPacket::Stats m_currentStats;
     std::vector<PlaylistPacket::QualityInfo> m_availableQualities;
     
     // Callbacks
@@ -140,7 +140,7 @@ private:
     /**
      * @brief Handles statistics updates from the pipeline
      */
-    void handleStatsUpdate(const StatsPacket::Stats& stats);
+    void handleStatsUpdate(const Tardsplaya::StatsPacket::Stats& stats);
 
     /**
      * @brief Handles quality list updates

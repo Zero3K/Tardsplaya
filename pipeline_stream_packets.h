@@ -1,13 +1,35 @@
 #ifndef TARDSPLAYA_STREAM_PACKETS_H
 #define TARDSPLAYA_STREAM_PACKETS_H
 
+// Prevent Windows macros from interfering with our code
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifdef ERROR
+#undef ERROR
+#endif
+#endif
+
 #include "pipeline/pipeline_packet.h"
 #include <vector>
 #include <string>
 #include <chrono>
 #include <memory>
+#include <cstddef>
 
 namespace Tardsplaya {
+
+// Forward declarations to help with template instantiation
+class StreamPacket;
+class ControlPacket;
+class HLSSegmentPacket;
+class TSPacket;
+class PlaylistPacket;
+class StatsPacket;
 
 /**
  * @brief Base packet type for all streaming data
@@ -124,13 +146,13 @@ public:
         RESUME,
         SEEK,
         QUALITY_CHANGE,
-        ERROR
+        COMMAND_ERROR
     };
 
     explicit ControlPacket(Command cmd, const std::string& data = "")
         : m_command(cmd), m_data(data) {}
 
-    Command getCommand() const { return m_command; }
+    ControlPacket::Command getCommand() const { return m_command; }
     const std::string& getData() const { return m_data; }
 
 private:
