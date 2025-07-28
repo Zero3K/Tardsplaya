@@ -33,14 +33,17 @@ void PipelineManager::setupStreamingPipeline() {
     m_routerNode = m_pipeline->addNode<TSRouterNode>();
     m_bufferNode = m_pipeline->addNode<SmartBufferNode>(5000, 10000);
     
-    // Convert player path to string for the node
-    std::string playerPathStr;
+    // Convert player path to string and add stdin argument for the node
+    std::string playerCommandStr;
     if (!m_playerPath.empty()) {
-        playerPathStr = std::string(m_playerPath.begin(), m_playerPath.end());
+        // Convert wide string to string
+        std::string playerPathStr = std::string(m_playerPath.begin(), m_playerPath.end());
+        // Add stdin argument like transport stream mode does
+        playerCommandStr = playerPathStr + " -";
     } else {
-        playerPathStr = "mpv -";  // Default fallback
+        playerCommandStr = "mpv -";  // Default fallback
     }
-    m_outputNode = m_pipeline->addNode<MediaPlayerOutputNode>(playerPathStr);
+    m_outputNode = m_pipeline->addNode<MediaPlayerOutputNode>(playerCommandStr);
     m_statsNode = m_pipeline->addNode<StatsMonitorNode>();
 }
 
