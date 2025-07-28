@@ -211,19 +211,39 @@ bool TxQueueIPC::ReadSegmentFromQueue(StreamSegment& segment) {
             // Read segment header
             uint32_t data_size;
             if (!read_op.read(segment.sequence_number)) {
-                AddDebugLog(L"[TX-QUEUE] Failed to read sequence number");
+                // Reduce log spam - only log occasionally as these are expected failures
+                static uint64_t seq_failure_count = 0;
+                if (++seq_failure_count % 1000 == 1) { // Log every 1000th failure
+                    AddDebugLog(L"[DEBUG] [TX-QUEUE] Failed to read sequence number (count: " + 
+                               std::to_wstring(seq_failure_count) + L")");
+                }
                 return false;
             }
             if (!read_op.read(segment.checksum)) {
-                AddDebugLog(L"[TX-QUEUE] Failed to read checksum");
+                // Reduce log spam for checksum read failures too
+                static uint64_t checksum_failure_count = 0;
+                if (++checksum_failure_count % 1000 == 1) {
+                    AddDebugLog(L"[DEBUG] [TX-QUEUE] Failed to read checksum (count: " + 
+                               std::to_wstring(checksum_failure_count) + L")");
+                }
                 return false;
             }
             if (!read_op.read(segment.is_end_marker)) {
-                AddDebugLog(L"[TX-QUEUE] Failed to read end marker");
+                // Reduce log spam for end marker read failures too
+                static uint64_t marker_failure_count = 0;
+                if (++marker_failure_count % 1000 == 1) {
+                    AddDebugLog(L"[DEBUG] [TX-QUEUE] Failed to read end marker (count: " + 
+                               std::to_wstring(marker_failure_count) + L")");
+                }
                 return false;
             }
             if (!read_op.read(data_size)) {
-                AddDebugLog(L"[TX-QUEUE] Failed to read data size");
+                // Reduce log spam for data size read failures too
+                static uint64_t size_failure_count = 0;
+                if (++size_failure_count % 1000 == 1) {
+                    AddDebugLog(L"[DEBUG] [TX-QUEUE] Failed to read data size (count: " + 
+                               std::to_wstring(size_failure_count) + L")");
+                }
                 return false;
             }
             
@@ -237,7 +257,12 @@ bool TxQueueIPC::ReadSegmentFromQueue(StreamSegment& segment) {
             if (data_size > 0) {
                 segment.data.resize(data_size);
                 if (!read_op.read(segment.data.data(), data_size)) {
-                    AddDebugLog(L"[TX-QUEUE] Failed to read segment data (" + std::to_wstring(data_size) + L" bytes)");
+                    // Reduce log spam for data read failures too
+                    static uint64_t data_failure_count = 0;
+                    if (++data_failure_count % 1000 == 1) {
+                        AddDebugLog(L"[DEBUG] [TX-QUEUE] Failed to read segment data (" + std::to_wstring(data_size) + 
+                                   L" bytes, count: " + std::to_wstring(data_failure_count) + L")");
+                    }
                     return false;
                 }
             } else {
@@ -246,7 +271,12 @@ bool TxQueueIPC::ReadSegmentFromQueue(StreamSegment& segment) {
             
             return true; // read_op commits on destruction
         } else {
-            AddDebugLog(L"[TX-QUEUE] Failed to create read transaction");
+            // Reduce log spam for transaction creation failures - these are very common
+            static uint64_t transaction_failure_count = 0;
+            if (++transaction_failure_count % 2000 == 1) { // Log every 2000th failure
+                AddDebugLog(L"[DEBUG] [TX-QUEUE] Failed to create read transaction (count: " + 
+                           std::to_wstring(transaction_failure_count) + L")");
+            }
             return false;
         }
     } catch (const std::exception& e) {
