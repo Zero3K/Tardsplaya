@@ -16,6 +16,7 @@ You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+#define NOMINMAX  // Prevent min/max macro conflicts
 #include "waitable.hpp"
 #include <assert.h>
 #include <limits>

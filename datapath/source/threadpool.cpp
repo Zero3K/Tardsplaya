@@ -19,6 +19,7 @@
 
 #include "threadpool.hpp"
 #include <limits>
+#define NOMINMAX  // Prevent min/max macro conflicts
 #ifdef _WIN32
 #include <windows.h>
 #endif
