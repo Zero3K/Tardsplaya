@@ -368,8 +368,8 @@ private:
  */
 class MediaPlayerOutputNode : public lexus2k::pipeline::Node<TSPacket> {
 public:
-    explicit MediaPlayerOutputNode(const std::string& playerCommand = "mpv -")
-        : m_playerCommand(playerCommand), m_isPlayerRunning(false) {
+    explicit MediaPlayerOutputNode(const std::wstring& playerPath = L"mpv.exe", const std::wstring& playerArgs = L"-")
+        : m_playerPath(playerPath), m_playerArgs(playerArgs), m_isPlayerRunning(false) {
         addInput<lexus2k::pipeline::QueuePad>("input", 1000);
         m_statsOutputIndex = addOutput("stats").getIndex();
     }
@@ -454,7 +454,8 @@ protected:
     }
 
 private:
-    std::string m_playerCommand;
+    std::wstring m_playerPath;
+    std::wstring m_playerArgs;
     std::atomic<bool> m_isPlayerRunning;
     std::ofstream m_playerStdin;
     size_t m_statsOutputIndex;
@@ -502,17 +503,11 @@ private:
 
             PROCESS_INFORMATION pi = {};
 
-            // Convert player command to wide string  
-            std::wstring widePlayerCommand(m_playerCommand.begin(), m_playerCommand.end());
-            
-            // Build command line like transport stream router - simpler approach
-            std::wstring cmdLine = L"\"" + widePlayerCommand.substr(0, widePlayerCommand.find(' ')) + L"\"";
-            if (widePlayerCommand.find(' ') != std::wstring::npos) {
-                cmdLine += L" " + widePlayerCommand.substr(widePlayerCommand.find(' ') + 1);
-            }
+            // Build command line like transport stream router (simple approach)
+            std::wstring cmd_line = L"\"" + m_playerPath + L"\" " + m_playerArgs;
 
             // Launch process with same flags as transport stream router
-            if (!CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE, 
+            if (!CreateProcessW(nullptr, &cmd_line[0], nullptr, nullptr, TRUE, 
                               CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB, 
                               nullptr, nullptr, &si, &pi)) {
                 DWORD error = GetLastError();

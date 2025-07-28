@@ -33,18 +33,13 @@ void PipelineManager::setupStreamingPipeline() {
     m_routerNode = m_pipeline->addNode<TSRouterNode>();
     m_bufferNode = m_pipeline->addNode<SmartBufferNode>(5000, 10000);
     
-    // Convert player path and arguments to string for the node
-    std::string playerCommandStr;
+    // Create media player output node with separate path and args like transport stream router
     if (!m_playerPath.empty()) {
-        // Convert wide string to string
-        std::string playerPathStr = std::string(m_playerPath.begin(), m_playerPath.end());
-        std::string playerArgsStr = std::string(m_playerArgs.begin(), m_playerArgs.end());
-        // Use configured player arguments instead of hardcoding "-"
-        playerCommandStr = playerPathStr + " " + playerArgsStr;
+        m_outputNode = m_pipeline->addNode<MediaPlayerOutputNode>(m_playerPath, m_playerArgs);
     } else {
-        playerCommandStr = "mpv -";  // Default fallback
+        // Default fallback - use default MPV path and stdin args
+        m_outputNode = m_pipeline->addNode<MediaPlayerOutputNode>(L"mpv.exe", L"-");
     }
-    m_outputNode = m_pipeline->addNode<MediaPlayerOutputNode>(playerCommandStr);
     m_statsNode = m_pipeline->addNode<StatsMonitorNode>();
 }
 
