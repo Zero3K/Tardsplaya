@@ -770,9 +770,10 @@ bool DatapathIPC::WriteToNamedPipe(const std::vector<char>& data) {
             AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Pipe disconnected (broken pipe, error=" + std::to_wstring(error) + L")");
             named_pipe_active_.store(false);
         } else if (error == ERROR_NO_DATA) {
-            // ERROR_NO_DATA during write can indicate client closed connection
-            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Client closed connection (error=" + std::to_wstring(error) + L")");
-            named_pipe_active_.store(false);
+            // ERROR_NO_DATA during write doesn't necessarily mean disconnection
+            // This can happen due to timing issues or buffer states - just log and retry
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Write returned ERROR_NO_DATA (error=" + std::to_wstring(error) + L"), retrying...");
+            // Don't mark pipe as inactive - keep trying
         } else {
             AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Write failed, Error=" + std::to_wstring(error) + 
                        L", BytesWritten=" + std::to_wstring(bytes_written) + L"/" + std::to_wstring(data.size()));
