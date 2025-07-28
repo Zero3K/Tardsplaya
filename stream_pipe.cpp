@@ -644,19 +644,42 @@ bool BufferAndPipeStreamToPlayer(
     const std::wstring& selected_quality,
     HANDLE* player_process_handle
 ) {
+    // Always log that this function is being called for debugging
+    AddDebugLog(L"[ENTRY] BufferAndPipeStreamToPlayer called for channel: " + channel_name);
+    
     // Configuration flag to choose IPC method
     // Set to true to use new Datapath IPC (high performance)
     // Set to false to use legacy Windows pipes
     static const bool USE_DATAPATH_IPC = true;
     
+    AddDebugLog(L"[CONFIG] USE_DATAPATH_IPC = " + std::to_wstring(USE_DATAPATH_IPC));
+    
     if (USE_DATAPATH_IPC) {
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Using Datapath IPC for " + channel_name);
-        return BufferAndPipeStreamToPlayerDatapath(
-            player_path, playlist_url, cancel_token, buffer_segments,
-            channel_name, chunk_count, selected_quality, player_process_handle
-        );
+        AddDebugLog(L"[DATAPATH] BufferAndPipeStreamToPlayer: Using Datapath IPC for " + channel_name);
+        try {
+            bool result = BufferAndPipeStreamToPlayerDatapath(
+                player_path, playlist_url, cancel_token, buffer_segments,
+                channel_name, chunk_count, selected_quality, player_process_handle
+            );
+            AddDebugLog(L"[DATAPATH] BufferAndPipeStreamToPlayerDatapath returned: " + std::to_wstring(result));
+            return result;
+        } catch (const std::exception& e) {
+            std::string error_msg(e.what());
+            AddDebugLog(L"[DATAPATH] Exception in Datapath IPC: " + std::wstring(error_msg.begin(), error_msg.end()));
+            AddDebugLog(L"[DATAPATH] Falling back to legacy Windows pipes for " + channel_name);
+            return BufferAndPipeStreamToPlayerLegacy(
+                player_path, playlist_url, cancel_token, buffer_segments,
+                channel_name, chunk_count, selected_quality, player_process_handle
+            );
+        } catch (...) {
+            AddDebugLog(L"[DATAPATH] Unknown exception in Datapath IPC, falling back to legacy for " + channel_name);
+            return BufferAndPipeStreamToPlayerLegacy(
+                player_path, playlist_url, cancel_token, buffer_segments,
+                channel_name, chunk_count, selected_quality, player_process_handle
+            );
+        }
     } else {
-        AddDebugLog(L"BufferAndPipeStreamToPlayer: Using legacy Windows pipes for " + channel_name);
+        AddDebugLog(L"[LEGACY] BufferAndPipeStreamToPlayer: Using legacy Windows pipes for " + channel_name);
         return BufferAndPipeStreamToPlayerLegacy(
             player_path, playlist_url, cancel_token, buffer_segments,
             channel_name, chunk_count, selected_quality, player_process_handle

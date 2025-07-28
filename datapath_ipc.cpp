@@ -111,6 +111,7 @@ DatapathIPC::DatapathIPC()
     , buffer_size_(0)
     , player_started_(false)
 {
+    AddDebugLog(L"[DATAPATH] DatapathIPC constructor called");
     memset(&player_process_info_, 0, sizeof(player_process_info_));
 }
 
@@ -119,41 +120,54 @@ DatapathIPC::~DatapathIPC() {
 }
 
 bool DatapathIPC::Initialize(const Config& config) {
+    AddDebugLog(L"[DATAPATH] DatapathIPC::Initialize: Entry point reached");
+    
     if (is_active_.load()) {
-        AddDebugLog(L"DatapathIPC::Initialize: Already initialized");
+        AddDebugLog(L"[DATAPATH] DatapathIPC::Initialize: Already initialized");
         return false;
     }
 
+    AddDebugLog(L"[DATAPATH] DatapathIPC::Initialize: Setting up configuration");
     config_ = config;
     
     // Generate unique names if not provided
     if (config_.datapath_name.empty()) {
         config_.datapath_name = GenerateDatapathName(config_.channel_name);
+        AddDebugLog(L"[DATAPATH] Generated datapath name: " + config_.datapath_name);
     }
     
     if (config_.named_pipe_path.empty()) {
         config_.named_pipe_path = GenerateNamedPipeName(config_.channel_name);
+        AddDebugLog(L"[DATAPATH] Generated named pipe path: " + config_.named_pipe_path);
     }
 
-    AddDebugLog(L"DatapathIPC::Initialize: Initializing for channel " + config_.channel_name +
+    AddDebugLog(L"[DATAPATH] DatapathIPC::Initialize: Initializing for channel " + config_.channel_name +
                L", datapath_name=" + config_.datapath_name +
                L", named_pipe=" + config_.named_pipe_path);
 
     // Create Datapath server
+    AddDebugLog(L"[DATAPATH] Attempting to create Datapath server...");
     if (!CreateDatapathServer()) {
-        AddDebugLog(L"DatapathIPC::Initialize: Failed to create Datapath server");
+        AddDebugLog(L"[DATAPATH] ERROR: DatapathIPC::Initialize: Failed to create Datapath server");
         return false;
     }
+    AddDebugLog(L"[DATAPATH] Datapath server created successfully");
 
     // Create named pipe bridge if enabled
-    if (config_.use_named_pipe_bridge && !CreateNamedPipeBridge()) {
-        AddDebugLog(L"DatapathIPC::Initialize: Failed to create named pipe bridge");
-        CleanupResources();
-        return false;
+    if (config_.use_named_pipe_bridge) {
+        AddDebugLog(L"[DATAPATH] Attempting to create named pipe bridge...");
+        if (!CreateNamedPipeBridge()) {
+            AddDebugLog(L"[DATAPATH] ERROR: DatapathIPC::Initialize: Failed to create named pipe bridge");
+            CleanupResources();
+            return false;
+        }
+        AddDebugLog(L"[DATAPATH] Named pipe bridge created successfully");
+    } else {
+        AddDebugLog(L"[DATAPATH] Named pipe bridge disabled by configuration");
     }
 
     is_active_.store(true);
-    AddDebugLog(L"DatapathIPC::Initialize: Successfully initialized for " + config_.channel_name);
+    AddDebugLog(L"[DATAPATH] DatapathIPC::Initialize: Successfully initialized for " + config_.channel_name);
     return true;
 }
 
@@ -363,9 +377,14 @@ void DatapathIPC::SignalEndOfStream() {
 // Private implementation methods
 
 bool DatapathIPC::CreateDatapathServer() {
+    AddDebugLog(L"[DATAPATH] CreateDatapathServer: Starting...");
+    
     try {
+        AddDebugLog(L"[DATAPATH] Converting datapath name to string...");
         std::string datapath_name_str(config_.datapath_name.begin(), config_.datapath_name.end());
+        AddDebugLog(L"[DATAPATH] Datapath name (string): " + std::wstring(datapath_name_str.begin(), datapath_name_str.end()));
         
+        AddDebugLog(L"[DATAPATH] Calling datapath::host...");
         datapath::error result = datapath::host(
             datapath_server_,
             datapath_name_str,
@@ -373,22 +392,30 @@ bool DatapathIPC::CreateDatapathServer() {
             10 // max clients
         );
 
+        AddDebugLog(L"[DATAPATH] datapath::host returned error code: " + std::to_wstring(static_cast<int>(result)));
+
         if (result != datapath::error::Success) {
-            AddDebugLog(L"DatapathIPC::CreateDatapathServer: Failed to create server, error=" + 
+            AddDebugLog(L"[DATAPATH] ERROR: CreateDatapathServer: Failed to create server, error=" + 
                        std::to_wstring(static_cast<int>(result)));
             return false;
         }
 
+        AddDebugLog(L"[DATAPATH] Setting up event handlers...");
         // Set up event handlers
         datapath_server_->on_accept.add([this](bool& accept, std::shared_ptr<datapath::isocket> client) {
             OnClientConnect(accept, client);
         });
 
-        AddDebugLog(L"DatapathIPC::CreateDatapathServer: Created Datapath server: " + config_.datapath_name);
+        AddDebugLog(L"[DATAPATH] CreateDatapathServer: Created Datapath server: " + config_.datapath_name);
         return true;
     }
     catch (const std::exception& e) {
-        AddDebugLog(L"DatapathIPC::CreateDatapathServer: Exception creating server");
+        std::string error_msg(e.what());
+        AddDebugLog(L"[DATAPATH] EXCEPTION in CreateDatapathServer: " + std::wstring(error_msg.begin(), error_msg.end()));
+        return false;
+    }
+    catch (...) {
+        AddDebugLog(L"[DATAPATH] UNKNOWN EXCEPTION in CreateDatapathServer");
         return false;
     }
 }
@@ -727,29 +754,44 @@ bool BufferAndPipeStreamToPlayerDatapath(
     const std::wstring& selected_quality,
     HANDLE* player_process_handle
 ) {
-    AddDebugLog(L"BufferAndPipeStreamToPlayerDatapath: Starting Datapath IPC streaming for " + channel_name);
+    AddDebugLog(L"[DATAPATH] BufferAndPipeStreamToPlayerDatapath: ENTRY - Starting Datapath IPC streaming for " + channel_name);
+    AddDebugLog(L"[DATAPATH] Parameters: player_path=" + player_path + L", buffer_segments=" + std::to_wstring(buffer_segments));
 
-    // Create and configure Datapath IPC
-    DatapathIPC datapath_ipc;
-    DatapathIPC::Config config;
-    config.channel_name = channel_name;
-    config.player_path = player_path;
-    config.max_buffer_segments = std::max(buffer_segments, 3);
-    config.use_named_pipe_bridge = true;
+    try {
+        // Create and configure Datapath IPC
+        AddDebugLog(L"[DATAPATH] Creating DatapathIPC instance...");
+        DatapathIPC datapath_ipc;
+        
+        AddDebugLog(L"[DATAPATH] Configuring DatapathIPC...");
+        DatapathIPC::Config config;
+        config.channel_name = channel_name;
+        config.player_path = player_path;
+        config.max_buffer_segments = std::max(buffer_segments, 3);
+        config.use_named_pipe_bridge = true;
 
-    if (!datapath_ipc.Initialize(config)) {
-        AddDebugLog(L"BufferAndPipeStreamToPlayerDatapath: Failed to initialize Datapath IPC");
+        AddDebugLog(L"[DATAPATH] Calling Initialize...");
+        if (!datapath_ipc.Initialize(config)) {
+            AddDebugLog(L"[DATAPATH] ERROR: Failed to initialize Datapath IPC - falling back to legacy");
+            return false;
+        }
+
+        AddDebugLog(L"[DATAPATH] Initialize succeeded, calling StartStreaming...");
+        // Start streaming
+        bool result = datapath_ipc.StartStreaming(playlist_url, cancel_token, chunk_count, player_process_handle);
+        
+        if (result) {
+            AddDebugLog(L"[DATAPATH] SUCCESS: Streaming completed successfully for " + channel_name);
+        } else {
+            AddDebugLog(L"[DATAPATH] ERROR: Streaming failed for " + channel_name);
+        }
+
+        return result;
+    } catch (const std::exception& e) {
+        std::string error_msg(e.what());
+        AddDebugLog(L"[DATAPATH] EXCEPTION: " + std::wstring(error_msg.begin(), error_msg.end()));
+        return false;
+    } catch (...) {
+        AddDebugLog(L"[DATAPATH] UNKNOWN EXCEPTION occurred");
         return false;
     }
-
-    // Start streaming
-    bool result = datapath_ipc.StartStreaming(playlist_url, cancel_token, chunk_count, player_process_handle);
-    
-    if (result) {
-        AddDebugLog(L"BufferAndPipeStreamToPlayerDatapath: Streaming completed successfully for " + channel_name);
-    } else {
-        AddDebugLog(L"BufferAndPipeStreamToPlayerDatapath: Streaming failed for " + channel_name);
-    }
-
-    return result;
 }
