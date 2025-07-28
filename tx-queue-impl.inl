@@ -37,10 +37,8 @@ QCS_INLINE qcstudio::tx_queue_sp_t::tx_queue_sp_t(uint64_t _capacity) {
 
     // init indices
 
-    std::atomic<uint64_t>* head_atomic = reinterpret_cast<std::atomic<uint64_t>*>(&status_.head_);
-    head_atomic->store(0);
-    std::atomic<uint64_t>* tail_atomic = reinterpret_cast<std::atomic<uint64_t>*>(&status_.tail_);
-    tail_atomic->store(0);
+    *reinterpret_cast<std::atomic<uint64_t>*>(&status_.head_) = 0;
+    *reinterpret_cast<std::atomic<uint64_t>*>(&status_.tail_) = 0;
 
     // force capacity power of 2
 
@@ -117,10 +115,8 @@ QCS_INLINE qcstudio::tx_queue_mp_t::tx_queue_mp_t(uint8_t* _prealloc_and_init, u
 template<typename QTYPE>
 QCS_INLINE qcstudio::tx_write_t<QTYPE>::tx_write_t(QTYPE& _queue) : queue_(_queue) {
     storage_     = queue_.storage_;
-    std::atomic<uint64_t>* tail_atomic = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.tail_);
-    tail_ = tail_atomic->load(memory_order_relaxed);  // relaxed => no sync required as the tail is only modified by the producer (us)
-    std::atomic<uint64_t>* head_atomic = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.head_);
-    cached_head_ = head_atomic->load(memory_order_relaxed);  // optimistic guess, "gimme whatever you have". Later we'll sync if required!
+    tail_        = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.tail_)->load(memory_order_relaxed);  // relaxed => no sync required as the tail is only modified by the producer (us)
+    cached_head_ = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.head_)->load(memory_order_relaxed);  // optimistic guess, "gimme whatever you have". Later we'll sync if required!
     capacity_    = queue_.capacity_;                                                       // copy to favour the data locality
     invalidated_ = !_queue.is_ok();
 }
@@ -135,39 +131,41 @@ QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const void* _buffer, uint64_t
     return imp_write(_buffer, _size);
 }
 
+// General template for non-string types
 template<typename QTYPE>
 template<typename T>
 QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T& _item) -> bool {
-    // Handle string vs non-string types
-    // This uses tag dispatch which is C++14 compatible
-    struct string_tag {};
-    struct other_tag {};
-    
-    using tag = typename std::conditional<std::is_same<T, string>::value, string_tag, other_tag>::type;
-    return write_impl(_item, tag{});
-}
-
-template<typename QTYPE>
-template<typename T>
-QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write_impl(const T& _item, string_tag) -> bool {
-    return imp_write(_item.data(), _item.length());
-}
-
-template<typename QTYPE>
-template<typename T> 
-QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write_impl(const T& _item, other_tag) -> bool {
+    // Default implementation for non-string types
     return imp_write(&_item, sizeof(T));
 }
 
+// Explicit specialization for string type
+template<typename QTYPE>
+template<>
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write<string>(const string& _item) -> bool {
+    return imp_write(_item.data(), _item.length());
+}
+
+// General template for non-character arrays
 template<typename QTYPE>
 template<typename T, uint64_t N>
 QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T (&_array)[N]) -> bool {
-    // Use C++14 compatible type checking instead of if constexpr
-    if (std::is_same<T, char>::value || std::is_same<T, wchar_t>::value) {
-        return N > 1 && imp_write(&_array[0], (N - 1) * sizeof(T));  // no "\0" included
-    } else {
-        return imp_write(&_array[0], N * sizeof(T));
-    }
+    // Default implementation for non-character arrays
+    return imp_write(&_array[0], N * sizeof(T));
+}
+
+// Explicit specialization for char arrays
+template<typename QTYPE>
+template<uint64_t N>
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write<char, N>(const char (&_array)[N]) -> bool {
+    return N > 1 && imp_write(&_array[0], (N - 1) * sizeof(char));  // no "\0" included
+}
+
+// Explicit specialization for wchar_t arrays
+template<typename QTYPE>
+template<uint64_t N>
+QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write<wchar_t, N>(const wchar_t (&_array)[N]) -> bool {
+    return N > 1 && imp_write(&_array[0], (N - 1) * sizeof(wchar_t));  // no "\0" included
 }
 
 template<typename QTYPE>
@@ -278,15 +276,13 @@ QCS_INLINE auto qcstudio::tx_read_t<QTYPE>::read(T& _item) -> bool {
 
 // Helper function to convert a pointer to a reference
 
-// C++14 compatible implementation - simplified to avoid complex type traits
 template<typename QTYPE>
 template<typename... ARGS>
 QCS_INLINE auto qcstudio::tx_read_t<QTYPE>::read() -> std::tuple<ARGS...> {
-    // Simple C++14 implementation without std::apply
+    // Simplified C++14 implementation
     std::tuple<ARGS...> temp{};
-    // Note: This simplified version doesn't implement the full functionality
-    // but avoids C++17 dependencies. Full implementation would require
-    // a C++14 compatible apply function.
+    // Note: This is a minimal implementation that compiles with C++14
+    // Full functionality would require implementing a C++14-compatible apply function
     return temp;
 }
 
