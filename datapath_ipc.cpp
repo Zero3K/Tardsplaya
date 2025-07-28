@@ -185,7 +185,24 @@ bool DatapathIPC::StartStreaming(
     AddDebugLog(L"DatapathIPC::StartStreaming: Starting stream for " + config_.channel_name +
                L", URL=" + playlist_url);
 
-    // Launch media player
+    // Start worker threads first
+    should_stop_.store(false);
+    end_of_stream_.store(false);
+
+    server_thread_ = std::thread(&DatapathIPC::ServerThreadProc, this);
+    buffer_manager_thread_ = std::thread(&DatapathIPC::BufferManagerThreadProc, this);
+
+    // Start named pipe thread BEFORE launching media player to ensure pipe is ready
+    if (config_.use_named_pipe_bridge) {
+        AddDebugLog(L"DatapathIPC::StartStreaming: Starting named pipe thread before media player");
+        named_pipe_thread_ = std::thread(&DatapathIPC::NamedPipeThreadProc, this);
+        
+        // Give the named pipe thread time to start and call ConnectNamedPipe()
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        AddDebugLog(L"DatapathIPC::StartStreaming: Named pipe thread started, now launching media player");
+    }
+
+    // Launch media player after named pipe is ready
     if (!LaunchMediaPlayer()) {
         AddDebugLog(L"DatapathIPC::StartStreaming: Failed to launch media player");
         return false;
@@ -195,17 +212,7 @@ bool DatapathIPC::StartStreaming(
         *player_process_handle = player_process_info_.hProcess;
     }
 
-    // Start worker threads
-    should_stop_.store(false);
-    end_of_stream_.store(false);
-
-    server_thread_ = std::thread(&DatapathIPC::ServerThreadProc, this);
-    buffer_manager_thread_ = std::thread(&DatapathIPC::BufferManagerThreadProc, this);
     media_player_thread_ = std::thread(&DatapathIPC::MediaPlayerThreadProc, this);
-
-    if (config_.use_named_pipe_bridge) {
-        named_pipe_thread_ = std::thread(&DatapathIPC::NamedPipeThreadProc, this);
-    }
 
     // Main streaming loop - download and buffer segments
     std::set<std::wstring> seen_urls;
@@ -506,15 +513,34 @@ void DatapathIPC::NamedPipeThreadProc() {
     AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Starting named pipe thread for " + config_.channel_name);
 
     // Wait for client connection
-    if (ConnectNamedPipe(named_pipe_handle_, nullptr)) {
-        AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Client connected to named pipe");
+    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Waiting for client to connect to pipe: " + config_.named_pipe_path);
+    
+    BOOL connect_result = ConnectNamedPipe(named_pipe_handle_, nullptr);
+    DWORD error = GetLastError();
+    
+    // ConnectNamedPipe can return FALSE but still be successful if client is already connected
+    if (connect_result || error == ERROR_PIPE_CONNECTED) {
+        AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Client connected to named pipe successfully");
         
+        // Keep the connection alive while streaming
         while (!should_stop_.load() && named_pipe_active_.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            // Check if pipe is still connected
+            DWORD bytes_available = 0;
+            BOOL peek_result = PeekNamedPipe(named_pipe_handle_, nullptr, 0, nullptr, &bytes_available, nullptr);
+            if (!peek_result) {
+                DWORD peek_error = GetLastError();
+                if (peek_error == ERROR_BROKEN_PIPE || peek_error == ERROR_NO_DATA) {
+                    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Client disconnected from pipe");
+                    named_pipe_active_.store(false);
+                    break;
+                }
+            }
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     } else {
         AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Failed to connect named pipe, Error=" + 
-                   std::to_wstring(GetLastError()));
+                   std::to_wstring(error));
     }
 
     AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Named pipe thread ending for " + config_.channel_name);
@@ -716,6 +742,9 @@ bool DatapathIPC::WriteToDatapathClients(const std::vector<char>& data) {
 
 bool DatapathIPC::WriteToNamedPipe(const std::vector<char>& data) {
     if (named_pipe_handle_ == INVALID_HANDLE_VALUE || !named_pipe_active_.load()) {
+        AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Pipe not available (handle=" + 
+                   std::to_wstring(reinterpret_cast<uintptr_t>(named_pipe_handle_)) + 
+                   L", active=" + (named_pipe_active_.load() ? L"true" : L"false") + L")");
         return false;
     }
 
@@ -731,14 +760,16 @@ bool DatapathIPC::WriteToNamedPipe(const std::vector<char>& data) {
     if (!result || bytes_written != data.size()) {
         DWORD error = GetLastError();
         if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
-            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Pipe disconnected");
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Pipe disconnected (error=" + std::to_wstring(error) + L")");
             named_pipe_active_.store(false);
         } else {
-            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Write failed, Error=" + std::to_wstring(error));
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Write failed, Error=" + std::to_wstring(error) + 
+                       L", BytesWritten=" + std::to_wstring(bytes_written) + L"/" + std::to_wstring(data.size()));
         }
         return false;
     }
 
+    AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Successfully wrote " + std::to_wstring(bytes_written) + L" bytes to pipe");
     return true;
 }
 
