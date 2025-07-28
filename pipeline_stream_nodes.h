@@ -471,13 +471,17 @@ private:
     bool startPlayer() {
 #ifdef _WIN32
         try {
-            // Create pipe for stdin
+            // Create pipe for stdin with larger buffer like transport stream router
             SECURITY_ATTRIBUTES sa = {};
             sa.nLength = sizeof(SECURITY_ATTRIBUTES);
             sa.bInheritHandle = TRUE;
             sa.lpSecurityDescriptor = nullptr;
 
-            if (!CreatePipe(&m_stdinRead, &m_stdinWrite, &sa, 0)) {
+            // Use larger buffer size for better streaming performance
+            DWORD pipeBufferSize = 65536; // 64KB buffer (similar to transport stream router)
+            if (!CreatePipe(&m_stdinRead, &m_stdinWrite, &sa, pipeBufferSize)) {
+                DWORD error = GetLastError();
+                // Log error if possible
                 return false;
             }
 
@@ -498,24 +502,20 @@ private:
 
             PROCESS_INFORMATION pi = {};
 
-            // Convert player command to wide string
+            // Convert player command to wide string  
             std::wstring widePlayerCommand(m_playerCommand.begin(), m_playerCommand.end());
             
-            // Build command line - extract executable and args
-            std::wstring cmdLine;
-            size_t spacePos = widePlayerCommand.find(' ');
-            if (spacePos != std::wstring::npos) {
-                std::wstring executable = widePlayerCommand.substr(0, spacePos);
-                std::wstring args = widePlayerCommand.substr(spacePos + 1);
-                cmdLine = L"\"" + executable + L"\" " + args;
-            } else {
-                cmdLine = L"\"" + widePlayerCommand + L"\"";
+            // Build command line like transport stream router - simpler approach
+            std::wstring cmdLine = L"\"" + widePlayerCommand.substr(0, widePlayerCommand.find(' ')) + L"\"";
+            if (widePlayerCommand.find(' ') != std::wstring::npos) {
+                cmdLine += L" " + widePlayerCommand.substr(widePlayerCommand.find(' ') + 1);
             }
 
-            // Launch process
+            // Launch process with same flags as transport stream router
             if (!CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE, 
                               CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB, 
                               nullptr, nullptr, &si, &pi)) {
+                DWORD error = GetLastError();
                 CloseHandle(m_stdinRead);
                 CloseHandle(m_stdinWrite);
                 return false;
@@ -524,6 +524,9 @@ private:
             m_playerProcess = pi.hProcess;
             m_playerThread = pi.hThread;
             m_isPlayerRunning = true;
+
+            // Set process priority like transport stream router
+            SetPriorityClass(pi.hProcess, ABOVE_NORMAL_PRIORITY_CLASS);
 
             // Close the read end of the pipe in parent process
             CloseHandle(m_stdinRead);

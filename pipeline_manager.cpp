@@ -6,8 +6,8 @@
 
 namespace Tardsplaya {
 
-PipelineManager::PipelineManager(const std::string& channel, const std::wstring& playerPath)
-    : m_channel(channel), m_playerPath(playerPath) {
+PipelineManager::PipelineManager(const std::string& channel, const std::wstring& playerPath, const std::wstring& playerArgs)
+    : m_channel(channel), m_playerPath(playerPath), m_playerArgs(playerArgs) {
     m_pipeline = std::make_unique<lexus2k::pipeline::Pipeline>();
 }
 
@@ -33,13 +33,14 @@ void PipelineManager::setupStreamingPipeline() {
     m_routerNode = m_pipeline->addNode<TSRouterNode>();
     m_bufferNode = m_pipeline->addNode<SmartBufferNode>(5000, 10000);
     
-    // Convert player path to string and add stdin argument for the node
+    // Convert player path and arguments to string for the node
     std::string playerCommandStr;
     if (!m_playerPath.empty()) {
         // Convert wide string to string
         std::string playerPathStr = std::string(m_playerPath.begin(), m_playerPath.end());
-        // Add stdin argument like transport stream mode does
-        playerCommandStr = playerPathStr + " -";
+        std::string playerArgsStr = std::string(m_playerArgs.begin(), m_playerArgs.end());
+        // Use configured player arguments instead of hardcoding "-"
+        playerCommandStr = playerPathStr + " " + playerArgsStr;
     } else {
         playerCommandStr = "mpv -";  // Default fallback
     }

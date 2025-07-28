@@ -34,7 +34,7 @@ public:
     /**
      * @brief Constructs a Pipeline Manager for the specified channel
      */
-    explicit PipelineManager(const std::string& channel, const std::wstring& playerPath = L"");
+    explicit PipelineManager(const std::string& channel, const std::wstring& playerPath = L"", const std::wstring& playerArgs = L"-");
     
     /**
      * @brief Destructor
@@ -119,6 +119,7 @@ public:
 private:
     std::string m_channel;
     std::wstring m_playerPath;
+    std::wstring m_playerArgs;
     std::unique_ptr<lexus2k::pipeline::Pipeline> m_pipeline;
     
     // Pipeline nodes

@@ -4,6 +4,9 @@
 #include "stream_resource_manager.h"
 #include "pipeline_manager.h"
 
+// External reference to global player arguments
+extern std::wstring g_playerArg;
+
 std::thread StartStreamThread(
     const std::wstring& player_path,
     const std::wstring& playlist_url,
@@ -253,8 +256,8 @@ std::thread StartPipelineStreamThread(
             // Convert channel name to string for Pipeline
             std::string channel_str(channel_name.begin(), channel_name.end());
             
-            // Create Pipeline manager for this channel
-            auto pipeline_manager = std::make_unique<Tardsplaya::PipelineManager>(channel_str, player_path);
+            // Create Pipeline manager for this channel with configured player arguments
+            auto pipeline_manager = std::make_unique<Tardsplaya::PipelineManager>(channel_str, player_path, g_playerArg);
             
             // Set up statistics callback to update chunk count and logging
             pipeline_manager->setStatsCallback([=](const Tardsplaya::StatsPacket::Stats& stats) mutable {
