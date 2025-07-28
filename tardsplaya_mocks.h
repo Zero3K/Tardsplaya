@@ -1,6 +1,22 @@
 #ifndef TARDSPLAYA_MOCKS_H
 #define TARDSPLAYA_MOCKS_H
 
+// Prevent Windows macros from interfering with our code
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+#endif
+
 #include <vector>
 #include <string>
 #include <cstdint>
