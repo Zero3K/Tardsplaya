@@ -7,6 +7,8 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <map>
+#include <set>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -133,6 +135,13 @@ private:
     std::mutex buffer_mutex_;
     std::condition_variable buffer_condition_;
     std::atomic<size_t> buffer_size_;
+    
+    // Segment sequence tracking for proper HLS ordering
+    std::map<double, std::vector<char>> sequence_ordered_segments_;
+    std::mutex sequence_mutex_;
+    double next_expected_sequence_;
+    double last_processed_sequence_;
+    std::set<std::wstring> seen_urls_;  // Track downloaded URLs to avoid duplicates
 
     // Worker threads
     std::thread server_thread_;
@@ -163,6 +172,7 @@ private:
     std::wstring GenerateNamedPipeName(const std::wstring& channel) const;
     bool WriteToDatapathClients(const std::vector<char>& data);
     bool WriteToNamedPipe(const std::vector<char>& data);
+    void ProcessSequencedSegments();  // Process segments in sequence order
 };
 
 /**

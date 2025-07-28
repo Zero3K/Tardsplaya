@@ -2,6 +2,7 @@
 #include "stream_thread.h"
 #include "playlist_parser.h"
 #include "twitch_api.h"
+#include "tsduck_hls_wrapper.h"
 
 // Include Datapath headers
 #include "datapath/include/datapath.hpp"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <set>
+#include <map>
 #include <winhttp.h>
 
 #pragma comment(lib, "winhttp.lib")
@@ -79,27 +81,50 @@ static std::wstring JoinUrlLocal(const std::wstring& base, const std::wstring& r
     return base.substr(0, pos + 1) + rel;
 }
 
-static std::pair<std::vector<std::wstring>, bool> ParseSegmentsLocal(const std::string& playlist) {
-    std::vector<std::wstring> segs;
+struct SegmentInfo {
+    std::wstring url;
+    double sequence_number;
+    bool has_discontinuity;
+    std::chrono::milliseconds duration;
+};
+
+static std::pair<std::vector<SegmentInfo>, bool> ParseSegmentsWithSequencing(const std::string& playlist) {
+    std::vector<SegmentInfo> segments;
     bool should_clear_buffer = false;
     
-    std::istringstream ss(playlist);
-    std::string line;
-    
-    while (std::getline(ss, line)) {
-        if (line.empty()) continue;
-        
-        if (line[0] == '#') {
-            // Skip all header/tag lines
-            continue;
-        }
-        
-        // This is a segment URL - add it directly
-        std::wstring wline(line.begin(), line.end());
-        segs.push_back(wline);
+    // Use the proper HLS parser to handle sequencing
+    tsduck_hls::PlaylistParser parser;
+    if (!parser.ParsePlaylist(playlist)) {
+        AddDebugLog(L"DatapathIPC::ParseSegmentsWithSequencing: Failed to parse playlist with HLS parser");
+        return std::make_pair(segments, false);
     }
     
-    return std::make_pair(segs, should_clear_buffer);
+    auto hls_segments = parser.GetSegments();
+    int64_t media_sequence = parser.GetMediaSequence();
+    bool has_discontinuities = parser.HasDiscontinuities();
+    
+    AddDebugLog(L"DatapathIPC::ParseSegmentsWithSequencing: Parsed " + std::to_wstring(hls_segments.size()) + 
+               L" segments, media_sequence=" + std::to_wstring(media_sequence) +
+               L", discontinuities=" + (has_discontinuities ? L"true" : L"false"));
+    
+    // If there are discontinuities, we should clear the buffer to avoid mixing old/new content
+    if (has_discontinuities) {
+        should_clear_buffer = true;
+        AddDebugLog(L"DatapathIPC::ParseSegmentsWithSequencing: Discontinuity detected - will clear buffer");
+    }
+    
+    // Convert to our segment info format with sequence tracking
+    for (size_t i = 0; i < hls_segments.size(); ++i) {
+        const auto& hls_seg = hls_segments[i];
+        SegmentInfo seg_info;
+        seg_info.url = hls_seg.url;
+        seg_info.sequence_number = media_sequence + i; // Calculate proper sequence number
+        seg_info.has_discontinuity = hls_seg.has_discontinuity;
+        seg_info.duration = hls_seg.duration;
+        segments.push_back(seg_info);
+    }
+    
+    return std::make_pair(segments, should_clear_buffer);
 }
 
 DatapathIPC::DatapathIPC()
@@ -111,6 +136,8 @@ DatapathIPC::DatapathIPC()
     , should_stop_(false)
     , buffer_size_(0)
     , player_started_(false)
+    , next_expected_sequence_(0.0)
+    , last_processed_sequence_(-1.0)
 {
     AddDebugLog(L"[DATAPATH] DatapathIPC constructor called");
     memset(&player_process_info_, 0, sizeof(player_process_info_));
@@ -214,7 +241,7 @@ bool DatapathIPC::StartStreaming(
 
     media_player_thread_ = std::thread(&DatapathIPC::MediaPlayerThreadProc, this);
 
-    // Main streaming loop - download and buffer segments
+    // Main streaming loop - download and buffer segments with proper sequencing
     std::set<std::wstring> seen_urls;
     int consecutive_errors = 0;
     const int max_consecutive_errors = 15;
@@ -238,19 +265,57 @@ bool DatapathIPC::StartStreaming(
             break;
         }
 
-        // Parse segments
-        auto parse_result = ParseSegmentsLocal(playlist);
+        // Parse segments with proper HLS sequencing
+        auto parse_result = ParseSegmentsWithSequencing(playlist);
         auto segments = parse_result.first;
+        bool should_clear_buffer = parse_result.second;
 
         AddDebugLog(L"DatapathIPC::StartStreaming: Parsed " + std::to_wstring(segments.size()) + 
-                   L" segments from playlist");
+                   L" segments from playlist, should_clear_buffer=" + (should_clear_buffer ? L"true" : L"false"));
 
-        // Download new segments
+        // Handle discontinuities by clearing buffers
+        if (should_clear_buffer) {
+            AddDebugLog(L"DatapathIPC::StartStreaming: Clearing buffers due to discontinuity");
+            {
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                while (!segment_buffer_.empty()) {
+                    segment_buffer_.pop();
+                }
+                buffer_size_.store(0);
+            }
+            {
+                std::lock_guard<std::mutex> lock(sequence_mutex_);
+                sequence_ordered_segments_.clear();
+                seen_urls.clear();
+                // Reset sequence tracking on discontinuity
+                if (!segments.empty()) {
+                    next_expected_sequence_ = segments[0].sequence_number;
+                    last_processed_sequence_ = segments[0].sequence_number - 1;
+                    AddDebugLog(L"DatapathIPC::StartStreaming: Reset sequence tracking to " + 
+                               std::to_wstring(next_expected_sequence_));
+                }
+            }
+        }
+
+        // Download new segments in sequence order
         for (const auto& seg : segments) {
             if (cancel_token.load() || should_stop_.load()) break;
 
             // Skip segments we've already seen
-            if (seen_urls.count(seg)) continue;
+            if (seen_urls.count(seg.url)) {
+                AddDebugLog(L"DatapathIPC::StartStreaming: Skipping already seen segment sequence=" + 
+                           std::to_wstring(seg.sequence_number));
+                continue;
+            }
+
+            // Skip segments that are too old (already processed)
+            if (seg.sequence_number <= last_processed_sequence_) {
+                AddDebugLog(L"DatapathIPC::StartStreaming: Skipping old segment sequence=" + 
+                           std::to_wstring(seg.sequence_number) + L", last_processed=" + 
+                           std::to_wstring(last_processed_sequence_));
+                seen_urls.insert(seg.url);
+                continue;
+            }
 
             // Check buffer size
             if (buffer_size_.load() >= config_.max_buffer_segments) {
@@ -259,9 +324,12 @@ bool DatapathIPC::StartStreaming(
                 continue;
             }
 
-            seen_urls.insert(seg);
-            std::wstring seg_url = JoinUrlLocal(playlist_url, seg);
+            seen_urls.insert(seg.url);
+            std::wstring seg_url = JoinUrlLocal(playlist_url, seg.url);
             std::vector<char> seg_data;
+
+            AddDebugLog(L"DatapathIPC::StartStreaming: Downloading segment sequence=" + 
+                       std::to_wstring(seg.sequence_number) + L", URL=" + seg.url);
 
             // Download segment with retries
             bool download_ok = false;
@@ -275,22 +343,27 @@ bool DatapathIPC::StartStreaming(
             }
 
             if (download_ok && !seg_data.empty()) {
-                // Add to buffer
+                // Store segment in sequence-ordered buffer
                 {
-                    std::lock_guard<std::mutex> lock(buffer_mutex_);
-                    segment_buffer_.push(std::move(seg_data));
-                    buffer_size_.store(segment_buffer_.size());
+                    std::lock_guard<std::mutex> lock(sequence_mutex_);
+                    sequence_ordered_segments_[seg.sequence_number] = std::move(seg_data);
+                    AddDebugLog(L"DatapathIPC::StartStreaming: Stored segment sequence=" + 
+                               std::to_wstring(seg.sequence_number) + L" in sequence buffer");
                 }
-                buffer_condition_.notify_one();
+
+                // Try to release segments in order to the playback buffer
+                ProcessSequencedSegments();
 
                 if (chunk_count) {
                     chunk_count->store(static_cast<int>(buffer_size_.load()));
                 }
 
-                AddDebugLog(L"DatapathIPC::StartStreaming: Downloaded segment, buffer=" + 
+                AddDebugLog(L"DatapathIPC::StartStreaming: Downloaded segment sequence=" + 
+                           std::to_wstring(seg.sequence_number) + L", buffer=" + 
                            std::to_wstring(buffer_size_.load()));
             } else {
-                AddDebugLog(L"DatapathIPC::StartStreaming: Failed to download segment");
+                AddDebugLog(L"DatapathIPC::StartStreaming: Failed to download segment sequence=" + 
+                           std::to_wstring(seg.sequence_number));
             }
         }
 
@@ -668,6 +741,15 @@ void DatapathIPC::CleanupResources() {
         }
         buffer_size_.store(0);
     }
+    
+    // Clear sequence tracking
+    {
+        std::lock_guard<std::mutex> lock(sequence_mutex_);
+        sequence_ordered_segments_.clear();
+        seen_urls_.clear();
+        next_expected_sequence_ = 0.0;
+        last_processed_sequence_ = -1.0;
+    }
 }
 
 // Event handlers
@@ -815,6 +897,49 @@ bool DatapathIPC::WriteToNamedPipe(const std::vector<char>& data) {
     }
 
     return false;
+}
+
+void DatapathIPC::ProcessSequencedSegments() {
+    std::lock_guard<std::mutex> seq_lock(sequence_mutex_);
+    
+    // Move segments that are ready (in sequence order) to the playback buffer
+    while (!sequence_ordered_segments_.empty()) {
+        auto it = sequence_ordered_segments_.find(next_expected_sequence_);
+        if (it == sequence_ordered_segments_.end()) {
+            // Next expected segment is not available yet
+            break;
+        }
+        
+        // Move this segment to the playback buffer
+        std::vector<char> segment_data = std::move(it->second);
+        sequence_ordered_segments_.erase(it);
+        
+        {
+            std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
+            segment_buffer_.push(std::move(segment_data));
+            buffer_size_.store(segment_buffer_.size());
+        }
+        buffer_condition_.notify_one();
+        
+        AddDebugLog(L"DatapathIPC::ProcessSequencedSegments: Released segment sequence=" + 
+                   std::to_wstring(next_expected_sequence_) + L" to playback buffer");
+        
+        last_processed_sequence_ = next_expected_sequence_;
+        next_expected_sequence_ += 1.0;
+    }
+    
+    // Clean up very old segments that might be stuck (older than last processed - 10)
+    auto cleanup_threshold = last_processed_sequence_ - 10.0;
+    auto cleanup_it = sequence_ordered_segments_.begin();
+    while (cleanup_it != sequence_ordered_segments_.end()) {
+        if (cleanup_it->first < cleanup_threshold) {
+            AddDebugLog(L"DatapathIPC::ProcessSequencedSegments: Cleaning up old segment sequence=" + 
+                       std::to_wstring(cleanup_it->first));
+            cleanup_it = sequence_ordered_segments_.erase(cleanup_it);
+        } else {
+            ++cleanup_it;
+        }
+    }
 }
 
 // Compatibility function
