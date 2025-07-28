@@ -206,18 +206,6 @@ bool TxQueueIPC::ReadSegmentFromQueue(StreamSegment& segment) {
     if (!queue_) return false;
     
     try {
-        // First, check if we have enough data for at least the header (16 bytes minimum)
-        const size_t header_size = sizeof(uint32_t) * 4; // sequence, checksum, is_end_marker, data_size
-        
-        // Quick availability check before creating transaction
-        auto head = reinterpret_cast<std::atomic<uint64_t>*>(&queue_->status_.head_)->load(std::memory_order_relaxed);
-        auto tail = reinterpret_cast<std::atomic<uint64_t>*>(&queue_->status_.tail_)->load(std::memory_order_acquire);
-        auto available = (tail - head + queue_->capacity_) & (queue_->capacity_ - 1);
-        
-        if (available < header_size) {
-            // Not enough data for even the header, don't spam logs
-            return false;
-        }
         
         if (auto read_op = tx_read_t<qcstudio::tx_queue_sp_t>(*queue_)) {
             // Read segment header
@@ -242,13 +230,6 @@ bool TxQueueIPC::ReadSegmentFromQueue(StreamSegment& segment) {
             // Validate data size is reasonable (prevent buffer overflow)
             if (data_size > 16 * 1024 * 1024) { // 16MB max segment size
                 AddDebugLog(L"[TX-QUEUE] Invalid data size: " + std::to_wstring(data_size) + L" bytes");
-                return false;
-            }
-            
-            // Check if we have enough data for the full segment
-            if (data_size > 0 && available < (header_size + data_size)) {
-                AddDebugLog(L"[TX-QUEUE] Insufficient data for segment: need " + std::to_wstring(header_size + data_size) + 
-                           L" bytes, have " + std::to_wstring(available) + L" bytes");
                 return false;
             }
             
