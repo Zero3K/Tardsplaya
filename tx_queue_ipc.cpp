@@ -150,7 +150,7 @@ bool TxQueueIPC::WriteSegmentToQueue(const StreamSegment& segment) {
     if (!queue_) return false;
     
     try {
-        if (auto write_op = tx_write_t(*queue_)) {
+        if (auto write_op = tx_write_t<qcstudio::tx_queue_sp_t>(*queue_)) {
             // Write segment header
             write_op.write(segment.sequence_number);
             write_op.write(segment.checksum);
@@ -175,7 +175,7 @@ bool TxQueueIPC::ReadSegmentFromQueue(StreamSegment& segment) {
     if (!queue_) return false;
     
     try {
-        if (auto read_op = tx_read_t(*queue_)) {
+        if (auto read_op = tx_read_t<qcstudio::tx_queue_sp_t>(*queue_)) {
             // Read segment header
             uint32_t data_size;
             read_op.read(segment.sequence_number);

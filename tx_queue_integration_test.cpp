@@ -37,7 +37,7 @@ int main() {
         
         // Write test data
         {
-            if (auto write_op = tx_write_t(queue)) {
+            if (auto write_op = tx_write_t<qcstudio::tx_queue_sp_t>(queue)) {
                 std::string test_data = "Hello TX-Queue!";
                 if (write_op.write(test_data.data(), test_data.size())) {
                     std::wcout << L"SUCCESS: Write operation completed" << std::endl;
@@ -53,7 +53,7 @@ int main() {
         
         // Read test data
         {
-            if (auto read_op = tx_read_t(queue)) {
+            if (auto read_op = tx_read_t<qcstudio::tx_queue_sp_t>(queue)) {
                 char buffer[32] = {0};
                 if (read_op.read(buffer, 15)) { // Read "Hello TX-Queue!"
                     std::wcout << L"SUCCESS: Read operation completed: " 

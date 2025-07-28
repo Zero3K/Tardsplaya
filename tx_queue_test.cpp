@@ -20,7 +20,7 @@ int main() {
         
         // Test write operation
         {
-            if (auto write_op = tx_write_t(queue)) {
+            if (auto write_op = tx_write_t<qcstudio::tx_queue_sp_t>(queue)) {
                 int test_value = 42;
                 if (write_op.write(test_value)) {
                     std::wcout << L"Write operation successful" << std::endl;
@@ -32,7 +32,7 @@ int main() {
         
         // Test read operation
         {
-            if (auto read_op = tx_read_t(queue)) {
+            if (auto read_op = tx_read_t<qcstudio::tx_queue_sp_t>(queue)) {
                 int read_value = 0;
                 if (read_op.read(read_value)) {
                     std::wcout << L"Read operation successful, value: " << read_value << std::endl;
