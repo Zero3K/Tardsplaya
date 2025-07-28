@@ -754,13 +754,18 @@ bool BufferAndPipeStreamToPlayerDatapath(
     const std::wstring& selected_quality,
     HANDLE* player_process_handle
 ) {
+    AddDebugLog(L"***TEST*** DATAPATH FUNCTION ENTRY POINT REACHED");
     AddDebugLog(L"[DATAPATH] BufferAndPipeStreamToPlayerDatapath: ENTRY - Starting Datapath IPC streaming for " + channel_name);
     AddDebugLog(L"[DATAPATH] Parameters: player_path=" + player_path + L", buffer_segments=" + std::to_wstring(buffer_segments));
+    AddDebugLog(L"***TEST*** DATAPATH FUNCTION PARAMETERS SET");
 
     try {
+        AddDebugLog(L"***TEST*** ENTERING TRY BLOCK IN DATAPATH FUNCTION");
         // Create and configure Datapath IPC
         AddDebugLog(L"[DATAPATH] Creating DatapathIPC instance...");
+        AddDebugLog(L"***TEST*** ABOUT TO CREATE DATAPATH IPC INSTANCE");
         DatapathIPC datapath_ipc;
+        AddDebugLog(L"***TEST*** DATAPATH IPC INSTANCE CREATED SUCCESSFULLY");
         
         AddDebugLog(L"[DATAPATH] Configuring DatapathIPC...");
         DatapathIPC::Config config;

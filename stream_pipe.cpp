@@ -646,6 +646,7 @@ bool BufferAndPipeStreamToPlayer(
 ) {
     // Always log that this function is being called for debugging
     AddDebugLog(L"[ENTRY] BufferAndPipeStreamToPlayer called for channel: " + channel_name);
+    AddDebugLog(L"***TEST*** ENTRY POINT REACHED - DATAPATH IPC SHOULD BE CALLED");
     
     // Configuration flag to choose IPC method
     // Set to true to use new Datapath IPC (high performance)
@@ -653,19 +654,24 @@ bool BufferAndPipeStreamToPlayer(
     static const bool USE_DATAPATH_IPC = true;
     
     AddDebugLog(L"[CONFIG] USE_DATAPATH_IPC = " + std::to_wstring(USE_DATAPATH_IPC));
+    AddDebugLog(L"***TEST*** CONFIG SHOWING USE_DATAPATH_IPC = " + std::to_wstring(USE_DATAPATH_IPC));
     
     if (USE_DATAPATH_IPC) {
         AddDebugLog(L"[DATAPATH] BufferAndPipeStreamToPlayer: Using Datapath IPC for " + channel_name);
+        AddDebugLog(L"***TEST*** ABOUT TO CALL BufferAndPipeStreamToPlayerDatapath");
         try {
+            AddDebugLog(L"***TEST*** INSIDE TRY BLOCK - CALLING DATAPATH FUNCTION");
             bool result = BufferAndPipeStreamToPlayerDatapath(
                 player_path, playlist_url, cancel_token, buffer_segments,
                 channel_name, chunk_count, selected_quality, player_process_handle
             );
             AddDebugLog(L"[DATAPATH] BufferAndPipeStreamToPlayerDatapath returned: " + std::to_wstring(result));
+            AddDebugLog(L"***TEST*** DATAPATH FUNCTION RETURNED: " + std::to_wstring(result));
             return result;
         } catch (const std::exception& e) {
             std::string error_msg(e.what());
             AddDebugLog(L"[DATAPATH] Exception in Datapath IPC: " + std::wstring(error_msg.begin(), error_msg.end()));
+            AddDebugLog(L"***TEST*** CAUGHT EXCEPTION: " + std::wstring(error_msg.begin(), error_msg.end()));
             AddDebugLog(L"[DATAPATH] Falling back to legacy Windows pipes for " + channel_name);
             return BufferAndPipeStreamToPlayerLegacy(
                 player_path, playlist_url, cancel_token, buffer_segments,
@@ -673,6 +679,7 @@ bool BufferAndPipeStreamToPlayer(
             );
         } catch (...) {
             AddDebugLog(L"[DATAPATH] Unknown exception in Datapath IPC, falling back to legacy for " + channel_name);
+            AddDebugLog(L"***TEST*** CAUGHT UNKNOWN EXCEPTION - FALLING BACK TO LEGACY");
             return BufferAndPipeStreamToPlayerLegacy(
                 player_path, playlist_url, cancel_token, buffer_segments,
                 channel_name, chunk_count, selected_quality, player_process_handle
