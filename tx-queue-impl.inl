@@ -37,8 +37,8 @@ QCS_INLINE qcstudio::tx_queue_sp_t::tx_queue_sp_t(uint64_t _capacity) {
 
     // init indices
 
-    status_.head_ = 0;
-    status_.tail_ = 0;
+    atomic_ref<uint64_t>(status_.head_).store(0);
+    atomic_ref<uint64_t>(status_.tail_).store(0);
 
     // force capacity power of 2
 
@@ -55,9 +55,9 @@ QCS_INLINE qcstudio::tx_queue_sp_t::tx_queue_sp_t(uint64_t _capacity) {
     // alloc
 
 #if _WIN32
-    storage_ = (uint8_t*)_aligned_malloc(capacity_, CACHE_LINE_SIZE);
+    storage_ = (uint8_t*)_aligned_malloc(static_cast<size_t>(capacity_), CACHE_LINE_SIZE);
 #else
-    storage_ = (uint8_t*)aligned_alloc(CACHE_LINE_SIZE, capacity_);
+    storage_ = (uint8_t*)aligned_alloc(CACHE_LINE_SIZE, static_cast<size_t>(capacity_));
 #endif
 }
 
@@ -115,8 +115,8 @@ QCS_INLINE qcstudio::tx_queue_mp_t::tx_queue_mp_t(uint8_t* _prealloc_and_init, u
 template<typename QTYPE>
 QCS_INLINE qcstudio::tx_write_t<QTYPE>::tx_write_t(QTYPE& _queue) : queue_(_queue) {
     storage_     = queue_.storage_;
-    tail_        = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.tail_)->load(std::memory_order_relaxed);  // relaxed => no sync required as the tail is only modified by the producer (us)
-    cached_head_ = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.head_)->load(std::memory_order_relaxed);  // optimistic guess, "gimme whatever you have". Later we'll sync if required!
+    tail_        = atomic_ref<uint64_t>(queue_.status_.tail_).load(memory_order_relaxed);  // relaxed => no sync required as the tail is only modified by the producer (us)
+    cached_head_ = atomic_ref<uint64_t>(queue_.status_.head_).load(memory_order_relaxed);  // optimistic guess, "gimme whatever you have". Later we'll sync if required!
     capacity_    = queue_.capacity_;                                                       // copy to favour the data locality
     invalidated_ = !_queue.is_ok();
 }
@@ -134,21 +134,19 @@ QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const void* _buffer, uint64_t
 template<typename QTYPE>
 template<typename T>
 QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T& _item) -> bool {
-    if constexpr (is_same_v<T, string>) {
-        return imp_write(_item.data(), _item.length());
-    } else {
-        return imp_write(&_item, sizeof(T));
-    }
+    // Use C++14 compatible type checking instead of if constexpr
+    return std::is_same<T, string>::value ? 
+        imp_write(_item.data(), _item.length()) :
+        imp_write(&_item, sizeof(T));
 }
 
 template<typename QTYPE>
 template<typename T, uint64_t N>
 QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::write(const T (&_array)[N]) -> bool {
-    if constexpr (is_same_v<T, char> || is_same_v<T, wchar_t>) {
-        return N > 1 && imp_write(&_array[0], (N - 1) * sizeof(T));  // no "\0" included
-    } else {
-        return imp_write(&_array[0], N * sizeof(T));
-    }
+    // Use C++14 compatible type checking instead of if constexpr
+    return (std::is_same<T, char>::value || std::is_same<T, wchar_t>::value) ?
+        (N > 1 && imp_write(&_array[0], (N - 1) * sizeof(T))) :  // no "\0" included
+        imp_write(&_array[0], N * sizeof(T));
 }
 
 template<typename QTYPE>
@@ -171,15 +169,15 @@ QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::imp_write(const void* _buffer, uint
     // sync the head if no space
 
     if (_size > available_space) {
-        cached_head_    = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.head_)->load(std::memory_order_acquire);
+        cached_head_    = atomic_ref<uint64_t>(queue_.status_.head_).load(memory_order_acquire);
         available_space = (cached_head_ - tail_ - 1 + capacity_) & (capacity_ - 1);
         if (_size > available_space) {
             auto current_core = (int)GetCurrentProcessorNumber();
-            reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.producer_core_)->store(current_core, std::memory_order_relaxed);
+            atomic_ref<int32_t>(queue_.status_.producer_core_).store(current_core, memory_order_relaxed);
 
             // yield if consumer is in the same cpu
 
-            int consumer_core = reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.consumer_core_)->load(std::memory_order_relaxed);
+            int consumer_core = atomic_ref<int32_t>(queue_.status_.consumer_core_).load(memory_order_relaxed);
             if (consumer_core != -1 && consumer_core == current_core) {
                 this_thread::yield();
             }
@@ -194,10 +192,10 @@ QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::imp_write(const void* _buffer, uint
 
     if ((tail_ + _size) > capacity_) {
         const auto first_chunk_size = capacity_ - tail_;
-        memcpy(storage_ + tail_, _buffer, /*                        */ first_chunk_size);
-        memcpy(storage_, /*   */ (uint8_t*)_buffer + first_chunk_size, _size - first_chunk_size);
+        memcpy(storage_ + tail_, _buffer, /*                        */ static_cast<size_t>(first_chunk_size));
+        memcpy(storage_, /*   */ (uint8_t*)_buffer + first_chunk_size, static_cast<size_t>(_size - first_chunk_size));
     } else {
-        memcpy(storage_ + tail_, _buffer, _size);
+        memcpy(storage_ + tail_, _buffer, static_cast<size_t>(_size));
     }
 
     // update the tail properly
@@ -206,9 +204,8 @@ QCS_INLINE auto qcstudio::tx_write_t<QTYPE>::imp_write(const void* _buffer, uint
 
     // reset producer_core_ to -1 only if it was previously set (i.e., not -1)
 
-    auto prev_core = reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.producer_core_)->load(std::memory_order_relaxed);
-    if (prev_core != -1) {
-        reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.producer_core_)->store(-1, std::memory_order_relaxed);
+    if (auto prev_core = atomic_ref<int32_t>(queue_.status_.producer_core_).load(memory_order_relaxed); prev_core != -1) {
+        atomic_ref<int32_t>(queue_.status_.producer_core_).store(-1, memory_order_relaxed);
     }
 
     return true;
@@ -222,7 +219,7 @@ QCS_INLINE void qcstudio::tx_write_t<QTYPE>::invalidate() {
 template<typename QTYPE>
 QCS_INLINE qcstudio::tx_write_t<QTYPE>::~tx_write_t() {
     if (!invalidated_) {
-        reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.tail_)->store(tail_, std::memory_order_release);  // TODO: check how to deal with this in IPC we need to use https://learn.microsoft.com/en-us/windows/win32/sync/interlocked-variable-access
+        atomic_ref<uint64_t>(queue_.status_.tail_).store(tail_, memory_order_release);  // TODO: check how to deal with this in IPC we need to use https://learn.microsoft.com/en-us/windows/win32/sync/interlocked-variable-access
     }
 }
 
@@ -235,8 +232,8 @@ QCS_INLINE qcstudio::tx_write_t<QTYPE>::~tx_write_t() {
 template<typename QTYPE>
 QCS_INLINE qcstudio::tx_read_t<QTYPE>::tx_read_t(QTYPE& _queue) : queue_(_queue) {
     storage_     = queue_.storage_;
-    head_        = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.head_)->load(std::memory_order_relaxed);  // relaxed => no sync required as the head is only modified by the consumer (us)
-    cached_tail_ = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.tail_)->load(std::memory_order_relaxed);  // optimistic guess, "gimme whatever you have". Later we'll sync if required!
+    head_        = atomic_ref<uint64_t>(queue_.status_.head_).load(memory_order_relaxed);  // relaxed => no sync required as the head is only modified by the consumer (us)
+    cached_tail_ = atomic_ref<uint64_t>(queue_.status_.tail_).load(memory_order_relaxed);  // optimistic guess, "gimme whatever you have". Later we'll sync if required!
     capacity_    = queue_.capacity_;                                                       // copy to favour the data locality
     invalidated_ = !_queue.is_ok();
 }
@@ -262,9 +259,18 @@ QCS_INLINE auto qcstudio::tx_read_t<QTYPE>::read(T& _item) -> bool {
 template<typename QTYPE>
 template<typename... ARGS>
 QCS_INLINE auto qcstudio::tx_read_t<QTYPE>::read() -> enable_if_t<conjunction_v<is_default_constructible<ARGS>...>, tuple<ARGS...>> {
-    if constexpr (sizeof...(ARGS) > 0) {
-        auto temp = tuple<ARGS...>{};
-        if (auto all_read = apply([this](auto&&... _args) { return (this->read(_args) && ...); }, temp)) {
+    // Use compile-time constant instead of if constexpr for C++14 compatibility  
+    auto temp = tuple<ARGS...>{};
+    if (sizeof...(ARGS) > 0) {
+        // Use a manual approach since fold expressions are C++17
+        bool all_read = true;
+        auto read_all = [this, &all_read](auto&&... _args) {
+            // This expansion works in C++14 with a trick using initializer list
+            auto dummy = {(all_read = all_read && this->read(_args), 0)...};
+            (void)dummy; // Suppress unused variable warning
+            return all_read;
+        };
+        if (apply(read_all, temp)) {
             return move(temp);
         }
     }
@@ -282,15 +288,15 @@ QCS_INLINE auto qcstudio::tx_read_t<QTYPE>::imp_read(void* _buffer, uint64_t _si
     // sync the head if no space
 
     if (_size > available_data) {
-        cached_tail_   = reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.tail_)->load(std::memory_order_acquire);
+        cached_tail_   = atomic_ref<uint64_t>(queue_.status_.tail_).load(memory_order_acquire);
         available_data = (cached_tail_ - head_ + capacity_) & (capacity_ - 1);
         if (_size > available_data) {
             auto current_core = (int)GetCurrentProcessorNumber();
-            reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.consumer_core_)->store(current_core, std::memory_order_relaxed);
+            atomic_ref<int32_t>(queue_.status_.consumer_core_).store(current_core, memory_order_relaxed);
 
             // yield if producer is in the same cpu
 
-            int producer_core = reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.producer_core_)->load(std::memory_order_relaxed);
+            int producer_core = atomic_ref<int32_t>(queue_.status_.producer_core_).load(memory_order_relaxed);
             if (producer_core != -1 && producer_core == current_core) {
                 this_thread::yield();
             }
@@ -305,10 +311,10 @@ QCS_INLINE auto qcstudio::tx_read_t<QTYPE>::imp_read(void* _buffer, uint64_t _si
 
     if ((head_ + _size) > capacity_) {
         const auto first_chunk_size = capacity_ - head_;
-        memcpy(_buffer, /*                        */ storage_ + head_, first_chunk_size);
-        memcpy((uint8_t*)_buffer + first_chunk_size, storage_, /*   */ _size - first_chunk_size);
+        memcpy(_buffer, /*                        */ storage_ + head_, static_cast<size_t>(first_chunk_size));
+        memcpy((uint8_t*)_buffer + first_chunk_size, storage_, /*   */ static_cast<size_t>(_size - first_chunk_size));
     } else {
-        memcpy(_buffer, storage_ + head_, _size);
+        memcpy(_buffer, storage_ + head_, static_cast<size_t>(_size));
     }
 
     // update the tail properly
@@ -317,9 +323,8 @@ QCS_INLINE auto qcstudio::tx_read_t<QTYPE>::imp_read(void* _buffer, uint64_t _si
 
     // reset producer_core_ to -1 only if it was previously set (i.e., not -1)
 
-    auto prev_core = reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.consumer_core_)->load(std::memory_order_relaxed);
-    if (prev_core != -1) {
-        reinterpret_cast<std::atomic<int32_t>*>(&queue_.status_.consumer_core_)->store(-1, std::memory_order_relaxed);
+    if (auto prev_core = atomic_ref<int32_t>(queue_.status_.consumer_core_).load(memory_order_relaxed); prev_core != -1) {
+        atomic_ref<int32_t>(queue_.status_.consumer_core_).store(-1, memory_order_relaxed);
     }
 
     return true;
@@ -333,7 +338,7 @@ QCS_INLINE void qcstudio::tx_read_t<QTYPE>::invalidate() {
 template<typename QTYPE>
 QCS_INLINE qcstudio::tx_read_t<QTYPE>::~tx_read_t() {
     if (!invalidated_) {
-        reinterpret_cast<std::atomic<uint64_t>*>(&queue_.status_.head_)->store(head_, std::memory_order_release);  // TODO: check how to deal with this in IPC we need to use https://learn.microsoft.com/en-us/windows/win32/sync/interlocked-variable-access
+        atomic_ref<uint64_t>(queue_.status_.head_).store(head_, memory_order_release);  // TODO: check how to deal with this in IPC we need to use https://learn.microsoft.com/en-us/windows/win32/sync/interlocked-variable-access
     }
 }
 
