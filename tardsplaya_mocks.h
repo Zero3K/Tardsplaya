@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 
 // Mock implementations for Tardsplaya-specific classes
 // These allow the Pipeline integration to compile on non-Windows systems

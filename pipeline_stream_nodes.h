@@ -23,6 +23,7 @@
 #include <future>
 #include <memory>
 #include <cstddef>
+#include <algorithm>
 
 namespace Tardsplaya {
 
