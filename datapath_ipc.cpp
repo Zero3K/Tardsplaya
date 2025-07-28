@@ -529,11 +529,15 @@ void DatapathIPC::NamedPipeThreadProc() {
             BOOL peek_result = PeekNamedPipe(named_pipe_handle_, nullptr, 0, nullptr, &bytes_available, nullptr);
             if (!peek_result) {
                 DWORD peek_error = GetLastError();
-                if (peek_error == ERROR_BROKEN_PIPE || peek_error == ERROR_NO_DATA) {
-                    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Client disconnected from pipe");
+                // Only treat ERROR_BROKEN_PIPE as a disconnection
+                // ERROR_NO_DATA is normal for outbound-only pipes and doesn't indicate disconnection
+                if (peek_error == ERROR_BROKEN_PIPE) {
+                    AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: Client disconnected from pipe (broken pipe)");
                     named_pipe_active_.store(false);
                     break;
                 }
+                // For other errors, just log them but don't treat as disconnection
+                AddDebugLog(L"DatapathIPC::NamedPipeThreadProc: PeekNamedPipe returned error " + std::to_wstring(peek_error) + L" (not treating as disconnection)");
             }
             
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -575,6 +579,9 @@ void DatapathIPC::BufferManagerThreadProc() {
             
             AddDebugLog(L"DatapathIPC::BufferManagerThreadProc: Sent segment, buffer=" + 
                        std::to_wstring(buffer_size_.load()));
+                       
+            // Add small delay between segments to prevent overwhelming the media player
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
         if (end_of_stream_.load() && buffer_size_.load() == 0) {
@@ -759,8 +766,12 @@ bool DatapathIPC::WriteToNamedPipe(const std::vector<char>& data) {
 
     if (!result || bytes_written != data.size()) {
         DWORD error = GetLastError();
-        if (error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA) {
-            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Pipe disconnected (error=" + std::to_wstring(error) + L")");
+        if (error == ERROR_BROKEN_PIPE) {
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Pipe disconnected (broken pipe, error=" + std::to_wstring(error) + L")");
+            named_pipe_active_.store(false);
+        } else if (error == ERROR_NO_DATA) {
+            // ERROR_NO_DATA during write can indicate client closed connection
+            AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Client closed connection (error=" + std::to_wstring(error) + L")");
             named_pipe_active_.store(false);
         } else {
             AddDebugLog(L"DatapathIPC::WriteToNamedPipe: Write failed, Error=" + std::to_wstring(error) + 
