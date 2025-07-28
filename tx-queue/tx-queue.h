@@ -115,7 +115,7 @@ namespace qcstudio {
                                                    auto write(const void* _buffer, uint64_t _size) -> bool;                                   // a raw buffer
         template<typename T>                       auto write(const T& _item) -> bool;                                                        // a normal type
         template<typename T, uint64_t N>           auto write(const T (&_array)[N]) -> bool;                                                  // an array (no trailing '\0' for character arrays)
-        template<typename FIRST, typename... REST> auto write(const FIRST& _first, REST... _rest) -> enable_if_t<!is_pointer_v<FIRST>, bool>; // variadic
+        template<typename FIRST, typename... REST> auto write(const FIRST& _first, REST... _rest) -> typename std::enable_if<!std::is_pointer<FIRST>::value, bool>::type; // variadic
         // clang-format on
 
         // invalidate and won't auto-commit
@@ -151,7 +151,7 @@ namespace qcstudio {
         // clang-format off
                                   auto read(void* _buffer, uint64_t _size) -> bool;                                             // a buffer
         template<typename T>      auto read(T& _item) -> bool;                                                                  // an individual type
-        template<typename...ARGS> auto read() -> enable_if_t<conjunction_v<is_default_constructible<ARGS>...>, tuple<ARGS...>>; // structured-bindings compatible
+        template<typename...ARGS> auto read() -> std::tuple<ARGS...>; // structured-bindings compatible
 
         // clang-format on
 
