@@ -254,7 +254,7 @@ std::thread StartPipelineStreamThread(
             std::string channel_str(channel_name.begin(), channel_name.end());
             
             // Create Pipeline manager for this channel
-            auto pipeline_manager = std::make_unique<Tardsplaya::PipelineManager>(channel_str);
+            auto pipeline_manager = std::make_unique<Tardsplaya::PipelineManager>(channel_str, player_path);
             
             // Set up statistics callback to update chunk count and logging
             pipeline_manager->setStatsCallback([=](const Tardsplaya::StatsPacket::Stats& stats) mutable {
@@ -304,6 +304,15 @@ std::thread StartPipelineStreamThread(
                 }
                 AddDebugLog(L"StartPipelineStreamThread: Pipeline start failed for " + channel_name);
                 return;
+            }
+            
+            // Store player process handle if pointer provided
+            if (player_process_handle) {
+#ifdef _WIN32
+                *player_process_handle = pipeline_manager->getPlayerProcessHandle();
+#else
+                *player_process_handle = nullptr;  // Not supported on non-Windows platforms
+#endif
             }
             
             if (log_callback) {

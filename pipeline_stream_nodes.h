@@ -31,6 +31,10 @@
 #include <cstddef>
 #include <algorithm>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace Tardsplaya {
 
 /**
@@ -370,6 +374,10 @@ public:
         m_statsOutputIndex = addOutput("stats").getIndex();
     }
 
+    ~MediaPlayerOutputNode() {
+        stop();
+    }
+
     bool start() noexcept override {
         return startPlayer();
     }
@@ -378,6 +386,15 @@ public:
         stopPlayer();
     }
 
+#ifdef _WIN32
+    /**
+     * @brief Gets the player process handle (Windows only)
+     */
+    HANDLE getPlayerProcessHandle() const {
+        return m_playerProcess;
+    }
+#endif
+
 protected:
     bool processPacket(std::shared_ptr<TSPacket> packet, lexus2k::pipeline::IPad& inputPad, uint32_t timeoutMs) noexcept override {
         if (!m_isPlayerRunning || !packet->isValidPacket()) {
@@ -385,7 +402,32 @@ protected:
         }
 
         try {
-            // Write TS packet to player stdin
+#ifdef _WIN32
+            // Write TS packet to player stdin via Windows pipe
+            if (m_stdinWrite != INVALID_HANDLE_VALUE) {
+                DWORD bytesWritten = 0;
+                BOOL result = WriteFile(m_stdinWrite, packet->getData(), 
+                                       static_cast<DWORD>(packet->getSize()), 
+                                       &bytesWritten, nullptr);
+                
+                if (result && bytesWritten == packet->getSize()) {
+                    m_packetsSent++;
+                    m_bytesSent += packet->getSize();
+
+                    // Update statistics periodically
+                    if (m_packetsSent % 100 == 0) {
+                        StatsPacket::Stats stats;
+                        stats.packetsProcessed = m_packetsSent;
+                        stats.bytesProcessed = m_bytesSent;
+                        auto statsPacket = std::make_shared<StatsPacket>(stats);
+                        (*this)[m_statsOutputIndex].pushPacket(statsPacket, 100);
+                    }
+
+                    return true;
+                }
+            }
+#else
+            // For non-Windows platforms, fall back to file output
             if (m_playerStdin.is_open()) {
                 m_playerStdin.write(reinterpret_cast<const char*>(packet->getData()), packet->getSize());
                 m_playerStdin.flush();
@@ -404,6 +446,7 @@ protected:
 
                 return true;
             }
+#endif
         } catch (...) {
             // Handle player errors
         }
@@ -418,23 +461,115 @@ private:
     std::atomic<size_t> m_packetsSent{0};
     std::atomic<size_t> m_bytesSent{0};
 
+#ifdef _WIN32
+    HANDLE m_playerProcess = INVALID_HANDLE_VALUE;
+    HANDLE m_playerThread = INVALID_HANDLE_VALUE;
+    HANDLE m_stdinWrite = INVALID_HANDLE_VALUE;
+    HANDLE m_stdinRead = INVALID_HANDLE_VALUE;
+#endif
+
     bool startPlayer() {
+#ifdef _WIN32
         try {
-            // In a real implementation, this would use proper process spawning
-            // For this example, we'll simulate writing to a file
-            m_playerStdin.open("stream_output.ts", std::ios::binary);
-            m_isPlayerRunning = m_playerStdin.is_open();
-            return m_isPlayerRunning;
+            // Create pipe for stdin
+            SECURITY_ATTRIBUTES sa = {};
+            sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+            sa.bInheritHandle = TRUE;
+            sa.lpSecurityDescriptor = nullptr;
+
+            if (!CreatePipe(&m_stdinRead, &m_stdinWrite, &sa, 0)) {
+                return false;
+            }
+
+            // Make sure the write handle to the pipe is not inherited
+            if (!SetHandleInformation(m_stdinWrite, HANDLE_FLAG_INHERIT, 0)) {
+                CloseHandle(m_stdinRead);
+                CloseHandle(m_stdinWrite);
+                return false;
+            }
+
+            // Set up process information
+            STARTUPINFOW si = {};
+            si.cb = sizeof(STARTUPINFOW);
+            si.hStdInput = m_stdinRead;
+            si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+            si.dwFlags |= STARTF_USESTDHANDLES;
+
+            PROCESS_INFORMATION pi = {};
+
+            // Convert player command to wide string
+            std::wstring widePlayerCommand(m_playerCommand.begin(), m_playerCommand.end());
+            
+            // Build command line - extract executable and args
+            std::wstring cmdLine;
+            size_t spacePos = widePlayerCommand.find(' ');
+            if (spacePos != std::wstring::npos) {
+                std::wstring executable = widePlayerCommand.substr(0, spacePos);
+                std::wstring args = widePlayerCommand.substr(spacePos + 1);
+                cmdLine = L"\"" + executable + L"\" " + args;
+            } else {
+                cmdLine = L"\"" + widePlayerCommand + L"\"";
+            }
+
+            // Launch process
+            if (!CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE, 
+                              CREATE_NEW_CONSOLE | CREATE_BREAKAWAY_FROM_JOB, 
+                              nullptr, nullptr, &si, &pi)) {
+                CloseHandle(m_stdinRead);
+                CloseHandle(m_stdinWrite);
+                return false;
+            }
+
+            m_playerProcess = pi.hProcess;
+            m_playerThread = pi.hThread;
+            m_isPlayerRunning = true;
+
+            // Close the read end of the pipe in parent process
+            CloseHandle(m_stdinRead);
+            m_stdinRead = INVALID_HANDLE_VALUE;
+
+            return true;
         } catch (...) {
             return false;
         }
+#else
+        // For non-Windows platforms, fall back to file output
+        m_playerStdin.open("stream_output.ts", std::ios::binary);
+        m_isPlayerRunning = m_playerStdin.is_open();
+        return m_isPlayerRunning;
+#endif
     }
 
     void stopPlayer() {
         m_isPlayerRunning = false;
+        
+#ifdef _WIN32
+        // Close stdin pipe to signal player to exit
+        if (m_stdinWrite != INVALID_HANDLE_VALUE) {
+            CloseHandle(m_stdinWrite);
+            m_stdinWrite = INVALID_HANDLE_VALUE;
+        }
+        if (m_stdinRead != INVALID_HANDLE_VALUE) {
+            CloseHandle(m_stdinRead);
+            m_stdinRead = INVALID_HANDLE_VALUE;
+        }
+
+        // Wait for player process to exit gracefully
+        if (m_playerProcess != INVALID_HANDLE_VALUE) {
+            WaitForSingleObject(m_playerProcess, 5000); // Wait up to 5 seconds
+            CloseHandle(m_playerProcess);
+            m_playerProcess = INVALID_HANDLE_VALUE;
+        }
+        if (m_playerThread != INVALID_HANDLE_VALUE) {
+            CloseHandle(m_playerThread);
+            m_playerThread = INVALID_HANDLE_VALUE;
+        }
+#else
         if (m_playerStdin.is_open()) {
             m_playerStdin.close();
         }
+#endif
     }
 };
 

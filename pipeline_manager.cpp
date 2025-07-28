@@ -6,8 +6,8 @@
 
 namespace Tardsplaya {
 
-PipelineManager::PipelineManager(const std::string& channel)
-    : m_channel(channel) {
+PipelineManager::PipelineManager(const std::string& channel, const std::wstring& playerPath)
+    : m_channel(channel), m_playerPath(playerPath) {
     m_pipeline = std::make_unique<lexus2k::pipeline::Pipeline>();
 }
 
@@ -32,7 +32,15 @@ void PipelineManager::setupStreamingPipeline() {
     m_parserNode = m_pipeline->addNode<HLSParserNode>();
     m_routerNode = m_pipeline->addNode<TSRouterNode>();
     m_bufferNode = m_pipeline->addNode<SmartBufferNode>(5000, 10000);
-    m_outputNode = m_pipeline->addNode<MediaPlayerOutputNode>("mpv -");
+    
+    // Convert player path to string for the node
+    std::string playerPathStr;
+    if (!m_playerPath.empty()) {
+        playerPathStr = std::string(m_playerPath.begin(), m_playerPath.end());
+    } else {
+        playerPathStr = "mpv -";  // Default fallback
+    }
+    m_outputNode = m_pipeline->addNode<MediaPlayerOutputNode>(playerPathStr);
     m_statsNode = m_pipeline->addNode<StatsMonitorNode>();
 }
 
@@ -102,6 +110,15 @@ void PipelineManager::resume() {
         m_isPaused = false;
     }
 }
+
+#ifdef _WIN32
+HANDLE PipelineManager::getPlayerProcessHandle() const {
+    if (m_outputNode) {
+        return m_outputNode->getPlayerProcessHandle();
+    }
+    return INVALID_HANDLE_VALUE;
+}
+#endif
 
 // Factory implementations
 

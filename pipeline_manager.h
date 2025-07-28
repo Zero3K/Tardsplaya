@@ -9,6 +9,10 @@
 #include <vector>
 #include <functional>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace Tardsplaya {
 
 /**
@@ -30,7 +34,7 @@ public:
     /**
      * @brief Constructs a Pipeline Manager for the specified channel
      */
-    explicit PipelineManager(const std::string& channel);
+    explicit PipelineManager(const std::string& channel, const std::wstring& playerPath = L"");
     
     /**
      * @brief Destructor
@@ -95,6 +99,13 @@ public:
      */
     bool isRunning() const { return m_isRunning; }
 
+#ifdef _WIN32
+    /**
+     * @brief Gets the player process handle (Windows only)
+     */
+    HANDLE getPlayerProcessHandle() const;
+#endif
+
     /**
      * @brief Creates a basic text processing pipeline (demonstration)
      */
@@ -107,6 +118,7 @@ public:
 
 private:
     std::string m_channel;
+    std::wstring m_playerPath;
     std::unique_ptr<lexus2k::pipeline::Pipeline> m_pipeline;
     
     // Pipeline nodes
