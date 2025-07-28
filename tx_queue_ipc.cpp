@@ -225,7 +225,7 @@ bool TxQueueIPC::ReadSegmentFromQueue(StreamSegment& segment) {
 // NamedPipeManager Implementation
 NamedPipeManager::NamedPipeManager(const std::wstring& player_path) 
     : player_path_(player_path), pipe_handle_(INVALID_HANDLE_VALUE), 
-      player_process_(INVALID_HANDLE_VALUE), initialized_(false) {
+      player_process_(INVALID_HANDLE_VALUE), initialized_(false), use_named_pipe_(false) {
     ZeroMemory(&process_info_, sizeof(process_info_));
 }
 
@@ -234,25 +234,20 @@ NamedPipeManager::~NamedPipeManager() {
 }
 
 bool NamedPipeManager::Initialize(const std::wstring& channel_name) {
-    AddDebugLog(L"[PIPE] Initializing named pipe for channel: " + channel_name);
+    AddDebugLog(L"[PIPE] Initializing pipe manager for channel: " + channel_name);
     
-    // Generate unique pipe name
-    pipe_name_ = GenerateUniquePipeName();
-    
-    // Create named pipe
-    if (!CreatePipeWithPlayer()) {
-        AddDebugLog(L"[PIPE] Failed to create pipe");
-        return false;
-    }
-    
-    // Launch player process
+    // Launch player process (this handles both named pipes and stdin)
     if (!CreatePlayerProcess(channel_name)) {
         AddDebugLog(L"[PIPE] Failed to create player process");
         return false;
     }
     
     initialized_ = true;
-    AddDebugLog(L"[PIPE] Initialized successfully with pipe: " + pipe_name_);
+    if (use_named_pipe_) {
+        AddDebugLog(L"[PIPE] Initialized successfully with named pipe: " + pipe_name_);
+    } else {
+        AddDebugLog(L"[PIPE] Initialized successfully with stdin pipe");
+    }
     return true;
 }
 
@@ -330,58 +325,68 @@ bool NamedPipeManager::CreatePlayerProcess(const std::wstring& channel_name) {
         // For VLC, use stdin instead of named pipe
         cmd_line = L"\"" + player_path_ + L"\" --meta-title=\"" + channel_name + 
                    L"\" --file-caching=5000 -";
+    } else if (player_path_.find(L"mpc") != std::wstring::npos || 
+               player_path_.find(L"MPC") != std::wstring::npos) {
+        // For MPC-HC/BE, use specific parameters to help with stream format detection
+        cmd_line = L"\"" + player_path_ + L"\" - /play";
+        use_named_pipe_ = false;
     } else {
         // Generic player - use stdin
         cmd_line = L"\"" + player_path_ + L"\" -";
     }
     
     STARTUPINFOW si = { sizeof(si) };
-    
-    // Create pipe for stdin redirection
-    HANDLE hStdinRead, hStdinWrite;
-    SECURITY_ATTRIBUTES saAttr = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
-    
-    if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, 1024 * 1024)) { // 1MB buffer
-        AddDebugLog(L"[PIPE] Failed to create stdin pipe");
-        return false;
-    }
-    
-    // Ensure write handle is not inherited
-    if (!SetHandleInformation(hStdinWrite, HANDLE_FLAG_INHERIT, 0)) {
-        AddDebugLog(L"[PIPE] Failed to set handle information");
-        CloseHandle(hStdinRead);
-        CloseHandle(hStdinWrite);
-        return false;
-    }
-    
-    si.hStdInput = hStdinRead;
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    si.dwFlags |= STARTF_USESTDHANDLES;
-    
     ZeroMemory(&process_info_, sizeof(process_info_));
     
-    BOOL result = CreateProcessW(
-        nullptr,
-        const_cast<LPWSTR>(cmd_line.c_str()),
-        nullptr, nullptr, TRUE, // Inherit handles
-        CREATE_NEW_CONSOLE,
-        nullptr, nullptr,
-        &si, &process_info_
-    );
-    
-    // Close read handle since child process owns it now
-    CloseHandle(hStdinRead);
-    
-    if (!result) {
-        DWORD error = GetLastError();
-        AddDebugLog(L"[PIPE] Failed to create player process, error: " + std::to_wstring(error));
-        CloseHandle(hStdinWrite);
+    if (use_named_pipe_) {
+        // This shouldn't be reached now, but keep for safety
+        AddDebugLog(L"[PIPE] Warning: Named pipe mode not implemented for current player");
         return false;
+    } else {
+        // For other players: Create stdin pipe
+        HANDLE hStdinRead, hStdinWrite;
+        SECURITY_ATTRIBUTES saAttr = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
+        
+        if (!CreatePipe(&hStdinRead, &hStdinWrite, &saAttr, 1024 * 1024)) { // 1MB buffer
+            AddDebugLog(L"[PIPE] Failed to create stdin pipe");
+            return false;
+        }
+        
+        // Ensure write handle is not inherited
+        if (!SetHandleInformation(hStdinWrite, HANDLE_FLAG_INHERIT, 0)) {
+            AddDebugLog(L"[PIPE] Failed to set handle information");
+            CloseHandle(hStdinRead);
+            CloseHandle(hStdinWrite);
+            return false;
+        }
+        
+        si.hStdInput = hStdinRead;
+        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        si.dwFlags |= STARTF_USESTDHANDLES;
+        
+        BOOL result = CreateProcessW(
+            nullptr,
+            const_cast<LPWSTR>(cmd_line.c_str()),
+            nullptr, nullptr, TRUE, // Inherit handles for stdin
+            CREATE_NEW_CONSOLE,
+            nullptr, nullptr,
+            &si, &process_info_
+        );
+        
+        // Close read handle since child process owns it now
+        CloseHandle(hStdinRead);
+        
+        if (!result) {
+            DWORD error = GetLastError();
+            AddDebugLog(L"[PIPE] Failed to create player process, error: " + std::to_wstring(error));
+            CloseHandle(hStdinWrite);
+            return false;
+        }
+        
+        // Store the write handle as our "pipe"
+        pipe_handle_ = hStdinWrite;
     }
-    
-    // Store the write handle as our "pipe"
-    pipe_handle_ = hStdinWrite;
     player_process_ = process_info_.hProcess;
     
     AddDebugLog(L"[PIPE] Player process created, PID: " + std::to_wstring(process_info_.dwProcessId));
@@ -563,7 +568,13 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
     
     StreamSegment segment;
     bool initial_buffer_filled = false;
-    const int initial_buffer_size = 5; // Wait for 5 segments before starting playback
+    const int initial_buffer_size = 8; // Increased buffer for MPC-HC
+    
+    // For MPC-HC, collect multiple segments before writing
+    bool is_mpc = (player_path_.find(L"mpc") != std::wstring::npos || 
+                   player_path_.find(L"MPC") != std::wstring::npos);
+    std::vector<char> combined_buffer;
+    const size_t max_combined_size = 2 * 1024 * 1024; // 2MB max buffer
     
     while (!should_stop_.load() && (!cancel_token_ptr_ || !cancel_token_ptr_->load())) {
         // Try to consume a segment from tx-queue
@@ -571,6 +582,14 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             // No data available, check if we should continue waiting
             if (ipc_manager_->IsEndOfStream()) {
                 LogMessage(L"[CONSUMER] End of stream reached");
+                
+                // Flush any remaining data for MPC-HC
+                if (is_mpc && !combined_buffer.empty()) {
+                    if (pipe_manager_->WriteToPlayer(combined_buffer.data(), combined_buffer.size())) {
+                        bytes_transferred_ += combined_buffer.size();
+                        LogMessage(L"[CONSUMER] Flushed final " + std::to_wstring(combined_buffer.size()) + L" bytes to MPC-HC");
+                    }
+                }
                 break;
             }
             
@@ -581,6 +600,14 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
         // Check if this is end marker
         if (segment.is_end_marker) {
             LogMessage(L"[CONSUMER] End marker received");
+            
+            // Flush any remaining data for MPC-HC
+            if (is_mpc && !combined_buffer.empty()) {
+                if (pipe_manager_->WriteToPlayer(combined_buffer.data(), combined_buffer.size())) {
+                    bytes_transferred_ += combined_buffer.size();
+                    LogMessage(L"[CONSUMER] Flushed final " + std::to_wstring(combined_buffer.size()) + L" bytes to MPC-HC");
+                }
+            }
             break;
         }
         
@@ -591,30 +618,54 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
                 initial_buffer_filled = true;
                 LogMessage(L"[CONSUMER] Initial buffer filled, starting playback");
             } else {
-                // Put segment back and wait
-                // Note: tx-queue doesn't support putting back, so we'll just continue
                 LogMessage(L"[CONSUMER] Waiting for initial buffer to fill...");
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
             }
         }
         
         if (initial_buffer_filled && !segment.data.empty()) {
-            // Write segment to player via named pipe
-            if (pipe_manager_->WriteToPlayer(segment.data.data(), segment.data.size())) {
-                bytes_transferred_ += segment.data.size();
-                LogMessage(L"[CONSUMER] Fed segment #" + std::to_wstring(segment.sequence_number) + 
-                          L" to player (" + std::to_wstring(segment.data.size()) + L" bytes)");
+            if (is_mpc) {
+                // For MPC-HC: Combine segments into larger chunks for better compatibility
+                combined_buffer.insert(combined_buffer.end(), segment.data.begin(), segment.data.end());
+                
+                // Write when buffer is large enough or after timeout
+                if (combined_buffer.size() >= max_combined_size || 
+                    (combined_buffer.size() >= 512 * 1024 && segment.data.size() < 100 * 1024)) {
+                    
+                    if (pipe_manager_->WriteToPlayer(combined_buffer.data(), combined_buffer.size())) {
+                        bytes_transferred_ += combined_buffer.size();
+                        LogMessage(L"[CONSUMER] Fed combined buffer to MPC-HC (" + 
+                                  std::to_wstring(combined_buffer.size()) + L" bytes)");
+                    } else {
+                        LogMessage(L"[CONSUMER] Failed to write to MPC-HC - may have disconnected");
+                        if (!pipe_manager_->IsPlayerRunning()) {
+                            LogMessage(L"[CONSUMER] MPC-HC process died, stopping consumer");
+                            break;
+                        }
+                    }
+                    combined_buffer.clear();
+                }
             } else {
-                LogMessage(L"[CONSUMER] Failed to write to player - may have disconnected");
-                if (!pipe_manager_->IsPlayerRunning()) {
-                    LogMessage(L"[CONSUMER] Player process died, stopping consumer");
-                    break;
+                // For other players: Write segments individually
+                if (pipe_manager_->WriteToPlayer(segment.data.data(), segment.data.size())) {
+                    bytes_transferred_ += segment.data.size();
+                    LogMessage(L"[CONSUMER] Fed segment #" + std::to_wstring(segment.sequence_number) + 
+                              L" to player (" + std::to_wstring(segment.data.size()) + L" bytes)");
+                } else {
+                    LogMessage(L"[CONSUMER] Failed to write to player - may have disconnected");
+                    if (!pipe_manager_->IsPlayerRunning()) {
+                        LogMessage(L"[CONSUMER] Player process died, stopping consumer");
+                        break;
+                    }
                 }
             }
         }
         
-        // Adaptive timing based on segment size
-        if (segment.data.size() > 100 * 1024) { // >100KB = normal content
+        // Adaptive timing based on segment size and player type
+        if (is_mpc && !combined_buffer.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20)); // Faster for MPC-HC buffering
+        } else if (segment.data.size() > 100 * 1024) { // >100KB = normal content
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         } else { // Small segment = likely ad content
             std::this_thread::sleep_for(std::chrono::milliseconds(100));

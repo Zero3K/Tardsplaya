@@ -145,6 +145,7 @@ private:
     PROCESS_INFORMATION process_info_;
     std::wstring pipe_name_;
     bool initialized_;
+    bool use_named_pipe_; // True for MPC-HC, false for stdin players
     
     // Helper functions
     std::wstring GenerateUniquePipeName();
