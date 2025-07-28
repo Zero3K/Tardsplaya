@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "waitable.hpp"
 #include <assert.h>
+#include <limits>
 
 extern "C" {
 #include <Windows.h>

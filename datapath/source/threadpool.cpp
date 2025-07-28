@@ -18,6 +18,7 @@
  */
 
 #include "threadpool.hpp"
+#include <limits>
 #ifdef _WIN32
 #include <windows.h>
 #endif
