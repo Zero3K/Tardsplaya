@@ -33,7 +33,7 @@ namespace qcstudio {
 
     using namespace std;
 
-    constexpr auto CACHE_LINE_SIZE = std::hardware_destructive_interference_size;
+    constexpr auto CACHE_LINE_SIZE = 64;
 
     /*
         `tx-queue-XX` are a high-performance, transaction-based, SPSC and SP/MP queues.

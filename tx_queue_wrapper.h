@@ -81,7 +81,7 @@ namespace qcstudio {
         auto write(const void* _buffer, uint64_t _size) -> bool;
         template<typename T>                       auto write(const T& _item) -> bool;
         template<typename T, uint64_t N>           auto write(const T (&_array)[N]) -> bool;
-        template<typename FIRST, typename... REST> auto write(const FIRST& _first, REST... _rest) -> enable_if_t<!is_pointer_v<FIRST>, bool>;
+        template<typename FIRST, typename... REST> auto write(const FIRST& _first, REST... _rest) -> typename std::enable_if<!std::is_pointer<FIRST>::value, bool>::type;
 
         void invalidate();
 
@@ -103,7 +103,7 @@ namespace qcstudio {
 
         auto read(void* _buffer, uint64_t _size) -> bool;
         template<typename T>      auto read(T& _item) -> bool;
-        template<typename...ARGS> auto read() -> enable_if_t<conjunction_v<is_default_constructible<ARGS>...>, tuple<ARGS...>>;
+        template<typename...ARGS> auto read() -> std::tuple<ARGS...>;
 
         void invalidate();
 
