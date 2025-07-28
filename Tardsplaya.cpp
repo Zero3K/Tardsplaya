@@ -923,10 +923,10 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
-    // TSDuck TS Mode is now the default streaming mode
-    StreamingMode mode = StreamingMode::TRANSPORT_STREAM;
+    // Pipeline Mode is now the default streaming mode
+    StreamingMode mode = StreamingMode::PIPELINE;
     
-    AddLog(L"[TS_MODE] Starting TSDuck transport stream routing for " + tab.channel + L" (" + standardQuality + L")");
+    AddLog(L"[PIPELINE_MODE] Starting Pipeline library-based streaming for " + tab.channel + L" (" + standardQuality + L")");
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
