@@ -691,6 +691,7 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
     
     StreamSegment segment;
     bool initial_buffer_filled = false;
+    int post_discontinuity_slowdown = 0; // Counter for reduced feeding rate after discontinuities
     
     // Standard buffer configuration for all players
     const int initial_buffer_size = 8; // Standard buffer size for startup
@@ -741,11 +742,14 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             break;
         }
         
-        // Handle discontinuities - ensure segment reaches player but avoid aggressive buffer clearing
+        // Handle discontinuities - ensure segment reaches player but provide adaptation time
         if (segment.has_discontinuity) {
             LogMessage(L"[CONSUMER] DISCONTINUITY detected in segment #" + std::to_wstring(segment.sequence_number) + 
-                      L" - processing normally to maintain A/V sync");
-            // Note: Discontinuity segment will be processed normally below to prevent desync
+                      L" - processing normally with format change adaptation");
+            
+            // Set slowdown counter to reduce feeding rate for next few segments
+            // This gives the player time to adapt to the new stream format without causing desync
+            post_discontinuity_slowdown = 5; // Slow down for 5 segments after discontinuity
         }
         
         if (initial_buffer_filled && !segment.data.empty()) {
@@ -764,8 +768,14 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             }
         }
         
-        // Standard timing for all players
-        if (segment.data.size() > 100 * 1024) { // >100KB = normal content
+        // Adaptive timing based on content size and post-discontinuity state
+        if (post_discontinuity_slowdown > 0) {
+            // Slower feeding rate after discontinuities to prevent frame drops during format adaptation
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            post_discontinuity_slowdown--;
+            LogMessage(L"[CONSUMER] Post-discontinuity adaptation mode (" + 
+                      std::to_wstring(post_discontinuity_slowdown) + L" segments remaining)");
+        } else if (segment.data.size() > 100 * 1024) { // >100KB = normal content
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         } else { // Small segment = likely ad content
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
