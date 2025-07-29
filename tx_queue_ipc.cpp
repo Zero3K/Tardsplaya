@@ -378,13 +378,13 @@ bool NamedPipeManager::CreatePlayerProcess(const std::wstring& channel_name) {
         cmd_line = L"\"" + player_path_ + L"\" --title=\"" + channel_name + 
                    L"\" --cache=yes --cache-secs=10 -";
     } else if (player_path_.find(L"vlc") != std::wstring::npos) {
-        // For VLC, use stdin instead of named pipe
-        cmd_line = L"\"" + player_path_ + L"\" --meta-title=\"" + channel_name + 
-                   L"\" --file-caching=5000 -";
+        // For VLC, use parameters consistent with fallback implementation
+        cmd_line = L"\"" + player_path_ + L"\" - --intf dummy --no-one-instance";
     } else if (player_path_.find(L"mpc") != std::wstring::npos || 
                player_path_.find(L"MPC") != std::wstring::npos) {
-        // For MPC-HC/BE, use standard stdin streaming
-        cmd_line = L"\"" + player_path_ + L"\" -";
+        // For MPC-HC/BE, use optimized parameters to prevent black screen issues
+        // Parameters based on MPC_HC_COMPATIBILITY.md recommendations
+        cmd_line = L"\"" + player_path_ + L"\" /play /dubdelay 0 -";
         use_named_pipe_ = false;
     } else {
         // Generic player - use stdin
