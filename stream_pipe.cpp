@@ -740,11 +740,11 @@ bool BufferAndPipeStreamToPlayer(
     // Build command with media player configured to read from stdin
     std::wstring cmd;
     if (player_path.find(L"mpc-hc") != std::wstring::npos) {
-        // MPC-HC: read from stdin with immediate playback
-        cmd = L"\"" + player_path + L"\" - /play /new /nofocus";
+        // MPC-HC: optimized parameter order from compatibility guide
+        cmd = L"\"" + player_path + L"\" /play /dubdelay 0 - /new /nofocus";
     } else if (player_path.find(L"vlc") != std::wstring::npos) {
-        // VLC: read from stdin with video enabled (avoid --intf dummy which disables video)
-        cmd = L"\"" + player_path + L"\" - --intf qt --no-one-instance --video";
+        // VLC: read from stdin with video enabled and hardware acceleration disabled to prevent black screen
+        cmd = L"\"" + player_path + L"\" - --intf qt --no-one-instance --video --no-video-title-show --avcodec-hw=none";
     } else {
         // Generic media player: read from stdin
         cmd = L"\"" + player_path + L"\" -";
