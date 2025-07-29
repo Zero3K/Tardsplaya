@@ -1,6 +1,6 @@
 #pragma once
 // GPAC-based media decoder for Tardsplaya
-// Replaces TSDuck functionality to decode audio and video into raw AVI and WAV
+// Replaces TSDuck functionality to decode audio and video into raw MP4/WAV
 // which are then piped to the media player
 
 #include <string>
@@ -14,9 +14,14 @@
 #include <functional>
 #include <memory>
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+typedef int HANDLE;
+#define INVALID_HANDLE_VALUE -1
+#endif
 
 namespace gpac_decoder {
 
@@ -250,35 +255,20 @@ namespace gpac_decoder {
         HANDLE GetPlayerProcessHandle() const { return player_process_handle_; }
         
     private:
-        std::unique_ptr<MediaBuffer> media_buffer_;
-        std::unique_ptr<GpacHLSDecoder> gpac_decoder_;
         std::atomic<bool> routing_active_{false};
-        std::thread hls_fetcher_thread_;
-        std::thread media_router_thread_;
-        std::atomic<size_t> total_packets_processed_{0};
+        std::thread gpac_streaming_thread_;
+        std::atomic<size_t> total_bytes_streamed_{0};
         
         RouterConfig current_config_;
         std::function<void(const std::wstring&)> log_callback_;
         HANDLE player_process_handle_;
         
         // Statistics tracking
-        std::atomic<uint64_t> segments_processed_{0};
+        mutable std::mutex stats_mutex_;
         std::chrono::steady_clock::time_point stream_start_time_;
         
         // Worker threads
-        void HLSFetcherThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
-        void MediaRouterThread(std::atomic<bool>& cancel_token);
-        
-        // Media player integration
-        bool LaunchMediaPlayer(const RouterConfig& config, HANDLE& process_handle, HANDLE& stdin_handle);
-        bool SendMediaPacketToPlayer(HANDLE stdin_handle, const MediaPacket& packet);
-        
-        // HLS processing
-        bool FetchHLSSegment(const std::wstring& segment_url, std::vector<uint8_t>& data, std::atomic<bool>* cancel_token = nullptr);
-        std::vector<std::wstring> ParseHLSPlaylist(const std::string& playlist_content, const std::wstring& base_url);
-        
-        // Stream health monitoring
-        void CheckStreamHealth();
+        void GpacStreamingThread(const std::wstring& hls_url, std::atomic<bool>& cancel_token);
     };
     
 } // namespace gpac_decoder
