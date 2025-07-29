@@ -922,10 +922,11 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
-    // TX-Queue IPC Mode is now the default streaming mode
-    StreamingMode mode = StreamingMode::TX_QUEUE_IPC;
+    // GPAC Decoder Mode is now the default streaming mode (replaces TSDuck)
+    StreamingMode mode = StreamingMode::GPAC_DECODER;
     
-    AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+    AddLog(L"[GPAC] Starting GPAC-based media decoding for " + tab.channel + L" (" + standardQuality + L")");
+    AddLog(L"[GPAC] GPAC will decode to raw AVI/WAV and pipe to media player");
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -958,7 +959,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     EnableWindow(tab.hQualities, FALSE);
     EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), FALSE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
-    UpdateStatusBar(L"Buffer: Buffering... | TX-Queue IPC Active");
+    UpdateStatusBar(L"Buffer: Buffering... | GPAC Decoder Active");
     
     AddDebugLog(L"WatchStream: UI updated, stream starting for tab " + std::to_wstring(tabIndex));
     
@@ -1383,7 +1384,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         InitLogList(g_hLogList);
         
         // Create status bar
-        g_hStatusBar = CreateWindowEx(0, L"msctls_statusbar32", L"Buffer: 0 packets | TX-Queue IPC Ready", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS_BAR, g_hInst, nullptr);
+        g_hStatusBar = CreateWindowEx(0, L"msctls_statusbar32", L"Buffer: 0 packets | GPAC Decoder Ready", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, (HMENU)IDC_STATUS_BAR, g_hInst, nullptr);
         SendMessage(g_hStatusBar, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         
         // Load favorites
@@ -1550,7 +1551,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             } else {
                 // No active streams, stop the timer
                 KillTimer(hwnd, TIMER_CHUNK_UPDATE);
-                UpdateStatusBar(L"Buffer: 0 packets | TX-Queue IPC Ready");
+                UpdateStatusBar(L"Buffer: 0 packets | GPAC Decoder Ready");
             }
         }
         break;

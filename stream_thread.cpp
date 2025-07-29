@@ -1,6 +1,7 @@
 #include "stream_thread.h"
 #include "stream_pipe.h"
 #include "tsduck_transport_router.h"
+#include "gpac_decoder.h"
 #include "stream_resource_manager.h"
 #include "tx_queue_ipc.h"
 
@@ -19,7 +20,138 @@ std::thread StartStreamThread(
     StreamingMode mode,
     HANDLE* player_process_handle
 ) {
-    // Check for TX-Queue IPC mode (new high-performance mode)
+    // Check for GPAC decoder mode (NEW: replaces TSDuck functionality)
+    if (mode == StreamingMode::GPAC_DECODER) {
+        return std::thread([=, &cancel_token]() mutable {
+            if (log_callback)
+                log_callback(L"Starting GPAC decoder thread for " + channel_name);
+            
+            AddDebugLog(L"StartStreamThread: GPAC Decoder mode - Channel=" + channel_name + 
+                       L", Tab=" + std::to_wstring(tab_index) + 
+                       L", BufferSegs=" + std::to_wstring(buffer_segments));
+            
+            try {
+                // Create GPAC stream router
+                gpac_decoder::GpacStreamRouter router;
+                
+                // Configure router for optimal AVI/WAV output
+                gpac_decoder::GpacStreamRouter::RouterConfig config;
+                config.player_path = player_path;
+                config.player_args = L"-";  // Read from stdin
+                config.buffer_size_packets = buffer_segments * 200; // Scale buffer appropriately
+                config.enable_avi_output = true;  // Enable AVI video output
+                config.enable_wav_output = true;  // Enable WAV audio output
+                config.target_video_bitrate = 0;  // Auto-detect
+                config.target_audio_bitrate = 0;  // Auto-detect
+                
+                // Enable low-latency mode for reduced stream delay
+                config.low_latency_mode = true;
+                config.max_segments_to_buffer = 2;  // Only buffer latest 2 segments
+                config.playlist_refresh_interval = std::chrono::milliseconds(500);
+                config.skip_old_segments = true;
+                
+                if (log_callback) {
+                    log_callback(L"[GPAC] Starting GPAC media decoding to AVI/WAV");
+                    log_callback(L"[GPAC] Buffer: " + std::to_wstring(config.buffer_size_packets) + L" packets");
+                }
+                
+                // Start GPAC routing
+                bool routing_started = router.StartRouting(playlist_url, config, cancel_token, log_callback);
+                
+                if (routing_started) {
+                    // Store player process handle if pointer provided
+                    if (player_process_handle) {
+                        *player_process_handle = router.GetPlayerProcessHandle();
+                    }
+                    
+                    if (log_callback) {
+                        log_callback(L"[GPAC] GPAC decoding and routing active for " + channel_name);
+                    }
+                    
+                    // Monitor routing while active
+                    while (router.IsRouting() && !cancel_token.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                        
+                        // Report buffer and decoder statistics
+                        auto stats = router.GetBufferStats();
+                        
+                        // Update chunk count for status bar
+                        if (chunk_count) {
+                            *chunk_count = static_cast<int>(stats.buffered_packets);
+                        }
+                        
+                        // Periodic logging with decoder information
+                        if (log_callback && stats.segments_decoded % 10 == 0 && stats.segments_decoded > 0) {
+                            std::wstring status_msg = L"[GPAC] Segments: " + std::to_wstring(stats.segments_decoded) + 
+                                       L" decoded, Buffer: " + std::to_wstring(stats.buffered_packets) + L" packets";
+                            
+                            if (stats.current_fps > 0) {
+                                status_msg += L", FPS: " + std::to_wstring(static_cast<int>(stats.current_fps));
+                            }
+                            
+                            status_msg += L", Video frames: " + std::to_wstring(stats.video_frames_decoded) +
+                                         L", Audio frames: " + std::to_wstring(stats.audio_frames_decoded);
+                            
+                            if (stats.bytes_output > 0) {
+                                status_msg += L", Output: " + std::to_wstring(stats.bytes_output / 1024) + L"KB";
+                            }
+                            
+                            if (!stats.decoder_healthy) {
+                                status_msg += L" [DECODER_ERROR]";
+                            }
+                            if (!stats.video_stream_healthy) {
+                                status_msg += L" [VIDEO_UNHEALTHY]";
+                            }
+                            if (!stats.audio_stream_healthy) {
+                                status_msg += L" [AUDIO_UNHEALTHY]";
+                            }
+                            
+                            log_callback(status_msg);
+                        }
+                    }
+                    
+                    // Stop routing
+                    router.StopRouting();
+                    
+                    if (log_callback) {
+                        log_callback(L"[GPAC] GPAC decoding completed for " + channel_name);
+                    }
+                } else {
+                    if (log_callback) {
+                        log_callback(L"[GPAC] Failed to start GPAC routing");
+                    }
+                }
+                
+            } catch (const std::exception& e) {
+                std::string error_msg = e.what();
+                if (log_callback) {
+                    log_callback(L"[GPAC] Error: " + std::wstring(error_msg.begin(), error_msg.end()));
+                }
+                AddDebugLog(L"StartStreamThread: GPAC exception: " + 
+                           std::wstring(error_msg.begin(), error_msg.end()));
+            }
+            
+            AddDebugLog(L"StartStreamThread: GPAC stream finished, Channel=" + channel_name + 
+                       L", Tab=" + std::to_wstring(tab_index));
+            
+            if (log_callback) {
+                bool user_stopped = user_requested_stop && user_requested_stop->load();
+                
+                if (user_stopped) {
+                    log_callback(L"[GPAC] Streaming stopped by user.");
+                } else {
+                    log_callback(L"[GPAC] Stream ended normally.");
+                    // Post auto-stop message for this specific tab
+                    if (main_window && tab_index != SIZE_MAX) {
+                        AddDebugLog(L"StartStreamThread: Posting auto-stop for tab " + std::to_wstring(tab_index));
+                        PostMessage(main_window, WM_USER + 2, (WPARAM)tab_index, 0);
+                    }
+                }
+            }
+        });
+    }
+
+    // Check for TX-Queue IPC mode
     if (mode == StreamingMode::TX_QUEUE_IPC) {
         return std::thread([=, &cancel_token]() mutable {
             if (log_callback)

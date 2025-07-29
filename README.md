@@ -8,55 +8,56 @@ A Twitch stream player for Windows with enhanced TLS support.
 - Quality selection
 - Windows 7+ compatibility
 - **Enhanced TLS Client Support** - Custom TLS implementation for better compatibility with older Windows versions
+- **GPAC Media Decoding** - Advanced media decoder that converts HLS streams to raw AVI and WAV for optimal player compatibility
 
-## TX-Queue IPC Integration for Enhanced Performance
+## GPAC Media Decoding Integration for Enhanced Performance
 
-**TX-Queue IPC Mode** - Advanced high-performance inter-process communication system:
+**GPAC Decoder Mode** - Advanced media processing system replacing TSDuck:
 
-- **Lock-Free Queues**: Uses tx-queue's transactional lock-free circular queues for maximum throughput
-- **Producer/Consumer Pattern**: Separate threads for downloading segments and feeding to media player
-- **Named Pipe Integration**: Maintains compatibility with media players via stdin piping  
-- **Checksum Validation**: Built-in data integrity verification for reliable streaming
-- **Zero-Copy Operations**: Minimizes memory allocations and data copying
-- **Cross-Stream Isolation**: Each stream uses independent tx-queue for optimal multi-stream performance
+- **HLS to AVI/WAV Conversion**: Uses GPAC to decode HLS segments into raw AVI video and WAV audio streams
+- **Direct Media Player Piping**: Converted streams are piped directly to media players for optimal compatibility
+- **Format Compatibility**: Raw AVI and WAV formats ensure maximum compatibility with MPV, VLC, MPC-HC, and other players
+- **Real-time Decoding**: Low-latency decoding pipeline for live streaming with minimal delay
+- **Comprehensive Statistics**: Built-in monitoring of decoder performance, frame rates, and stream health
+- **Adaptive Quality**: Automatic detection and handling of different video/audio qualities and formats
 
-### TX-Queue Technical Details
+### GPAC Technical Details
 
-The TX-Queue integration includes:
+The GPAC integration includes:
 
-- `tx_queue_ipc.h/cpp` - High-level IPC management with tx-queue integration
-- `tx_queue_wrapper.h` - Wrapper for tx-queue headers with proper Windows compatibility
-- Enhanced segment buffering with transactional semantics
+- `gpac_decoder.h/cpp` - Core GPAC decoder implementation with HLS to AVI/WAV conversion
+- Enhanced segment processing with GPAC's multimedia framework
 - Real-time statistics and performance monitoring
 - Adaptive buffer sizing based on stream characteristics
+- Comprehensive error handling and recovery
 
 ### Performance Benefits
 
-| Feature | Before | After |
-|---------|--------|--------|
-| IPC Method | `std::queue` with mutexes | Lock-free tx-queue transactions |
-| Memory Efficiency | Standard allocations | Cache-line aligned zero-copy operations |
-| Thread Safety | Mutex-based synchronization | Lock-free atomic operations |
-| **Multi-Stream Performance** | **Degrades with concurrent streams** | **Scales linearly with isolated tx-queues** |
-| **Data Integrity** | **Basic error handling** | **Built-in checksum validation** |
-| **Throughput** | **Limited by lock contention** | **High-performance lock-free design** |
+| Feature | TSDuck (Previous) | GPAC Decoder (Current) |
+|---------|-------------------|-------------------------|
+| Output Format | MPEG-TS packets | Raw AVI/WAV streams |
+| Player Compatibility | Good | Excellent |
+| Format Support | Transport streams only | Multiple container formats |
+| Decoding Quality | Pass-through | Full decode/re-encode |
+| **Media Player Support** | **Limited to TS-capable players** | **Universal media player support** |
+| **Quality Control** | **Limited** | **Full control over output quality** |
+| **Format Flexibility** | **TS only** | **AVI, WAV, and extensible** |
 
-The integration works transparently:
-1. **Primary**: TX-Queue IPC mode for optimal performance (default)
-2. **Fallback**: TSDuck transport stream mode for professional compatibility  
-3. **Legacy**: Traditional HLS segment streaming for maximum compatibility
+The integration works in multiple modes:
+1. **Primary**: GPAC Decoder mode for optimal media compatibility (default)
+2. **Fallback**: TX-Queue IPC mode for high-performance scenarios
+3. **Legacy**: TSDuck transport stream mode for professional compatibility
+4. **Basic**: Traditional HLS segment streaming for maximum compatibility
 
-### TX-Queue IPC Mode (Default)
+### GPAC Decoder Mode (Default)
 
-**Default Streaming Mode**: TX-Queue IPC Mode is now the standard streaming method:
+**Default Streaming Mode**: GPAC Decoder Mode is now the standard streaming method:
 
-- **High-Performance IPC**: Lock-free producer/consumer queues between download and playback threads
-- **Transactional Semantics**: Guaranteed data integrity with automatic rollback on errors
-- **Named Pipe Output**: Maintains compatibility with all media players expecting stdin input
-- **Adaptive Buffering**: Dynamic buffer sizing based on stream characteristics and system load
-- **Zero-Copy Design**: Minimizes memory allocations and data movement
-
-TX-Queue IPC Mode provides superior performance and reliability compared to traditional mutex-based streaming.
+- **HLS Segment Decoding**: Processes HLS segments through GPAC's multimedia framework
+- **Raw Format Output**: Converts to raw AVI (video) and WAV (audio) for universal player support
+- **Direct Piping**: Streams decoded content directly to media player stdin
+- **Quality Optimization**: Full control over output quality and format parameters
+- **Real-time Processing**: Low-latency decoding pipeline optimized for live streaming
 
 ## TLS Client Integration
 
