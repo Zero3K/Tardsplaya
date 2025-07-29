@@ -159,6 +159,28 @@ bool TxQueueIPC::IsQueueNearFull() const {
     return (used * 100 / capacity) > 90; // >90% full
 }
 
+void TxQueueIPC::ClearBuffer() {
+    if (!queue_) return;
+    
+    AddDebugLog(L"[TX-QUEUE] Clearing buffer for discontinuity handling");
+    
+    // Try to consume and discard all remaining segments
+    StreamSegment dummy_segment;
+    int cleared_count = 0;
+    
+    while (ConsumeSegment(dummy_segment)) {
+        cleared_count++;
+        // Don't process the segment, just discard it
+        if (cleared_count > 100) { // Safety limit to prevent infinite loop
+            break;
+        }
+    }
+    
+    if (cleared_count > 0) {
+        AddDebugLog(L"[TX-QUEUE] Cleared " + std::to_wstring(cleared_count) + L" segments from buffer");
+    }
+}
+
 bool TxQueueIPC::WriteSegmentToQueue(const StreamSegment& segment) {
     if (!queue_) return false;
     
@@ -325,6 +347,22 @@ bool NamedPipeManager::WriteToPlayer(const char* data, size_t size) {
         return false;
     }
     
+    return true;
+}
+
+bool NamedPipeManager::FlushPipe() {
+    if (!initialized_ || pipe_handle_ == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    
+    // Flush the pipe to ensure all data is written and player buffer is cleared
+    if (!FlushFileBuffers(pipe_handle_)) {
+        DWORD error = GetLastError();
+        AddDebugLog(L"[PIPE] Failed to flush pipe, error: " + std::to_wstring(error));
+        return false;
+    }
+    
+    AddDebugLog(L"[PIPE] Pipe flushed successfully for discontinuity handling");
     return true;
 }
 
@@ -700,10 +738,27 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             break;
         }
         
-        // Handle discontinuities by logging them (no special processing)
+        // Handle discontinuities with enhanced processing to prevent black screen
         if (segment.has_discontinuity) {
             LogMessage(L"[CONSUMER] DISCONTINUITY detected in segment #" + std::to_wstring(segment.sequence_number) + 
-                      L" - continuing normal processing");
+                      L" - implementing fast restart to prevent black screen");
+            
+            // Clear any remaining buffered segments for fast restart
+            ipc_manager_->ClearBuffer();
+            
+            // Flush the pipe to clear player's internal buffers
+            if (pipe_manager_->FlushPipe()) {
+                LogMessage(L"[CONSUMER] Player pipe flushed successfully for discontinuity");
+            }
+            
+            // Add a brief pause to allow player to reset its buffers
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            
+            // Reset initial buffer flag to ensure proper startup after discontinuity
+            initial_buffer_filled = false;
+            initial_segments_count = 0;
+            
+            LogMessage(L"[CONSUMER] Fast restart completed - resuming normal playback");
         }
         
         if (initial_buffer_filled && !segment.data.empty()) {
@@ -761,4 +816,18 @@ void TxQueueStreamManager::UpdateChunkCount(int count) {
     if (chunk_count_ptr_) {
         chunk_count_ptr_->store(count);
     }
+}
+
+void TxQueueStreamManager::HandleDiscontinuity() {
+    LogMessage(L"[STREAM_MANAGER] External discontinuity handling requested");
+    
+    if (ipc_manager_) {
+        ipc_manager_->ClearBuffer();
+    }
+    
+    if (pipe_manager_) {
+        pipe_manager_->FlushPipe();
+    }
+    
+    LogMessage(L"[STREAM_MANAGER] Discontinuity handling completed");
 }

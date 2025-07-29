@@ -86,6 +86,9 @@ public:
     // Check if queue is approximately full (>90% capacity)
     bool IsQueueNearFull() const;
     
+    // Clear queue buffer for discontinuity handling
+    void ClearBuffer();
+    
     // Check if end of stream was signaled
     bool IsEndOfStream() const { return end_of_stream_.load(); }
     
@@ -129,6 +132,9 @@ public:
     
     // Write data to player via named pipe
     bool WriteToPlayer(const char* data, size_t size);
+    
+    // Flush pipe to handle discontinuities
+    bool FlushPipe();
     
     // Check if player is still running
     bool IsPlayerRunning() const;
@@ -190,6 +196,9 @@ public:
         bool queue_ready;
     };
     StreamStats GetStats() const;
+    
+    // Handle discontinuity for external control if needed
+    void HandleDiscontinuity();
     
 private:
     std::wstring player_path_;
