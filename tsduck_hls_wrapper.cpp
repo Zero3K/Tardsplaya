@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cctype>
 
+// Forward declaration of utility functions
+extern std::wstring Utf8ToWide(const std::string& s);
+
 namespace tsduck_hls {
 
 PlaylistParser::PlaylistParser() {
@@ -66,8 +69,8 @@ bool PlaylistParser::ParsePlaylist(const std::string& m3u8_content) {
             }
         }
         else if (expecting_segment_url) {
-            // This is a segment URL
-            current_segment.url = std::wstring(line.begin(), line.end());
+            // This is a segment URL - use proper UTF-8 to wide string conversion
+            current_segment.url = Utf8ToWide(line);
             current_segment.sequence_number = media_sequence_ + segments_.size();
             
             segments_.push_back(current_segment);
