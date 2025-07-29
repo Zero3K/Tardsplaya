@@ -756,7 +756,6 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             
             // Reset initial buffer flag to ensure proper startup after discontinuity
             initial_buffer_filled = false;
-            initial_segments_count = 0;
             
             LogMessage(L"[CONSUMER] Fast restart completed - resuming normal playback");
         }
