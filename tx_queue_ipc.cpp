@@ -691,9 +691,11 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
     
     StreamSegment segment;
     bool initial_buffer_filled = false;
+    bool post_discontinuity_mode = false; // Track if we're in post-discontinuity state
     
     // Standard buffer configuration for all players
-    const int initial_buffer_size = 8; // Standard buffer size
+    const int initial_buffer_size = 8; // Standard buffer size for startup
+    const int post_discontinuity_buffer_size = 2; // Smaller buffer after discontinuities
     const size_t max_write_size = 2 * 1024 * 1024; // 2MB max write size
     
     while (!should_stop_.load() && (!cancel_token_ptr_ || !cancel_token_ptr_->load())) {
@@ -706,15 +708,26 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
                 queue_depth = stats.segments_produced - stats.segments_consumed;
             }
             
-            if (queue_depth >= static_cast<uint64_t>(initial_buffer_size)) {
+            // Use smaller buffer requirement if we're in post-discontinuity mode
+            int required_buffer_size = post_discontinuity_mode ? post_discontinuity_buffer_size : initial_buffer_size;
+            
+            if (queue_depth >= static_cast<uint64_t>(required_buffer_size)) {
                 initial_buffer_filled = true;
-                LogMessage(L"[CONSUMER] Initial buffer filled (" + 
-                          std::to_wstring(queue_depth) + 
-                          L" segments), starting playback");
+                if (post_discontinuity_mode) {
+                    LogMessage(L"[CONSUMER] Post-discontinuity buffer filled (" + 
+                              std::to_wstring(queue_depth) + 
+                              L" segments), resuming playback with reduced frame drops");
+                    post_discontinuity_mode = false; // Exit post-discontinuity mode
+                } else {
+                    LogMessage(L"[CONSUMER] Initial buffer filled (" + 
+                              std::to_wstring(queue_depth) + 
+                              L" segments), starting playback");
+                }
             } else {
-                LogMessage(L"[CONSUMER] Waiting for initial buffer to fill (" + 
+                std::wstring mode_info = post_discontinuity_mode ? L" post-discontinuity" : L"";
+                LogMessage(L"[CONSUMER] Waiting for" + mode_info + L" buffer to fill (" + 
                           std::to_wstring(queue_depth) + L"/" + 
-                          std::to_wstring(initial_buffer_size) + L" segments)...");
+                          std::to_wstring(required_buffer_size) + L" segments)...");
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
@@ -741,7 +754,7 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
         // Handle discontinuities with enhanced processing to prevent black screen
         if (segment.has_discontinuity) {
             LogMessage(L"[CONSUMER] DISCONTINUITY detected in segment #" + std::to_wstring(segment.sequence_number) + 
-                      L" - implementing fast restart to prevent black screen");
+                      L" - implementing optimized restart to minimize frame drops");
             
             // Clear any remaining buffered segments for fast restart
             ipc_manager_->ClearBuffer();
@@ -751,13 +764,14 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
                 LogMessage(L"[CONSUMER] Player pipe flushed successfully for discontinuity");
             }
             
-            // Add a brief pause to allow player to reset its buffers
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            // Shorter pause to minimize disruption (reduced from 200ms to 100ms)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             
-            // Reset initial buffer flag to ensure proper startup after discontinuity
+            // Enter post-discontinuity mode with reduced buffer requirements
             initial_buffer_filled = false;
+            post_discontinuity_mode = true;
             
-            LogMessage(L"[CONSUMER] Fast restart completed - resuming normal playback");
+            LogMessage(L"[CONSUMER] Optimized restart initiated - using reduced buffer to minimize frame drops");
         }
         
         if (initial_buffer_filled && !segment.data.empty()) {
