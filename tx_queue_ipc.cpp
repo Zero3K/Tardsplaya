@@ -754,12 +754,24 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
         // Handle discontinuities with enhanced processing to prevent black screen
         if (segment.has_discontinuity) {
             LogMessage(L"[CONSUMER] DISCONTINUITY detected in segment #" + std::to_wstring(segment.sequence_number) + 
-                      L" - implementing optimized restart to minimize frame drops");
+                      L" - feeding segment to player first to maintain video buffer");
+            
+            // CRITICAL: Feed the discontinuity segment to player first
+            // This segment contains format change information needed for proper transition
+            if (initial_buffer_filled && !segment.data.empty()) {
+                if (pipe_manager_->WriteToPlayer(segment.data.data(), segment.data.size())) {
+                    bytes_transferred_ += segment.data.size();
+                    LogMessage(L"[CONSUMER] Fed discontinuity segment #" + std::to_wstring(segment.sequence_number) + 
+                              L" to player (" + std::to_wstring(segment.data.size()) + L" bytes) [DISC]");
+                } else {
+                    LogMessage(L"[CONSUMER] Failed to write discontinuity segment to player");
+                }
+            }
             
             // Clear any remaining buffered segments for fast restart
             ipc_manager_->ClearBuffer();
             
-            // Flush the pipe to clear player's internal buffers
+            // Flush the pipe to clear player's internal buffers (after feeding the discontinuity segment)
             if (pipe_manager_->FlushPipe()) {
                 LogMessage(L"[CONSUMER] Player pipe flushed successfully for discontinuity");
             }
@@ -772,6 +784,9 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             post_discontinuity_mode = true;
             
             LogMessage(L"[CONSUMER] Optimized restart initiated - using reduced buffer to minimize frame drops");
+            
+            // Continue to next iteration since we already processed this segment
+            continue;
         }
         
         if (initial_buffer_filled && !segment.data.empty()) {
