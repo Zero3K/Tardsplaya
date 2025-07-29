@@ -205,9 +205,6 @@ namespace gpac_decoder {
         struct RouterConfig {
             std::wstring player_path = L"mpv.exe";
             std::wstring player_args = L"-";  // Read from stdin
-            size_t buffer_size_packets = 1000;
-            bool enable_avi_output = true;
-            bool enable_wav_output = true;
             int target_video_bitrate = 0;  // 0 = auto
             int target_audio_bitrate = 0;  // 0 = auto
             

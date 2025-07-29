@@ -1,66 +1,59 @@
-# GPAC Integration Implementation Guide
+# Real GPAC Integration Implementation Guide
 
 ## Overview
 
-This document describes the GPAC integration in Tardsplaya that replaces the previous TSDuck functionality. The GPAC decoder provides superior media compatibility by decoding HLS segments into raw AVI and WAV streams that can be played by any media player.
+This document describes the real GPAC integration in Tardsplaya that replaces the previous mock implementation. The GPAC decoder provides superior media compatibility by directly processing HLS streams with GPAC's native `dashin` filter and outputting MP4 streams that can be played by any media player.
 
 ## Architecture
 
 ### Core Components
 
-1. **GpacHLSDecoder** - Core decoder that processes HLS segments
-2. **GpacStreamRouter** - Manages the complete streaming pipeline
-3. **MediaBuffer** - Buffers decoded media packets
-4. **PlaylistParser** - Enhanced HLS playlist parsing
-5. **MediaPacket** - Container for decoded audio/video data
+1. **GpacStreamRouter** - Manages the complete real-time GPAC streaming pipeline
+2. **GPAC Command Pipeline** - Direct execution of GPAC for HLS processing
+3. **Cross-Platform Process Management** - Windows/Linux compatible process execution
 
 ### Data Flow
 
 ```
-HLS Playlist → Segment Download → GPAC Decoder → AVI/WAV Output → Media Player
+HLS URL → GPAC dashin Filter → MP4 Stream → Media Player (Real-time)
 ```
 
-1. **Playlist Parsing**: Download and parse M3U8 playlists to get segment URLs
-2. **Segment Fetching**: Download HLS segments (typically MPEG-TS)
-3. **GPAC Decoding**: Use GPAC to decode segments to raw video/audio
-4. **Format Conversion**: Package decoded data into AVI (video) and WAV (audio) containers
-5. **Player Piping**: Stream converted data to media player via stdin
+1. **Direct HLS Processing**: GPAC's `dashin` filter handles HLS playlist parsing and segment downloading
+2. **Real-time Decoding**: GPAC decodes HLS segments to MP4 format in real-time
+3. **Direct Streaming**: MP4 output is piped directly to media player stdin
+4. **No Intermediate Storage**: Eliminates manual segment processing and fake format generation
 
 ## Implementation Details
 
-### GPAC Decoder (`gpac_decoder.h/cpp`)
+### GPAC Integration (`gpac_decoder.h/cpp`)
 
-The GPAC decoder implementation provides:
+The real GPAC integration provides:
 
-- **Multi-format Input Support**: Handles MPEG-TS, MP4, and other HLS container formats
-- **Universal Output**: Generates AVI and WAV streams compatible with all media players
-- **Real-time Processing**: Low-latency decoding optimized for live streaming
-- **Quality Control**: Full control over output bitrates and formats
-- **Error Recovery**: Robust error handling and stream recovery
+- **Native HLS Support**: Uses GPAC's built-in `dashin` filter for HLS processing
+- **Universal MP4 Output**: Generates MP4 streams compatible with all modern media players
+- **Real-time Processing**: Direct GPAC command execution for minimal latency
+- **Automatic Quality**: GPAC handles bitrate and quality selection automatically
+- **Robust Processing**: GPAC's mature HLS implementation with error handling
 
 #### Key Methods
 
 ```cpp
-// Initialize GPAC decoder system
-bool GpacHLSDecoder::Initialize();
+// Start real GPAC streaming pipeline
+bool GpacStreamRouter::StartRouting(const std::wstring& hls_url, const RouterConfig& config, 
+                                   std::atomic<bool>& cancel_token, 
+                                   std::function<void(const std::wstring&)> log_callback);
 
-// Decode HLS segment to media packets
-std::vector<MediaPacket> DecodeSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment);
-
-// Configure output formats
-void SetOutputFormat(bool enable_avi, bool enable_wav);
-
-// Set quality parameters
-void SetQuality(int video_bitrate, int audio_bitrate);
+// Real GPAC processing thread
+void GpacStreamingThread(const std::wstring& hls_url, std::atomic<bool>& cancel_token);
 ```
 
 ### Stream Router (`GpacStreamRouter`)
 
-The stream router orchestrates the complete pipeline:
+The stream router executes the real GPAC pipeline:
 
-- **Playlist Management**: Fetches and parses HLS playlists
-- **Segment Processing**: Downloads and queues segments for decoding
-- **Player Integration**: Launches and manages media player processes
+- **Direct GPAC Execution**: Launches `gpac -i HLS_URL -o pipe://1:ext=mp4`
+- **Process Management**: Handles GPAC and media player processes
+- **Cross-Platform**: Windows/Linux compatible process execution
 - **Buffer Management**: Controls buffering for optimal performance
 - **Statistics Monitoring**: Tracks performance and stream health
 

@@ -34,25 +34,22 @@ std::thread StartStreamThread(
                 // Create GPAC stream router
                 gpac_decoder::GpacStreamRouter router;
                 
-                // Configure router for optimal AVI/WAV output
+                // Configure router for real GPAC MP4 output
                 gpac_decoder::GpacStreamRouter::RouterConfig config;
                 config.player_path = player_path;
                 config.player_args = L"-";  // Read from stdin
-                config.buffer_size_packets = buffer_segments * 200; // Scale buffer appropriately
-                config.enable_avi_output = true;  // Enable AVI video output
-                config.enable_wav_output = true;  // Enable WAV audio output
                 config.target_video_bitrate = 0;  // Auto-detect
                 config.target_audio_bitrate = 0;  // Auto-detect
                 
-                // Enable low-latency mode for reduced stream delay
+                // Low-latency streaming optimizations
                 config.low_latency_mode = true;
                 config.max_segments_to_buffer = 2;  // Only buffer latest 2 segments
                 config.playlist_refresh_interval = std::chrono::milliseconds(500);
                 config.skip_old_segments = true;
                 
                 if (log_callback) {
-                    log_callback(L"[GPAC] Starting GPAC media decoding to AVI/WAV");
-                    log_callback(L"[GPAC] Buffer: " + std::to_wstring(config.buffer_size_packets) + L" packets");
+                    log_callback(L"[GPAC] Starting real GPAC HLS processing to MP4");
+                    log_callback(L"[GPAC] Direct pipeline: GPAC dashin → Player");
                 }
                 
                 // Start GPAC routing
