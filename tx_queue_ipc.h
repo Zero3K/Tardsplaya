@@ -29,10 +29,11 @@ struct StreamSegment {
     uint64_t sequence_number;
     uint32_t checksum;
     bool is_end_marker;
+    bool has_discontinuity; // New field for discontinuity detection
     
-    StreamSegment() : sequence_number(0), checksum(0), is_end_marker(false) {}
-    explicit StreamSegment(std::vector<char>&& segment_data, uint64_t seq = 0)
-        : data(std::move(segment_data)), sequence_number(seq), checksum(0), is_end_marker(false) {
+    StreamSegment() : sequence_number(0), checksum(0), is_end_marker(false), has_discontinuity(false) {}
+    explicit StreamSegment(std::vector<char>&& segment_data, uint64_t seq = 0, bool discontinuity = false)
+        : data(std::move(segment_data)), sequence_number(seq), checksum(0), is_end_marker(false), has_discontinuity(discontinuity) {
         calculate_checksum();
     }
     
@@ -87,7 +88,7 @@ public:
     bool IsReady() const { return initialized_ && queue_ && queue_->is_ok(); }
     
     // Producer interface - add stream segment to queue
-    bool ProduceSegment(std::vector<char>&& segment_data);
+    bool ProduceSegment(std::vector<char>&& segment_data, bool has_discontinuity = false);
     
     // Consumer interface - get next segment from queue
     bool ConsumeSegment(StreamSegment& segment);

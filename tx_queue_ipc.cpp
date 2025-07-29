@@ -1,6 +1,7 @@
 #include "tx_queue_ipc.h"
 #include "stream_thread.h"
 #include "stream_pipe.h"
+#include "tsduck_hls_wrapper.h"
 #include <sstream>
 #include <iomanip>
 #include <regex>
@@ -37,26 +38,6 @@ namespace {
         }
         out.assign(text_data.begin(), text_data.end());
         return true;
-    }
-    
-    // Parse M3U8 playlist to extract segment URLs
-    std::vector<std::wstring> ParseM3U8Segments(const std::string& playlist_content, const std::wstring& base_url) {
-        std::vector<std::wstring> segments;
-        std::istringstream ss(playlist_content);
-        std::string line;
-        
-        while (std::getline(ss, line)) {
-            if (line.empty() || line[0] == '#') continue;
-            
-            // Convert to wide string and make absolute URL
-            std::wstring segment_url = Utf8ToWide(line);
-            if (segment_url.find(L"http") != 0) {
-                segment_url = JoinUrl(base_url, segment_url);
-            }
-            segments.push_back(segment_url);
-        }
-        
-        return segments;
     }
 }
 
@@ -105,20 +86,21 @@ bool TxQueueIPC::Initialize() {
     }
 }
 
-bool TxQueueIPC::ProduceSegment(std::vector<char>&& segment_data) {
+bool TxQueueIPC::ProduceSegment(std::vector<char>&& segment_data, bool has_discontinuity) {
     if (!IsReady()) {
         AddDebugLog(L"[TX-QUEUE] Cannot produce - IPC not ready");
         return false;
     }
     
-    // Create segment with sequence number
-    StreamSegment segment(std::move(segment_data), sequence_counter_++);
+    // Create segment with sequence number and discontinuity flag
+    StreamSegment segment(std::move(segment_data), sequence_counter_++, has_discontinuity);
     
     bool success = WriteSegmentToQueue(segment);
     if (success) {
         produced_count_++;
+        std::wstring disc_info = segment.has_discontinuity ? L" [DISCONTINUITY]" : L"";
         AddDebugLog(L"[TX-QUEUE] Produced segment #" + std::to_wstring(segment.sequence_number) + 
-                   L", size: " + std::to_wstring(segment.data.size()) + L" bytes");
+                   L", size: " + std::to_wstring(segment.data.size()) + L" bytes" + disc_info);
     } else {
         dropped_count_++;
         AddDebugLog(L"[TX-QUEUE] Dropped segment #" + std::to_wstring(segment.sequence_number) + 
@@ -186,6 +168,7 @@ bool TxQueueIPC::WriteSegmentToQueue(const StreamSegment& segment) {
             write_op.write(segment.sequence_number);
             write_op.write(segment.checksum);
             write_op.write(segment.is_end_marker);
+            write_op.write(segment.has_discontinuity);
             write_op.write(static_cast<uint32_t>(segment.data.size()));
             
             // Write segment data
@@ -234,6 +217,15 @@ bool TxQueueIPC::ReadSegmentFromQueue(StreamSegment& segment) {
                 if (++marker_failure_count % 1000 == 1) {
                     AddDebugLog(L"[DEBUG] [TX-QUEUE] Failed to read end marker (count: " + 
                                std::to_wstring(marker_failure_count) + L")");
+                }
+                return false;
+            }
+            if (!read_op.read(segment.has_discontinuity)) {
+                // Reduce log spam for discontinuity read failures too
+                static uint64_t disc_failure_count = 0;
+                if (++disc_failure_count % 1000 == 1) {
+                    AddDebugLog(L"[DEBUG] [TX-QUEUE] Failed to read discontinuity flag (count: " + 
+                               std::to_wstring(disc_failure_count) + L")");
                 }
                 return false;
             }
@@ -570,6 +562,7 @@ void TxQueueStreamManager::ProducerThreadFunction(const std::wstring& playlist_u
     std::set<std::wstring> seen_urls;
     int consecutive_errors = 0;
     const int max_errors = 10;
+    tsduck_hls::PlaylistParser playlist_parser;
     
     while (!should_stop_.load() && (!cancel_token_ptr_ || !cancel_token_ptr_->load())) {
         // Download current playlist
@@ -590,12 +583,30 @@ void TxQueueStreamManager::ProducerThreadFunction(const std::wstring& playlist_u
         
         consecutive_errors = 0;
         
-        // Parse playlist for segment URLs
-        auto segment_urls = ParseM3U8Segments(playlist_content, playlist_url);
+        // Parse playlist using TSDuck HLS wrapper for discontinuity detection
+        if (!playlist_parser.ParsePlaylist(playlist_content)) {
+            LogMessage(L"[PRODUCER] Failed to parse playlist with TSDuck wrapper");
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            continue;
+        }
+        
+        // Get segments with discontinuity information
+        auto media_segments = playlist_parser.GetSegments();
+        bool playlist_has_discontinuities = playlist_parser.HasDiscontinuities();
+        
+        if (playlist_has_discontinuities) {
+            LogMessage(L"[PRODUCER] Discontinuities detected in playlist - buffer flushing enabled");
+        }
         
         // Download new segments
-        for (const auto& segment_url : segment_urls) {
+        for (const auto& media_segment : media_segments) {
             if (should_stop_.load() || (cancel_token_ptr_ && cancel_token_ptr_->load())) break;
+            
+            // Convert segment URL to wide string and make absolute
+            std::wstring segment_url = media_segment.url;
+            if (segment_url.find(L"http") != 0) {
+                segment_url = JoinUrl(playlist_url, segment_url);
+            }
             
             // Skip already downloaded segments
             if (seen_urls.count(segment_url)) continue;
@@ -611,9 +622,12 @@ void TxQueueStreamManager::ProducerThreadFunction(const std::wstring& playlist_u
             // Download segment
             std::vector<char> segment_data;
             if (DownloadSegment(segment_url, segment_data)) {
-                // Add to tx-queue
-                if (ipc_manager_->ProduceSegment(std::move(segment_data))) {
-                    LogMessage(L"[PRODUCER] Queued segment from: " + segment_url.substr(segment_url.find_last_of(L'/') + 1));
+                // Add to tx-queue with discontinuity information
+                bool has_discontinuity = media_segment.has_discontinuity;
+                if (ipc_manager_->ProduceSegment(std::move(segment_data), has_discontinuity)) {
+                    std::wstring disc_info = has_discontinuity ? L" [DISCONTINUITY]" : L"";
+                    LogMessage(L"[PRODUCER] Queued segment from: " + 
+                              segment_url.substr(segment_url.find_last_of(L'/') + 1) + disc_info);
                 }
             }
         }
@@ -710,6 +724,27 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             break;
         }
         
+        // *** DISCONTINUITY HANDLING ***
+        if (segment.has_discontinuity) {
+            LogMessage(L"[CONSUMER] DISCONTINUITY detected in segment #" + std::to_wstring(segment.sequence_number) + 
+                      L" - flushing buffers for MPC-HC synchronization");
+            
+            if (is_mpc && !combined_buffer.empty()) {
+                // Flush current buffer immediately to prevent mixing old and new data
+                if (pipe_manager_->WriteToPlayer(combined_buffer.data(), combined_buffer.size())) {
+                    bytes_transferred_ += combined_buffer.size();
+                    LogMessage(L"[CONSUMER] Pre-discontinuity buffer flushed (" + 
+                              std::to_wstring(combined_buffer.size()) + L" bytes)");
+                } else {
+                    LogMessage(L"[CONSUMER] WARNING: Failed to flush pre-discontinuity buffer to MPC-HC");
+                }
+                combined_buffer.clear();
+                
+                // Give MPC-HC time to process the flush and prepare for new stream
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        
         if (initial_buffer_filled && !segment.data.empty()) {
             if (is_mpc) {
                 // For MPC-HC: Validate TS format before adding to buffer
@@ -752,6 +787,9 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
                     if (queue_depth < 3) {
                         should_write = true; // Queue is getting low, send what we have
                     }
+                } else if (segment.has_discontinuity) {
+                    // Always flush after discontinuity to ensure clean transition
+                    should_write = true;
                 }
                 
                 if (should_write) {
@@ -761,6 +799,9 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
                             LogMessage(L"[CONSUMER] Fed FIRST buffer to MPC-HC (" + 
                                       std::to_wstring(combined_buffer.size()) + L" bytes) for format detection");
                             first_write_done = true;
+                        } else if (segment.has_discontinuity) {
+                            LogMessage(L"[CONSUMER] Fed POST-DISCONTINUITY buffer to MPC-HC (" + 
+                                      std::to_wstring(combined_buffer.size()) + L" bytes) for resync");
                         } else {
                             LogMessage(L"[CONSUMER] Fed combined buffer to MPC-HC (" + 
                                       std::to_wstring(combined_buffer.size()) + L" bytes)");
@@ -775,11 +816,17 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
                     combined_buffer.clear();
                 }
             } else {
-                // For other players: Write segments individually
+                // For other players: Write segments individually, still respect discontinuities
+                if (segment.has_discontinuity) {
+                    LogMessage(L"[CONSUMER] DISCONTINUITY in segment #" + std::to_wstring(segment.sequence_number) + 
+                              L" - direct write to player");
+                }
+                
                 if (pipe_manager_->WriteToPlayer(segment.data.data(), segment.data.size())) {
                     bytes_transferred_ += segment.data.size();
+                    std::wstring disc_info = segment.has_discontinuity ? L" [DISC]" : L"";
                     LogMessage(L"[CONSUMER] Fed segment #" + std::to_wstring(segment.sequence_number) + 
-                              L" to player (" + std::to_wstring(segment.data.size()) + L" bytes)");
+                              L" to player (" + std::to_wstring(segment.data.size()) + L" bytes)" + disc_info);
                 } else {
                     LogMessage(L"[CONSUMER] Failed to write to player - may have disconnected");
                     if (!pipe_manager_->IsPlayerRunning()) {
