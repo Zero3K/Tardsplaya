@@ -696,7 +696,7 @@ bool GpacStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
         log_callback_(L"[GPAC] Starting GPAC-based media decoding and routing");
         log_callback_(L"[GPAC] Player: " + config.player_path);
         log_callback_(L"[GPAC] Buffer size: " + std::to_wstring(config.buffer_size_packets) + L" packets");
-        log_callback_(L"[GPAC] Output: " + 
+        log_callback_(std::wstring(L"[GPAC] Output: ") + 
                      (config.enable_avi_output ? L"AVI " : L"") +
                      (config.enable_wav_output ? L"WAV" : L""));
     }
