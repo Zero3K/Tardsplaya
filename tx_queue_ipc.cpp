@@ -691,7 +691,6 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
     
     StreamSegment segment;
     bool initial_buffer_filled = false;
-    int post_discontinuity_slowdown = 0; // Counter for reduced feeding rate after discontinuities
     
     // Standard buffer configuration for all players
     const int initial_buffer_size = 8; // Standard buffer size for startup
@@ -742,14 +741,29 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             break;
         }
         
-        // Handle discontinuities - ensure segment reaches player but provide adaptation time
+        // Handle discontinuities with complete restart to fix timestamp offsets
         if (segment.has_discontinuity) {
             LogMessage(L"[CONSUMER] DISCONTINUITY detected in segment #" + std::to_wstring(segment.sequence_number) + 
-                      L" - processing normally with format change adaptation");
+                      L" - implementing complete restart to fix timestamp offsets");
             
-            // Set slowdown counter to reduce feeding rate for next few segments
-            // This gives the player time to adapt to the new stream format without causing desync
-            post_discontinuity_slowdown = 5; // Slow down for 5 segments after discontinuity
+            // Clear all remaining buffered segments to start fresh
+            ipc_manager_->ClearBuffer();
+            
+            // Flush the player pipe to completely reset player's internal state
+            if (pipe_manager_->FlushPipe()) {
+                LogMessage(L"[CONSUMER] Player pipe flushed - forcing fresh start with clean timestamps");
+            }
+            
+            // Reset initial buffer flag to force re-buffering with clean timestamps
+            initial_buffer_filled = false;
+            
+            // Add a pause to ensure complete reset before restarting
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            
+            LogMessage(L"[CONSUMER] Complete restart initiated - player will restart with clean timestamps");
+            
+            // Skip processing this discontinuity segment to avoid timestamp offset issues
+            continue;
         }
         
         if (initial_buffer_filled && !segment.data.empty()) {
@@ -768,14 +782,8 @@ void TxQueueStreamManager::ConsumerThreadFunction() {
             }
         }
         
-        // Adaptive timing based on content size and post-discontinuity state
-        if (post_discontinuity_slowdown > 0) {
-            // Slower feeding rate after discontinuities to prevent frame drops during format adaptation
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            post_discontinuity_slowdown--;
-            LogMessage(L"[CONSUMER] Post-discontinuity adaptation mode (" + 
-                      std::to_wstring(post_discontinuity_slowdown) + L" segments remaining)");
-        } else if (segment.data.size() > 100 * 1024) { // >100KB = normal content
+        // Standard timing for all players
+        if (segment.data.size() > 100 * 1024) { // >100KB = normal content
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         } else { // Small segment = likely ad content
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
