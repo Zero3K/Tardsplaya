@@ -51,25 +51,6 @@ struct StreamSegment {
         }
         return calculated == checksum;
     }
-    
-    // Check if data contains valid MPEG-TS packets (sync byte 0x47)
-    bool has_valid_ts_headers() const {
-        if (data.size() < 188) return false; // Minimum TS packet size
-        
-        // Check for TS sync bytes at 188-byte intervals
-        // Allow up to 10% bad packets to handle corrupted/encrypted content
-        size_t total_packets = data.size() / 188;
-        size_t valid_packets = 0;
-        
-        for (size_t i = 0; i < data.size() - 188; i += 188) {
-            if (static_cast<unsigned char>(data[i]) == 0x47) {
-                valid_packets++;
-            }
-        }
-        
-        // Require at least 90% valid sync bytes
-        return (total_packets > 0) && ((valid_packets * 100 / total_packets) >= 90);
-    }
 };
 
 // TX-Queue based IPC manager for high-performance streaming
@@ -165,7 +146,7 @@ private:
     PROCESS_INFORMATION process_info_;
     std::wstring pipe_name_;
     bool initialized_;
-    bool use_named_pipe_; // True for MPC-HC, false for stdin players
+    bool use_named_pipe_; // Controls pipe mode vs stdin
     
     // Helper functions
     std::wstring GenerateUniquePipeName();
