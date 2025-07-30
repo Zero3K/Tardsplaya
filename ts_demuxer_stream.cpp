@@ -621,47 +621,7 @@ bool TSDemuxerStreamManager::StartPlayerWithFiles() {
     return true;
 }
 
-bool TSDemuxerStreamManager::CreatePlayerWithPipes() {
-    // For now, use stdin mode like other streaming modes
-    // In the future, we could implement separate named pipes for video/audio
-    
-    std::wstring player_args = L"-";
-    std::wstring cmdline = L"\"" + player_path_ + L"\" " + player_args;
-    
-    STARTUPINFOW si = { sizeof(si) };
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = INVALID_HANDLE_VALUE;
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    
-    // Create pipe for stdin
-    HANDLE read_pipe, write_pipe;
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
-    
-    if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0)) {
-        AddDebugLog(L"[TS_DEMUX] Failed to create stdin pipe");
-        return false;
-    }
-    
-    si.hStdInput = read_pipe;
-    video_pipe_ = write_pipe; // Use single pipe for now, interleave video/audio
-    audio_pipe_ = write_pipe;
-    
-    wchar_t* cmdline_buf = _wcsdup(cmdline.c_str());
-    BOOL result = CreateProcessW(nullptr, cmdline_buf, nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &process_info_);
-    free(cmdline_buf);
-    
-    CloseHandle(read_pipe);
-    
-    if (!result) {
-        CloseHandle(write_pipe);
-        AddDebugLog(L"[TS_DEMUX] Failed to create player process");
-        return false;
-    }
-    
-    player_process_ = process_info_.hProcess;
-    return true;
-}
+
 
 void TSDemuxerStreamManager::StreamingThreadFunction(const std::wstring& playlist_url) {
     LogMessage(L"TS Demuxer streaming thread started");
