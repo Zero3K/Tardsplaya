@@ -596,11 +596,19 @@ void TSDemuxerStreamManager::CleanupNamedPipes() {
 }
 
 bool TSDemuxerStreamManager::StartPlayerWithPipes() {
+    AddDebugLog(L"[TS_DEMUX] StartPlayerWithPipes() method called");
+    AddDebugLog(L"[TS_DEMUX] Player path: " + player_path_);
+    
     // Named pipes should already be created by CreateNamedPipes()
     if (video_pipe_ == INVALID_HANDLE_VALUE || audio_pipe_ == INVALID_HANDLE_VALUE) {
+        AddDebugLog(L"[TS_DEMUX] Named pipes not ready for player start - video_pipe_: " + 
+                   std::to_wstring(reinterpret_cast<uintptr_t>(video_pipe_)) + 
+                   L", audio_pipe_: " + std::to_wstring(reinterpret_cast<uintptr_t>(audio_pipe_)));
         LogMessage(L"Named pipes not ready for player start");
         return false;
     }
+    
+    AddDebugLog(L"[TS_DEMUX] Named pipes are valid, proceeding with player startup");
     
     // Put named pipes in listening state FIRST, before starting the player
     AddDebugLog(L"[TS_DEMUX] Putting named pipes in listening state for player connection...");
