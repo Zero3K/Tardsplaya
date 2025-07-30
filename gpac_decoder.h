@@ -214,6 +214,12 @@ namespace gpac_decoder {
             // Output format options
             bool use_mp4_output = true;  // Use MP4 instead of AVI/WAV
             std::string output_format = "mp4";  // mp4, avi, wav
+            
+            // HLS streaming optimizations
+            bool low_latency_mode = false;
+            int max_segments_to_buffer = 5;
+            std::chrono::milliseconds playlist_refresh_interval{1000};
+            bool skip_old_segments = false;
         };
         
         // Start GPAC processing and routing to media player

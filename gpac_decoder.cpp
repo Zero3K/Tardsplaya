@@ -150,7 +150,7 @@ void GpacHLSDecoder::CleanupGpacLibrary() {
 
 bool GpacHLSDecoder::CreateFilterSession() {
     // Create a new filter session
-    filter_session_ = gf_fs_new(0, GF_FS_SCHEDULER_LOCK_FREE, 0, NULL);
+    filter_session_ = gf_fs_new(0, GF_FS_SCHEDULER_LOCK_FREE, (GF_FilterSessionFlags)0, NULL);
     if (!filter_session_) {
         return false;
     }
