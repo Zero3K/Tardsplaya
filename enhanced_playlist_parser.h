@@ -9,8 +9,11 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <sstream>
+#include <iomanip>
 #include "simple_hls_client/m3u8_parser.h"
 #include "simple_hls_client/hls_fetcher.h"
+#include "tsduck_hls_wrapper.h"
 
 // Enhanced quality structure that includes audio track info
 struct EnhancedPlaylistQuality {
@@ -248,9 +251,124 @@ private:
         
         return result;
     }
-};
 
-// Backward compatibility function for existing code
+    /**
+     * @brief Filter discontinuity segments from a media playlist.
+     * @param playlist_content The M3U8 media playlist content (not master playlist).
+     * @param base_url Base URL for resolving relative URLs.
+     * @return A clean playlist string with discontinuity segments removed.
+     */
+    std::string FilterDiscontinuitySegments(
+        const std::string& playlist_content,
+        const std::string& base_url = ""
+    ) {
+        try {
+            // Use TSDuck HLS wrapper for precise discontinuity detection
+            tsduck_hls::PlaylistParser parser;
+            if (!parser.ParsePlaylist(playlist_content)) {
+                return playlist_content; // Return original if parsing fails
+            }
+            
+            auto segments = parser.GetSegments();
+            
+            // Filter out segments with discontinuity markers
+            std::vector<tsduck_hls::MediaSegment> filtered_segments;
+            for (const auto& segment : segments) {
+                if (!segment.has_discontinuity) {
+                    filtered_segments.push_back(segment);
+                }
+            }
+            
+            // Reconstruct playlist without discontinuity segments
+            return CreateFilteredPlaylist(playlist_content, filtered_segments);
+            
+        } catch (const std::exception& e) {
+            // Return original playlist if filtering fails
+            return playlist_content;
+        }
+    }
+
+    /**
+     * @brief Get filtered media segments without discontinuities.
+     * @param playlist_content The M3U8 media playlist content.
+     * @return Vector of segments without discontinuity markers.
+     */
+    std::vector<tsduck_hls::MediaSegment> GetFilteredSegments(
+        const std::string& playlist_content
+    ) {
+        std::vector<tsduck_hls::MediaSegment> filtered_segments;
+        
+        try {
+            tsduck_hls::PlaylistParser parser;
+            if (parser.ParsePlaylist(playlist_content)) {
+                auto segments = parser.GetSegments();
+                for (const auto& segment : segments) {
+                    if (!segment.has_discontinuity) {
+                        filtered_segments.push_back(segment);
+                    }
+                }
+            }
+        } catch (const std::exception&) {
+            // Return empty vector if parsing fails
+        }
+        
+        return filtered_segments;
+    }
+
+private:
+    /**
+     * @brief Create a clean M3U8 playlist from filtered segments.
+     * @param original_content Original playlist content for extracting headers.
+     * @param filtered_segments Segments without discontinuity markers.
+     * @return Clean M3U8 playlist string.
+     */
+    std::string CreateFilteredPlaylist(
+        const std::string& original_content,
+        const std::vector<tsduck_hls::MediaSegment>& filtered_segments
+    ) {
+        std::ostringstream clean_playlist;
+        std::istringstream original_stream(original_content);
+        std::string line;
+        
+        // Copy headers and metadata (everything before the first segment)
+        bool in_header_section = true;
+        while (std::getline(original_stream, line) && in_header_section) {
+            // Skip discontinuity tags in headers
+            if (line.find("#EXT-X-DISCONTINUITY") == 0) {
+                continue;
+            }
+            
+            // Copy header tags
+            if (line[0] == '#') {
+                if (line.find("#EXTINF:") == 0) {
+                    // We've reached the segments section
+                    in_header_section = false;
+                    break;
+                } else {
+                    clean_playlist << line << "\n";
+                }
+            }
+        }
+        
+        // Add filtered segments
+        for (const auto& segment : filtered_segments) {
+            // Convert duration back to EXTINF format
+            double duration_seconds = segment.duration.count() / 1000.0;
+            clean_playlist << "#EXTINF:" << std::fixed << std::setprecision(3) 
+                          << duration_seconds << ",\n";
+            
+            // Convert wide string URL back to string
+            std::string url_str = WStringToString(segment.url);
+            clean_playlist << url_str << "\n";
+        }
+        
+        // Add end list if original had it
+        if (original_content.find("#EXT-X-ENDLIST") != std::string::npos) {
+            clean_playlist << "#EXT-X-ENDLIST\n";
+        }
+        
+        return clean_playlist.str();
+    }
 inline std::vector<PlaylistQuality> ParseM3U8MasterPlaylist(
     const std::wstring& playlist_content,
     const std::wstring& base_url = L""
@@ -269,5 +387,53 @@ inline std::vector<PlaylistQuality> ParseM3U8MasterPlaylist(
     
     return legacy_result;
 }
+
+// Enhanced playlist parsing with Simple HLS Client integration
+EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
+    const std::wstring& playlist_content,
+    const std::wstring& base_url = L""
+);
+
+// Discontinuity filtering functions for media playlists
+
+/**
+ * @brief Filter discontinuity segments from a media playlist.
+ * 
+ * This function takes an M3U8 media playlist (not master playlist) and removes
+ * all segments that are marked with #EXT-X-DISCONTINUITY tags. This is useful
+ * for removing ad segments or other content that causes decoder resets.
+ * 
+ * Example usage:
+ * ```cpp
+ * // Download media playlist
+ * std::string media_playlist = "..."; // M3U8 content from stream URL
+ * 
+ * // Filter out discontinuity segments (typically ads)
+ * std::string clean_playlist = FilterDiscontinuitySegments(media_playlist);
+ * 
+ * // Use clean_playlist to pipe only main content to media player
+ * ```
+ * 
+ * @param playlist_content The M3U8 media playlist content (not master playlist).
+ * @param base_url Base URL for resolving relative URLs (optional).
+ * @return A clean playlist string with discontinuity segments removed.
+ */
+std::string FilterDiscontinuitySegments(
+    const std::string& playlist_content,
+    const std::string& base_url = ""
+);
+
+/**
+ * @brief Get filtered media segments without discontinuities.
+ * 
+ * Returns a vector of MediaSegment objects that don't have discontinuity markers.
+ * Useful for direct access to segment data without reconstructing the playlist.
+ * 
+ * @param playlist_content The M3U8 media playlist content.
+ * @return Vector of segments without discontinuity markers.
+ */
+std::vector<tsduck_hls::MediaSegment> GetFilteredSegments(
+    const std::string& playlist_content
+);
 
 #endif // ENHANCED_PLAYLIST_PARSER_H
