@@ -117,55 +117,88 @@ bool MpegTSDemuxer::ProcessTSData(const char* data, size_t size) {
         total_bytes_processed_ += size;
     }
     
-    // Process the data through AVContext
+    // Process the data through AVContext using proper API
     if (av_context_) {
         try {
-            // Configure the context if needed
-            if (!av_context_->is_configured) {
+            // Process packets using the proper API flow (based on test_demux.cpp)
+            while (buffer_pos_ >= AV_CONTEXT_PACKETSIZE) {
+                // Try to synchronize with transport stream
                 int ret = av_context_->TSResync();
-                if (ret == TSDemux::AVCONTEXT_CONTINUE) {
-                    av_context_->is_configured = true;
-                    AddDebugLog(L"[DEMUX] TS stream configured");
-                }
-            }
-            
-            // Process packets
-            while (av_context_->is_configured && buffer_pos_ >= av_context_->av_pkt_size) {
-                int ret = av_context_->ProcessTSPacket();
-                if (ret == TSDemux::AVCONTEXT_CONTINUE) {
-                    // Success - check for new elementary streams
-                    std::vector<TSDemux::ElementaryStream*> current_streams = av_context_->GetStreams();
+                if (ret != TSDemux::AVCONTEXT_CONTINUE) {
+                    // Can't sync - advance and try again or handle error
+                    if (ret == TSDemux::AVCONTEXT_TS_ERROR) {
+                        av_context_->Shift();
+                    } else {
+                        // Need more data or EOF
+                        break;
+                    }
                     
-                    for (TSDemux::ElementaryStream* es : current_streams) {
-                        if (es && streams_.find(es->pid) == streams_.end()) {
+                    // Update buffer position  
+                    if (buffer_pos_ >= AV_CONTEXT_PACKETSIZE) {
+                        stream_pos_ += AV_CONTEXT_PACKETSIZE;
+                        buffer_pos_ -= AV_CONTEXT_PACKETSIZE;
+                        if (buffer_pos_ > 0) {
+                            memmove(buffer_.get(), buffer_.get() + AV_CONTEXT_PACKETSIZE, buffer_pos_);
+                        }
+                    }
+                    continue;
+                }
+                
+                // Process the current TS packet
+                ret = av_context_->ProcessTSPacket();
+                
+                // Check for stream data after processing packet
+                if (av_context_->HasPIDStreamData()) {
+                    TSDemux::ElementaryStream* es = av_context_->GetPIDStream();
+                    if (es) {
+                        // Create output stream if new
+                        if (streams_.find(es->pid) == streams_.end()) {
                             CreateOutputStream(es->pid, es->stream_type);
                         }
                         
-                        // Get stream data if available
-                        if (es && es->sample_size > 0 && es->sample_buffer) {
-                            OnStreamData(es->pid, es->stream_type, 
-                                        reinterpret_cast<const unsigned char*>(es->sample_buffer), 
-                                        es->sample_size);
-                            // Reset sample after processing
-                            es->sample_size = 0;
+                        // Get stream packet data
+                        TSDemux::STREAM_PKT pkt;
+                        while (es->GetStreamPacket(&pkt)) {
+                            if (pkt.data && pkt.size > 0) {
+                                OnStreamData(es->pid, es->stream_type, pkt.data, pkt.size);
+                            }
                         }
                     }
-                    
-                    // Advance stream position
-                    stream_pos_ += av_context_->av_pkt_size;
-                    buffer_pos_ -= av_context_->av_pkt_size;
-                    if (buffer_pos_ > 0) {
-                        memmove(buffer_.get(), buffer_.get() + av_context_->av_pkt_size, buffer_pos_);
+                }
+                
+                // Check for payload data  
+                if (av_context_->HasPIDPayload()) {
+                    ret = av_context_->ProcessTSPayload();
+                    if (ret == TSDemux::AVCONTEXT_PROGRAM_CHANGE) {
+                        // Program change - new streams detected
+                        std::vector<TSDemux::ElementaryStream*> current_streams = av_context_->GetStreams();
+                        for (TSDemux::ElementaryStream* es : current_streams) {
+                            if (es && streams_.find(es->pid) == streams_.end()) {
+                                CreateOutputStream(es->pid, es->stream_type);
+                            }
+                        }
                     }
-                } else if (ret == TSDemux::AVCONTEXT_CONTINUE_NEXT) {
-                    // Continue with next packet
-                    stream_pos_ += av_context_->av_pkt_size;
-                    buffer_pos_ -= av_context_->av_pkt_size;
+                }
+                
+                // Handle return codes and advance position
+                if (ret < 0) {
+                    AddDebugLog(L"[DEMUX] Processing error: " + std::to_wstring(ret));
+                }
+                
+                if (ret == TSDemux::AVCONTEXT_TS_ERROR) {
+                    av_context_->Shift();
+                } else {
+                    av_context_->GoNext();
+                }
+                
+                // Update buffer position (remove processed packet)
+                if (buffer_pos_ >= AV_CONTEXT_PACKETSIZE) {
+                    stream_pos_ += AV_CONTEXT_PACKETSIZE;
+                    buffer_pos_ -= AV_CONTEXT_PACKETSIZE;
                     if (buffer_pos_ > 0) {
-                        memmove(buffer_.get(), buffer_.get() + av_context_->av_pkt_size, buffer_pos_);
+                        memmove(buffer_.get(), buffer_.get() + AV_CONTEXT_PACKETSIZE, buffer_pos_);
                     }
                 } else {
-                    // Error or need more data
                     break;
                 }
             }
