@@ -69,3 +69,12 @@ std::vector<PlaylistQuality> ParseM3U8MasterPlaylist(
 
     return result;
 }
+
+// Enhanced playlist parsing implementation
+EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
+    const std::wstring& playlist_content,
+    const std::wstring& base_url
+) {
+    EnhancedPlaylistParser parser;
+    return parser.ParseM3U8MasterPlaylist(playlist_content, base_url);
+}

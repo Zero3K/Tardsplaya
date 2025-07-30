@@ -121,11 +121,18 @@
     <ClCompile Include="urlencode.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="enhanced_playlist_parser.h" />
     <ClInclude Include="favorites.h" />
     <ClInclude Include="json_minimal.h" />
     <ClInclude Include="tlsclient\lock.h" />
     <ClInclude Include="playlist_parser.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="simple_hls_client\hls_fetcher.h" />
+    <ClInclude Include="simple_hls_client\hls_tag_parser.h" />
+    <ClInclude Include="simple_hls_client\iframe_parser.h" />
+    <ClInclude Include="simple_hls_client\m3u8_parser.h" />
+    <ClInclude Include="simple_hls_client\media_parser.h" />
+    <ClInclude Include="simple_hls_client\stream_inf_parser.h" />
     <ClInclude Include="stream_memory_map.h" />
     <ClInclude Include="stream_pipe.h" />
     <ClInclude Include="stream_resource_manager.h" />
