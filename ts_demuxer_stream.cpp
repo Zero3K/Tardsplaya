@@ -126,7 +126,27 @@ bool MemoryTSDemuxer::Process() {
         }
         
         if (!ParseTSPacket(packet)) {
-            AddDebugLog(L"[TS_DEMUX] Failed to parse TS packet");
+            // Add more specific debugging information
+            unsigned int pid = ((packet[1] & 0x1F) << 8) | packet[2];
+            unsigned int field_ctrl = (packet[3] & 0x30) >> 4;
+            bool unit_start = (packet[1] & 0x40) != 0;
+            
+            std::wstring debug_msg = L"[TS_DEMUX] Failed to parse TS packet - PID: 0x" + 
+                                   std::to_wstring(pid) + L", Field: " + std::to_wstring(field_ctrl) + 
+                                   L", Unit Start: " + (unit_start ? L"1" : L"0");
+            AddDebugLog(debug_msg);
+        } else {
+            // Log successful parsing for first few packets and every 100th packet
+            if (stats_.packets_processed < 10 || stats_.packets_processed % 100 == 0) {
+                unsigned int pid = ((packet[1] & 0x1F) << 8) | packet[2];
+                if (pid == 0x0000 || pid == pmt_pid_ || pid == video_pid_ || pid == audio_pid_) {
+                    std::wstring debug_msg = L"[TS_DEMUX] Successfully parsed packet - PID: 0x" + 
+                                           std::to_wstring(pid) + L" (PMT: " + std::to_wstring(pmt_pid_) + 
+                                           L", Video: " + std::to_wstring(video_pid_) + 
+                                           L", Audio: " + std::to_wstring(audio_pid_) + L")";
+                    AddDebugLog(debug_msg);
+                }
+            }
         }
         
         stats_.packets_processed++;
@@ -144,26 +164,42 @@ bool MemoryTSDemuxer::Process() {
 
 bool MemoryTSDemuxer::ParseTSPacket(const unsigned char* packet) {
     // Parse TS header
+    bool transport_error = (packet[1] & 0x80) != 0;
     bool unit_start = (packet[1] & 0x40) != 0;
     unsigned int pid = ((packet[1] & 0x1F) << 8) | packet[2];
     unsigned int field_ctrl = (packet[3] & 0x30) >> 4;
+    unsigned int continuity = packet[3] & 0x0F;
+    
+    // Skip packets with transport errors
+    if (transport_error) {
+        return true;
+    }
     
     const unsigned char* payload = nullptr;
     unsigned int payload_len = 0;
     
     switch (field_ctrl) {
+        case 0: // Reserved for future use - treat as no payload
+            return true;
+            
         case 1: // Payload only
             payload = packet + 4;
             payload_len = packet_size_ - 4;
             break;
+            
+        case 2: // Adaptation field only, no payload
+            // Process adaptation field if needed, but no payload to parse
+            return true;
+            
         case 3: // Adaptation field + payload
-            if (packet_size_ > 5 && packet[4] < packet_size_ - 5) {
-                payload = packet + 5 + packet[4];
-                payload_len = packet_size_ - 5 - packet[4];
+            if (packet_size_ > 5) {
+                unsigned int adapt_len = packet[4];
+                if (adapt_len < packet_size_ - 5) {
+                    payload = packet + 5 + adapt_len;
+                    payload_len = packet_size_ - 5 - adapt_len;
+                }
             }
             break;
-        default:
-            return true; // No payload
     }
     
     if (!payload || payload_len == 0) return true;
@@ -187,20 +223,23 @@ bool MemoryTSDemuxer::ParseTSPacket(const unsigned char* packet) {
 }
 
 bool MemoryTSDemuxer::ParsePAT(const unsigned char* payload, unsigned int length) {
-    if (length < 8) return false;
+    if (length < 8) return true; // Not enough data, but don't fail
     
     unsigned int pointer = payload[0];
-    if (pointer >= length) return false;
+    if (pointer >= length) return true; // Skip malformed pointer
     
     const unsigned char* table = payload + 1 + pointer;
     unsigned int table_len = length - 1 - pointer;
     
-    if (table_len < 8) return false;
+    if (table_len < 8) return true; // Not enough data for table
+    
+    // Verify table ID is PAT (0x00)
+    if (table[0] != 0x00) return true; // Not a PAT
     
     unsigned int section_length = ((table[1] & 0x03) << 8) | table[2];
-    if (section_length < 4 || section_length + 3 > table_len) return false;
+    if (section_length < 4 || section_length + 3 > table_len) return true; // Malformed section
     
-    // Skip to program list
+    // Skip to program list (after table header)
     const unsigned char* programs = table + 8;
     unsigned int programs_len = section_length - 9; // Exclude CRC32
     
@@ -210,6 +249,8 @@ bool MemoryTSDemuxer::ParsePAT(const unsigned char* payload, unsigned int length
         
         if (program_num != 0) { // Skip NIT PID
             pmt_pid_ = program_pid;
+            AddDebugLog(L"[TS_DEMUX] Found PMT PID: 0x" + std::to_wstring(program_pid) + 
+                       L" for program " + std::to_wstring(program_num));
             break;
         }
     }
@@ -218,21 +259,27 @@ bool MemoryTSDemuxer::ParsePAT(const unsigned char* payload, unsigned int length
 }
 
 bool MemoryTSDemuxer::ParsePMT(const unsigned char* payload, unsigned int length) {
-    if (length < 8) return false;
+    if (length < 8) return true; // Not enough data, but don't fail
     
     unsigned int pointer = payload[0];
-    if (pointer >= length) return false;
+    if (pointer >= length) return true; // Skip malformed pointer
     
     const unsigned char* table = payload + 1 + pointer;
     unsigned int table_len = length - 1 - pointer;
     
-    if (table_len < 12) return false;
+    if (table_len < 12) return true; // Not enough data for PMT table
+    
+    // Verify table ID is PMT (0x02)
+    if (table[0] != 0x02) return true; // Not a PMT
     
     unsigned int section_length = ((table[1] & 0x03) << 8) | table[2];
-    if (section_length < 4 || section_length + 3 > table_len) return false;
+    if (section_length < 4 || section_length + 3 > table_len) return true; // Malformed section
     
     pcr_pid_ = ((table[8] & 0x1F) << 8) | table[9];
     unsigned int prog_info_len = ((table[10] & 0x03) << 8) | table[11];
+    
+    // Bounds check for program info length
+    if (prog_info_len + 13 > section_length) return true;
     
     // Skip to elementary streams
     const unsigned char* streams = table + 12 + prog_info_len;
@@ -243,11 +290,29 @@ bool MemoryTSDemuxer::ParsePMT(const unsigned char* payload, unsigned int length
         unsigned int stream_pid = ((streams[i + 1] & 0x1F) << 8) | streams[i + 2];
         unsigned int es_info_len = ((streams[i + 3] & 0x03) << 8) | streams[i + 4];
         
-        // Identify video and audio streams
-        if (stream_type == 0x1B && video_pid_ == 0) { // H.264
-            video_pid_ = stream_pid;
-        } else if (stream_type == 0x0F && audio_pid_ == 0) { // ADTS AAC
-            audio_pid_ = stream_pid;
+        // Bounds check for ES info length
+        if (i + 5 + es_info_len > streams_len) break;
+        
+        // Identify video and audio streams - support more formats
+        if (video_pid_ == 0) {
+            if (stream_type == 0x1B ||  // H.264/AVC
+                stream_type == 0x24 ||  // H.265/HEVC 
+                stream_type == 0x02) {  // MPEG-2 Video
+                video_pid_ = stream_pid;
+                AddDebugLog(L"[TS_DEMUX] Found video stream - Type: 0x" + std::to_wstring(stream_type) + 
+                           L", PID: 0x" + std::to_wstring(stream_pid));
+            }
+        }
+        
+        if (audio_pid_ == 0) {
+            if (stream_type == 0x0F ||  // ADTS AAC
+                stream_type == 0x11 ||  // LATM AAC
+                stream_type == 0x03 ||  // MPEG-1 Audio
+                stream_type == 0x04) {  // MPEG-2 Audio
+                audio_pid_ = stream_pid;
+                AddDebugLog(L"[TS_DEMUX] Found audio stream - Type: 0x" + std::to_wstring(stream_type) + 
+                           L", PID: 0x" + std::to_wstring(stream_pid));
+            }
         }
         
         i += 5 + es_info_len;
@@ -257,36 +322,41 @@ bool MemoryTSDemuxer::ParsePMT(const unsigned char* payload, unsigned int length
 }
 
 bool MemoryTSDemuxer::ParsePES(const unsigned char* payload, unsigned int length, unsigned int pid, bool unit_start) {
-    if (!unit_start || length < 6) {
-        // Continue with existing PES packet
-        if (pid == video_pid_ && video_handler_) {
+    if (!unit_start || length < 3) {
+        // Continue with existing PES packet or insufficient data
+        if (pid == video_pid_ && video_handler_ && length > 0) {
             return video_handler_(payload, length);
-        } else if (pid == audio_pid_ && audio_handler_) {
+        } else if (pid == audio_pid_ && audio_handler_ && length > 0) {
             return audio_handler_(payload, length);
         }
         return true;
     }
     
-    // Check for PES start code
-    if (payload[0] != 0x00 || payload[1] != 0x00 || payload[2] != 0x01) {
-        return true; // Not a PES packet
-    }
-    
-    // Skip PES header to get to elementary stream data
-    unsigned int pes_header_len = 6;
-    if (length > 8) {
-        pes_header_len += 3 + payload[8]; // Additional header fields
-    }
-    
-    if (pes_header_len >= length) return true;
-    
-    const unsigned char* es_data = payload + pes_header_len;
-    unsigned int es_len = length - pes_header_len;
-    
-    if (pid == video_pid_ && video_handler_) {
-        return video_handler_(es_data, es_len);
-    } else if (pid == audio_pid_ && audio_handler_) {
-        return audio_handler_(es_data, es_len);
+    // Check for PES start code (more flexible for real streams)
+    if (length >= 3 && payload[0] == 0x00 && payload[1] == 0x00 && payload[2] == 0x01) {
+        // Valid PES start code - parse header
+        unsigned int pes_header_len = 6;
+        if (length > 8 && payload[6] == 0x80) { // Check PTS/DTS flags exist
+            pes_header_len += 3 + payload[8]; // Additional header fields
+        }
+        
+        if (pes_header_len < length) {
+            const unsigned char* es_data = payload + pes_header_len;
+            unsigned int es_len = length - pes_header_len;
+            
+            if (pid == video_pid_ && video_handler_) {
+                return video_handler_(es_data, es_len);
+            } else if (pid == audio_pid_ && audio_handler_) {
+                return audio_handler_(es_data, es_len);
+            }
+        }
+    } else {
+        // No PES start code - treat as raw elementary stream data
+        if (pid == video_pid_ && video_handler_) {
+            return video_handler_(payload, length);
+        } else if (pid == audio_pid_ && audio_handler_) {
+            return audio_handler_(payload, length);
+        }
     }
     
     return true;
