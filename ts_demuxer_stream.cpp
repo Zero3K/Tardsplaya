@@ -519,7 +519,7 @@ bool TSDemuxerStreamManager::CreateTempFiles() {
     // Generate unique filenames
     std::wstring temp_prefix = std::wstring(temp_path) + L"tardsplaya_ts_";
     
-    // Create video file
+    // Create video file with optimized flags for better streaming performance
     video_file_path_ = temp_prefix + L"video_" + std::to_wstring(GetCurrentProcessId()) + L".h264";
     video_file_handle_ = CreateFileW(
         video_file_path_.c_str(),
@@ -527,7 +527,7 @@ bool TSDemuxerStreamManager::CreateTempFiles() {
         FILE_SHARE_READ,
         nullptr,
         CREATE_ALWAYS,
-        FILE_ATTRIBUTE_TEMPORARY,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, // Optimized for sequential streaming
         nullptr
     );
     
@@ -536,7 +536,7 @@ bool TSDemuxerStreamManager::CreateTempFiles() {
         return false;
     }
     
-    // Create audio file
+    // Create audio file with optimized flags for better streaming performance
     audio_file_path_ = temp_prefix + L"audio_" + std::to_wstring(GetCurrentProcessId()) + L".aac";
     audio_file_handle_ = CreateFileW(
         audio_file_path_.c_str(),
@@ -544,7 +544,7 @@ bool TSDemuxerStreamManager::CreateTempFiles() {
         FILE_SHARE_READ,
         nullptr,
         CREATE_ALWAYS,
-        FILE_ATTRIBUTE_TEMPORARY,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, // Optimized for sequential streaming
         nullptr
     );
     
@@ -685,12 +685,12 @@ void TSDemuxerStreamManager::StreamingThreadFunction(const std::wstring& playlis
                     }
                 }
                 
-                // Small delay between segments
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                // Reduced delay between segments for better performance - was 100ms, now 25ms
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
             }
             
-            // Refresh playlist
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            // Refresh playlist - reduced from 1 second to 500ms for more responsive streaming
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     } catch (const std::exception& e) {
         LogMessage(L"Exception in streaming thread: " + Utf8ToWide(e.what()));
@@ -731,7 +731,7 @@ bool TSDemuxerStreamManager::ProcessSegmentWithDemuxer(const std::vector<char>& 
         return false;
     }
     
-    // Set up output handlers
+    // Set up output handlers with optimized buffering
     demuxer.SetVideoOutput([this](const unsigned char* data, unsigned int length) -> bool {
         video_packets_++;
         if (video_output_) {
@@ -774,12 +774,17 @@ bool TSDemuxerStreamManager::ProcessSegmentWithDemuxer(const std::vector<char>& 
     
     bool result = demuxer.Process();
     
-    // Flush the file handles to ensure data is written
-    if (video_file_handle_ != INVALID_HANDLE_VALUE) {
-        FlushFileBuffers(video_file_handle_);
-    }
-    if (audio_file_handle_ != INVALID_HANDLE_VALUE) {
-        FlushFileBuffers(audio_file_handle_);
+    // Only flush file buffers every 5 segments instead of every segment to improve performance
+    static int flush_counter = 0;
+    flush_counter++;
+    if (flush_counter >= 5) {
+        flush_counter = 0;
+        if (video_file_handle_ != INVALID_HANDLE_VALUE) {
+            FlushFileBuffers(video_file_handle_);
+        }
+        if (audio_file_handle_ != INVALID_HANDLE_VALUE) {
+            FlushFileBuffers(audio_file_handle_);
+        }
     }
     
     return result;
