@@ -3,6 +3,7 @@
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
+#include "ts_pid_filter.h"
 #define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
@@ -679,6 +680,10 @@ TransportStreamRouter::TransportStreamRouter() {
     
     ts_buffer_ = std::make_unique<TSBuffer>(buffer_size);
     hls_converter_ = std::make_unique<HLSToTSConverter>();
+    pid_filter_manager_ = std::make_unique<TSPIDFilterManager>();
+    
+    // Configure default PID filtering
+    pid_filter_manager_->ApplyPreset(TSPIDFilterManager::FilterPreset::QUALITY_FOCUSED);
 }
 
 TransportStreamRouter::~TransportStreamRouter() {
@@ -696,6 +701,9 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     current_config_ = config;
     log_callback_ = log_callback;
     routing_active_ = true;
+    
+    // Configure PID filtering
+    ConfigurePIDFiltering(config);
     
     // Reset converter and buffer
     hls_converter_->Reset();
@@ -787,6 +795,18 @@ TransportStreamRouter::BufferStats TransportStreamRouter::GetBufferStats() const
     if (stats.total_frames_processed > 1) {
         auto avg_interval_ms = time_elapsed.count() / stats.total_frames_processed;
         stats.avg_frame_interval = std::chrono::milliseconds(avg_interval_ms);
+    }
+    
+    // PID filtering statistics
+    if (pid_filter_manager_) {
+        auto filter_stats = pid_filter_manager_->GetStats();
+        auto& filter = pid_filter_manager_->GetFilter();
+        
+        stats.packets_filtered_by_pid = filter_stats.filtered_packets;
+        stats.discontinuities_detected = filter.GetDiscontinuitiesDetected();
+        stats.discontinuity_rate = filter.GetOverallDiscontinuityRate();
+        stats.active_pid_count = filter.GetActivePIDs().size();
+        stats.problematic_pid_count = filter.GetProblematicPIDs().size();
     }
     
     return stats;
@@ -938,6 +958,18 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
                             log_callback_(L"[TS_ROUTER] No valid TS packets found in segment");
                         }
                         continue;
+                    }
+                    
+                    // Apply PID filtering if enabled
+                    if (current_config_.enable_pid_filtering) {
+                        ts_packets = pid_filter_manager_->ProcessPackets(ts_packets);
+                        
+                        if (log_callback_ && segments_processed == 0) {
+                            auto filter_stats = pid_filter_manager_->GetStats();
+                            log_callback_(L"[PID_FILTER] Processed " + std::to_wstring(filter_stats.total_input_packets) + 
+                                         L" packets, filtered " + std::to_wstring(filter_stats.filtered_packets) + 
+                                         L" (" + std::to_wstring(static_cast<int>(filter_stats.filter_efficiency * 100)) + L"% passed)");
+                        }
                     }
                     
                     // Add to buffer with special handling for post-discontinuity segments
@@ -1528,6 +1560,79 @@ void TransportStreamRouter::CheckStreamHealth(const TSPacket& packet) {
         }
         last_health_check = now;
     }
+}
+
+// PID filtering interface implementations
+void TransportStreamRouter::ConfigurePIDFiltering(const RouterConfig& config) {
+    if (!pid_filter_manager_) return;
+    
+    // Apply preset configuration
+    pid_filter_manager_->ApplyPreset(config.filter_preset);
+    
+    // Configure discontinuity filtering
+    if (config.enable_discontinuity_filtering) {
+        pid_filter_manager_->GetFilter().SetDiscontinuityMode(DiscontinuityMode::SMART_FILTER);
+    } else {
+        pid_filter_manager_->GetFilter().SetDiscontinuityMode(DiscontinuityMode::PASS_THROUGH);
+    }
+    
+    // Configure auto-detection
+    pid_filter_manager_->GetFilter().EnableAutoDetection(config.enable_auto_pid_detection);
+    pid_filter_manager_->GetFilter().SetAutoDetectionThreshold(config.discontinuity_threshold);
+    
+    // Set logging callback for PID filter
+    if (log_callback_) {
+        pid_filter_manager_->GetFilter().SetLogCallback(log_callback_);
+    }
+    
+    if (log_callback_) {
+        log_callback_(L"[PID_FILTER] Configuration applied - Preset: " + 
+                     std::to_wstring(static_cast<int>(config.filter_preset)) + 
+                     L", Discontinuity filtering: " + (config.enable_discontinuity_filtering ? L"ON" : L"OFF"));
+    }
+}
+
+void TransportStreamRouter::EnablePIDFiltering(bool enable) {
+    if (!pid_filter_manager_) return;
+    
+    if (enable) {
+        pid_filter_manager_->ApplyPreset(TSPIDFilterManager::FilterPreset::QUALITY_FOCUSED);
+    } else {
+        pid_filter_manager_->ApplyPreset(TSPIDFilterManager::FilterPreset::NONE);
+    }
+    
+    if (log_callback_) {
+        log_callback_(L"[PID_FILTER] PID filtering " + std::wstring(enable ? L"ENABLED" : L"DISABLED"));
+    }
+}
+
+void TransportStreamRouter::SetPIDFilterPreset(TSPIDFilterManager::FilterPreset preset) {
+    if (!pid_filter_manager_) return;
+    
+    pid_filter_manager_->ApplyPreset(preset);
+    
+    if (log_callback_) {
+        std::wstring preset_name;
+        switch (preset) {
+            case TSPIDFilterManager::FilterPreset::NONE: preset_name = L"NONE"; break;
+            case TSPIDFilterManager::FilterPreset::BASIC_CLEANUP: preset_name = L"BASIC_CLEANUP"; break;
+            case TSPIDFilterManager::FilterPreset::QUALITY_FOCUSED: preset_name = L"QUALITY_FOCUSED"; break;
+            case TSPIDFilterManager::FilterPreset::MINIMAL_STREAM: preset_name = L"MINIMAL_STREAM"; break;
+            case TSPIDFilterManager::FilterPreset::DISCONTINUITY_ONLY: preset_name = L"DISCONTINUITY_ONLY"; break;
+            case TSPIDFilterManager::FilterPreset::CUSTOM: preset_name = L"CUSTOM"; break;
+        }
+        log_callback_(L"[PID_FILTER] Applied preset: " + preset_name);
+    }
+}
+
+std::vector<uint16_t> TransportStreamRouter::GetActivePIDs() const {
+    if (!pid_filter_manager_) return {};
+    return pid_filter_manager_->GetFilter().GetActivePIDs();
+}
+
+std::vector<uint16_t> TransportStreamRouter::GetProblematicPIDs() const {
+    if (!pid_filter_manager_) return {};
+    return pid_filter_manager_->GetFilter().GetProblematicPIDs();
 }
 
 
