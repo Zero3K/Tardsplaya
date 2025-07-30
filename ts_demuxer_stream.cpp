@@ -527,7 +527,7 @@ bool TSDemuxerStreamManager::CreateTempFiles() {
         FILE_SHARE_READ,
         nullptr,
         CREATE_ALWAYS,
-        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
+        FILE_ATTRIBUTE_TEMPORARY,
         nullptr
     );
     
@@ -544,7 +544,7 @@ bool TSDemuxerStreamManager::CreateTempFiles() {
         FILE_SHARE_READ,
         nullptr,
         CREATE_ALWAYS,
-        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
+        FILE_ATTRIBUTE_TEMPORARY,
         nullptr
     );
     
@@ -563,17 +563,25 @@ void TSDemuxerStreamManager::CleanupTempFiles() {
     if (video_file_handle_ != INVALID_HANDLE_VALUE) {
         CloseHandle(video_file_handle_);
         video_file_handle_ = INVALID_HANDLE_VALUE;
-        // File will be auto-deleted due to FILE_FLAG_DELETE_ON_CLOSE
     }
     
     if (audio_file_handle_ != INVALID_HANDLE_VALUE) {
         CloseHandle(audio_file_handle_);
         audio_file_handle_ = INVALID_HANDLE_VALUE;
-        // File will be auto-deleted due to FILE_FLAG_DELETE_ON_CLOSE
     }
     
-    video_file_path_.clear();
-    audio_file_path_.clear();
+    // Manually delete the temporary files
+    if (!video_file_path_.empty()) {
+        DeleteFileW(video_file_path_.c_str());
+        AddDebugLog(L"[TS_DEMUX] Deleted video temp file: " + video_file_path_);
+        video_file_path_.clear();
+    }
+    
+    if (!audio_file_path_.empty()) {
+        DeleteFileW(audio_file_path_.c_str());
+        AddDebugLog(L"[TS_DEMUX] Deleted audio temp file: " + audio_file_path_);
+        audio_file_path_.clear();
+    }
 }
 
 bool TSDemuxerStreamManager::StartPlayerWithFiles() {
@@ -582,6 +590,16 @@ bool TSDemuxerStreamManager::StartPlayerWithFiles() {
         LogMessage(L"Temp files not ready for player start");
         return false;
     }
+    
+    // Flush file buffers to ensure data is available for player
+    if (video_file_handle_ != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(video_file_handle_);
+    }
+    if (audio_file_handle_ != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(audio_file_handle_);
+    }
+    
+    AddDebugLog(L"[TS_DEMUX] Flushed file buffers before starting player");
     
     // Determine player type and build command line
     std::wstring player_name = player_path_;
@@ -612,7 +630,8 @@ bool TSDemuxerStreamManager::StartPlayerWithFiles() {
     free(cmdline_buf);
     
     if (!result) {
-        AddDebugLog(L"[TS_DEMUX] Failed to create player process");
+        DWORD error = GetLastError();
+        AddDebugLog(L"[TS_DEMUX] Failed to create player process, error: " + std::to_wstring(error));
         return false;
     }
     
@@ -719,8 +738,18 @@ bool TSDemuxerStreamManager::ProcessSegmentWithDemuxer(const std::vector<char>& 
             return video_output_->WriteData(data, length);
         }
         // Write directly to video file
+        if (video_file_handle_ == INVALID_HANDLE_VALUE) {
+            AddDebugLog(L"[TS_DEMUX] Warning: Video file handle is invalid");
+            return false;
+        }
         DWORD written;
-        return WriteFile(video_file_handle_, data, length, &written, nullptr) && written == length;
+        BOOL result = WriteFile(video_file_handle_, data, length, &written, nullptr);
+        if (!result || written != length) {
+            DWORD error = GetLastError();
+            AddDebugLog(L"[TS_DEMUX] Failed to write video data, error: " + std::to_wstring(error));
+            return false;
+        }
+        return true;
     });
     
     demuxer.SetAudioOutput([this](const unsigned char* data, unsigned int length) -> bool {
@@ -729,8 +758,18 @@ bool TSDemuxerStreamManager::ProcessSegmentWithDemuxer(const std::vector<char>& 
             return audio_output_->WriteData(data, length);
         }
         // Write directly to audio file
+        if (audio_file_handle_ == INVALID_HANDLE_VALUE) {
+            AddDebugLog(L"[TS_DEMUX] Warning: Audio file handle is invalid");
+            return false;
+        }
         DWORD written;
-        return WriteFile(audio_file_handle_, data, length, &written, nullptr) && written == length;
+        BOOL result = WriteFile(audio_file_handle_, data, length, &written, nullptr);
+        if (!result || written != length) {
+            DWORD error = GetLastError();
+            AddDebugLog(L"[TS_DEMUX] Failed to write audio data, error: " + std::to_wstring(error));
+            return false;
+        }
+        return true;
     });
     
     bool result = demuxer.Process();
