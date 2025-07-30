@@ -387,7 +387,7 @@ inline EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
  */
 inline std::string FilterDiscontinuitySegments(
     const std::string& playlist_content,
-    const std::string& base_url = ""
+    const std::string& base_url
 ) {
     EnhancedPlaylistParser parser;
     return parser.FilterDiscontinuitySegments(playlist_content, base_url);
