@@ -71,27 +71,4 @@ std::vector<PlaylistQuality> ParseM3U8MasterPlaylist(
     return result;
 }
 
-// Enhanced playlist parsing implementation
-EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
-    const std::wstring& playlist_content,
-    const std::wstring& base_url
-) {
-    EnhancedPlaylistParser parser;
-    return parser.ParseM3U8MasterPlaylist(playlist_content, base_url);
-}
-
-// Discontinuity filtering implementation
-std::string FilterDiscontinuitySegments(
-    const std::string& playlist_content,
-    const std::string& base_url
-) {
-    EnhancedPlaylistParser parser;
-    return parser.FilterDiscontinuitySegments(playlist_content, base_url);
-}
-
-std::vector<tsduck_hls::MediaSegment> GetFilteredSegments(
-    const std::string& playlist_content
-) {
-    EnhancedPlaylistParser parser;
-    return parser.GetFilteredSegments(playlist_content);
-}
+// Enhanced playlist parsing functions are now inline in enhanced_playlist_parser.h
