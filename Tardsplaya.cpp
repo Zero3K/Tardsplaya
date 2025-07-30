@@ -134,6 +134,12 @@ bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
 bool g_logToFile = false; // Enable logging to debug.log file
 
+// PID filtering settings (tspidfilter-inspired functionality)
+bool g_enablePIDFiltering = true;
+int g_filterPreset = 1; // 0=NONE, 1=BASIC_CLEANUP, 2=QUALITY_FOCUSED, 3=MINIMAL_STREAM, 4=DISCONTINUITY_ONLY
+double g_discontinuityThreshold = 0.05; // 5% threshold
+bool g_autoDetectProblematicPIDs = true;
+
 
 
 // Tray icon support
@@ -198,6 +204,15 @@ void LoadSettings() {
     
     // Load verbose debug setting
     g_verboseDebug = GetPrivateProfileIntW(L"Settings", L"VerboseDebug", 0, iniPath.c_str()) != 0;
+
+    // Load PID filtering settings (tspidfilter-inspired)
+    g_enablePIDFiltering = GetPrivateProfileIntW(L"Settings", L"EnablePIDFiltering", 1, iniPath.c_str()) != 0;
+    g_filterPreset = GetPrivateProfileIntW(L"Settings", L"FilterPreset", 1, iniPath.c_str()); // BASIC_CLEANUP default
+    g_autoDetectProblematicPIDs = GetPrivateProfileIntW(L"Settings", L"AutoDetectProblematicPIDs", 1, iniPath.c_str()) != 0;
+    
+    // Load discontinuity threshold (stored as integer percentage, e.g., 5 for 5%)
+    int thresholdPercent = GetPrivateProfileIntW(L"Settings", L"DiscontinuityThreshold", 5, iniPath.c_str());
+    g_discontinuityThreshold = thresholdPercent / 100.0;
 }
 
 void SaveSettings() {
@@ -225,6 +240,15 @@ void SaveSettings() {
     
     // Save verbose debug setting
     WritePrivateProfileStringW(L"Settings", L"VerboseDebug", g_verboseDebug ? L"1" : L"0", iniPath.c_str());
+
+    // Save PID filtering settings (tspidfilter-inspired)
+    WritePrivateProfileStringW(L"Settings", L"EnablePIDFiltering", g_enablePIDFiltering ? L"1" : L"0", iniPath.c_str());
+    WritePrivateProfileStringW(L"Settings", L"FilterPreset", std::to_wstring(g_filterPreset).c_str(), iniPath.c_str());
+    WritePrivateProfileStringW(L"Settings", L"AutoDetectProblematicPIDs", g_autoDetectProblematicPIDs ? L"1" : L"0", iniPath.c_str());
+    
+    // Save discontinuity threshold as integer percentage
+    int thresholdPercent = (int)(g_discontinuityThreshold * 100);
+    WritePrivateProfileStringW(L"Settings", L"DiscontinuityThreshold", std::to_wstring(thresholdPercent).c_str(), iniPath.c_str());
 }
 
 void AddLog(const std::wstring& msg) {
@@ -1278,6 +1302,25 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         CheckDlgButton(hDlg, IDC_MINIMIZETOTRAY, g_minimizeToTray ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_VERBOSE_DEBUG, g_verboseDebug ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_LOG_TO_FILE, g_logToFile ? BST_CHECKED : BST_UNCHECKED);
+        
+        // Initialize PID filtering controls
+        CheckDlgButton(hDlg, IDC_ENABLE_PID_FILTERING, g_enablePIDFiltering ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_AUTO_PID_DETECTION, g_autoDetectProblematicPIDs ? BST_CHECKED : BST_UNCHECKED);
+        
+        // Initialize filter preset combo box
+        {
+            HWND hCombo = GetDlgItem(hDlg, IDC_FILTER_PRESET);
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"None (No filtering)");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Basic Cleanup");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Quality Focused");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Minimal Stream");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Discontinuity Only");
+            SendMessage(hCombo, CB_SETCURSEL, g_filterPreset, 0);
+        }
+        
+        // Initialize discontinuity threshold
+        SetDlgItemInt(hDlg, IDC_DISCONTINUITY_THRESHOLD, (int)(g_discontinuityThreshold * 100), FALSE);
+        
         return TRUE;
 
     case WM_COMMAND:
@@ -1316,6 +1359,24 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_minimizeToTray = IsDlgButtonChecked(hDlg, IDC_MINIMIZETOTRAY) == BST_CHECKED;
             g_verboseDebug = IsDlgButtonChecked(hDlg, IDC_VERBOSE_DEBUG) == BST_CHECKED;
             g_logToFile = IsDlgButtonChecked(hDlg, IDC_LOG_TO_FILE) == BST_CHECKED;
+            
+            // Save PID filtering settings
+            g_enablePIDFiltering = IsDlgButtonChecked(hDlg, IDC_ENABLE_PID_FILTERING) == BST_CHECKED;
+            g_autoDetectProblematicPIDs = IsDlgButtonChecked(hDlg, IDC_AUTO_PID_DETECTION) == BST_CHECKED;
+            
+            // Get filter preset selection
+            HWND hCombo = GetDlgItem(hDlg, IDC_FILTER_PRESET);
+            g_filterPreset = (int)SendMessage(hCombo, CB_GETCURSEL, 0, 0);
+            if (g_filterPreset == CB_ERR) g_filterPreset = 1; // Default to Basic Cleanup
+            
+            // Get discontinuity threshold
+            BOOL translated;
+            UINT threshold = GetDlgItemInt(hDlg, IDC_DISCONTINUITY_THRESHOLD, &translated, FALSE);
+            if (translated && threshold >= 1 && threshold <= 100) {
+                g_discontinuityThreshold = threshold / 100.0;
+            } else {
+                g_discontinuityThreshold = 0.05; // Default to 5%
+            }
             
             // Save settings to INI file
             SaveSettings();

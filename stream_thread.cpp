@@ -4,6 +4,12 @@
 #include "stream_resource_manager.h"
 #include "tx_queue_ipc.h"
 
+// External declarations for PID filtering settings
+extern bool g_enablePIDFiltering;
+extern int g_filterPreset;
+extern double g_discontinuityThreshold;
+extern bool g_autoDetectProblematicPIDs;
+
 std::thread StartStreamThread(
     const std::wstring& player_path,
     const std::wstring& playlist_url,
@@ -233,10 +239,44 @@ std::thread StartTransportStreamThread(
             config.playlist_refresh_interval = std::chrono::milliseconds(500);  // Check every 500ms
             config.skip_old_segments = true;
             
+            // Configure PID filtering (tspidfilter-inspired functionality)
+            config.enable_pid_filtering = g_enablePIDFiltering;
+            config.enable_auto_pid_detection = g_autoDetectProblematicPIDs;
+            config.discontinuity_threshold = g_discontinuityThreshold;
+            
+            // Map filter preset integer to enum
+            switch (g_filterPreset) {
+                case 0: config.filter_preset = tsduck_transport::TSPIDFilterManager::FilterPreset::NONE; break;
+                case 1: config.filter_preset = tsduck_transport::TSPIDFilterManager::FilterPreset::BASIC_CLEANUP; break;
+                case 2: config.filter_preset = tsduck_transport::TSPIDFilterManager::FilterPreset::QUALITY_FOCUSED; break;
+                case 3: config.filter_preset = tsduck_transport::TSPIDFilterManager::FilterPreset::MINIMAL_STREAM; break;
+                case 4: config.filter_preset = tsduck_transport::TSPIDFilterManager::FilterPreset::DISCONTINUITY_ONLY; break;
+                default: config.filter_preset = tsduck_transport::TSPIDFilterManager::FilterPreset::BASIC_CLEANUP; break;
+            }
+            
             if (log_callback) {
                 log_callback(L"[TS_MODE] Starting TSDuck transport stream routing");
                 log_callback(L"[TS_MODE] Buffer: " + std::to_wstring(buffer_packets) + L" packets (~" + 
                             std::to_wstring((buffer_packets * 188) / 1024) + L"KB)");
+                
+                // Add tspidfilter-specific debug output
+                if (config.enable_pid_filtering) {
+                    std::wstring presetName;
+                    switch (g_filterPreset) {
+                        case 0: presetName = L"None"; break;
+                        case 1: presetName = L"Basic Cleanup"; break;
+                        case 2: presetName = L"Quality Focused"; break;
+                        case 3: presetName = L"Minimal Stream"; break;
+                        case 4: presetName = L"Discontinuity Only"; break;
+                        default: presetName = L"Unknown"; break;
+                    }
+                    
+                    log_callback(L"[TSPIDFILTER] PID filtering enabled, preset: " + presetName);
+                    log_callback(L"[TSPIDFILTER] Auto-detection: " + std::wstring(config.enable_auto_pid_detection ? L"ON" : L"OFF"));
+                    log_callback(L"[TSPIDFILTER] Discontinuity threshold: " + std::to_wstring((int)(config.discontinuity_threshold * 100)) + L"%");
+                } else {
+                    log_callback(L"[TSPIDFILTER] PID filtering disabled");
+                }
             }
             
             // Start routing
