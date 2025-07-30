@@ -308,6 +308,86 @@ void TSBuffer::SignalEndOfStream() {
     producer_active_ = false;
 }
 
+// PIDDiscontinuityFilter implementation
+PIDDiscontinuityFilter::PIDDiscontinuityFilter() {
+    Reset();
+}
+
+bool PIDDiscontinuityFilter::ShouldFilterPacket(const TSPacket& packet) {
+    std::lock_guard<std::mutex> lock(filter_mutex_);
+    
+    if (!filter_config_.enable_discontinuity_filtering) {
+        return false;
+    }
+    
+    // Check if packet has discontinuity indicator
+    if (!packet.discontinuity) {
+        return false;
+    }
+    
+    // Track the discontinuity for statistics
+    TrackDiscontinuity(packet.pid);
+    
+    // Check if this PID is configured to be filtered
+    if (filter_config_.filter_pids.count(packet.pid) > 0) {
+        if (filter_config_.log_discontinuity_stats) {
+            // Note: In a real implementation, we'd use the log callback here
+            // For now, we'll just track the statistics
+        }
+        return true;
+    }
+    
+    // Check if this PID should be auto-filtered due to frequent discontinuities
+    if (filter_config_.auto_detect_problem_pids && 
+        auto_detected_problem_pids_.count(packet.pid) > 0) {
+        return true;
+    }
+    
+    return false;
+}
+
+void PIDDiscontinuityFilter::TrackDiscontinuity(uint16_t pid) {
+    // This method is called from within ShouldFilterPacket which already holds the lock
+    discontinuity_count_by_pid_[pid]++;
+    last_discontinuity_time_[pid] = std::chrono::steady_clock::now();
+    
+    // Update auto-detection of problem PIDs
+    if (filter_config_.auto_detect_problem_pids) {
+        UpdateProblemPIDDetection(pid);
+    }
+}
+
+void PIDDiscontinuityFilter::UpdateProblemPIDDetection(uint16_t pid) {
+    // Check if this PID has exceeded the discontinuity threshold
+    auto now = std::chrono::steady_clock::now();
+    auto time_since_reset = std::chrono::duration_cast<std::chrono::minutes>(now - stats_reset_time_);
+    
+    if (time_since_reset.count() >= 1) { // At least 1 minute has passed
+        size_t discontinuity_count = discontinuity_count_by_pid_[pid];
+        if (discontinuity_count >= filter_config_.discontinuity_threshold) {
+            auto_detected_problem_pids_.insert(pid);
+        }
+    }
+}
+
+std::map<uint16_t, size_t> PIDDiscontinuityFilter::GetDiscontinuityStats() const {
+    std::lock_guard<std::mutex> lock(filter_mutex_);
+    return discontinuity_count_by_pid_;
+}
+
+std::set<uint16_t> PIDDiscontinuityFilter::GetProblemPIDs() const {
+    std::lock_guard<std::mutex> lock(filter_mutex_);
+    return auto_detected_problem_pids_;
+}
+
+void PIDDiscontinuityFilter::Reset() {
+    std::lock_guard<std::mutex> lock(filter_mutex_);
+    discontinuity_count_by_pid_.clear();
+    last_discontinuity_time_.clear();
+    auto_detected_problem_pids_.clear();
+    stats_reset_time_ = std::chrono::steady_clock::now();
+}
+
 // HLSToTSConverter implementation
 HLSToTSConverter::HLSToTSConverter() {
     Reset();
@@ -679,6 +759,9 @@ TransportStreamRouter::TransportStreamRouter() {
     
     ts_buffer_ = std::make_unique<TSBuffer>(buffer_size);
     hls_converter_ = std::make_unique<HLSToTSConverter>();
+    
+    // Initialize PID discontinuity filter
+    pid_filter_ = std::make_unique<PIDDiscontinuityFilter>();
 }
 
 TransportStreamRouter::~TransportStreamRouter() {
@@ -697,6 +780,10 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     log_callback_ = log_callback;
     routing_active_ = true;
     
+    // Configure PID discontinuity filter
+    pid_filter_->SetFilterConfig(config.pid_filter_config);
+    pid_filter_->Reset(); // Reset statistics for new stream
+    
     // Reset converter and buffer
     hls_converter_->Reset();
     ts_buffer_->Reset(); // This will clear packets and reset producer_active
@@ -711,6 +798,25 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
             log_callback_(L"[LOW_LATENCY] Mode enabled - targeting minimal stream delay");
             log_callback_(L"[LOW_LATENCY] Max segments: " + std::to_wstring(config.max_segments_to_buffer) + 
                          L", Refresh: " + std::to_wstring(config.playlist_refresh_interval.count()) + L"ms");
+        }
+        
+        // Log PID discontinuity filter configuration
+        if (config.pid_filter_config.enable_discontinuity_filtering) {
+            log_callback_(L"[PID_FILTER] Discontinuity filtering enabled");
+            if (!config.pid_filter_config.filter_pids.empty()) {
+                std::wstring pids_str = L"";
+                for (uint16_t pid : config.pid_filter_config.filter_pids) {
+                    if (!pids_str.empty()) pids_str += L", ";
+                    pids_str += L"0x" + std::to_wstring(pid);
+                }
+                log_callback_(L"[PID_FILTER] Configured PIDs to filter: " + pids_str);
+            }
+            if (config.pid_filter_config.auto_detect_problem_pids) {
+                log_callback_(L"[PID_FILTER] Auto-detection enabled (threshold: " + 
+                             std::to_wstring(config.pid_filter_config.discontinuity_threshold) + L"/min)");
+            }
+        } else {
+            log_callback_(L"[PID_FILTER] Discontinuity filtering disabled");
         }
     }
     
@@ -775,6 +881,11 @@ TransportStreamRouter::BufferStats TransportStreamRouter::GetBufferStats() const
     stats.video_sync_loss_count = video_sync_loss_count_.load();
     stats.video_stream_healthy = IsVideoStreamHealthy();
     stats.audio_stream_healthy = IsAudioStreamHealthy();
+    
+    // PID discontinuity filtering statistics
+    stats.discontinuity_count_by_pid = pid_filter_->GetDiscontinuityStats();
+    stats.problem_pids = pid_filter_->GetProblemPIDs();
+    // Note: total_filtered_packets would need to be tracked separately if needed
     
     // Calculate current FPS
     auto now = std::chrono::steady_clock::now();
@@ -1110,6 +1221,17 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
             std::chrono::milliseconds(50);    // Standard timeout
             
         if (ts_buffer_->GetNextPacket(packet, packet_timeout)) {
+            // Apply PID-based discontinuity filtering (tspidfilter-like functionality)
+            if (pid_filter_->ShouldFilterPacket(packet)) {
+                if (log_callback_ && current_config_.pid_filter_config.log_discontinuity_stats) {
+                    log_callback_(L"[PID_FILTER] Filtered discontinuity packet from PID: 0x" + 
+                                 std::to_wstring(packet.pid) + L" (hex: " + 
+                                 std::to_wstring(packet.pid) + L")");
+                }
+                // Skip this packet - continue to next iteration
+                continue;
+            }
+            
             // Frame Number Tagging: Track frame statistics
             if (packet.frame_number > 0) {
                 // Check for frame drops or duplicates

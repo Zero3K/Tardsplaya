@@ -11,6 +11,8 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <map>
+#include <set>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -151,6 +153,50 @@ namespace tsduck_transport {
         void DetectStreamTypes(TSPacket& packet);
     };
     
+    // PID-based discontinuity filter - similar to tspidfilter functionality
+    class PIDDiscontinuityFilter {
+    public:
+        PIDDiscontinuityFilter();
+        
+        // Configuration for discontinuity filtering
+        struct FilterConfig {
+            bool enable_discontinuity_filtering = false;  // Enable PID-based discontinuity filtering
+            std::set<uint16_t> filter_pids;  // PIDs to filter discontinuity packets from
+            bool auto_detect_problem_pids = true;  // Automatically detect PIDs with frequent discontinuities
+            size_t discontinuity_threshold = 5;  // Auto-filter PIDs with more than N discontinuities per minute
+            bool log_discontinuity_stats = true;  // Log discontinuity statistics by PID
+        };
+        
+        // Set filter configuration
+        void SetFilterConfig(const FilterConfig& config) { filter_config_ = config; }
+        
+        // Check if packet should be filtered based on discontinuity and PID
+        bool ShouldFilterPacket(const TSPacket& packet);
+        
+        // Track discontinuity statistics by PID
+        void TrackDiscontinuity(uint16_t pid);
+        
+        // Get discontinuity statistics
+        std::map<uint16_t, size_t> GetDiscontinuityStats() const;
+        
+        // Reset statistics (for new streams)
+        void Reset();
+        
+        // Get auto-detected problem PIDs
+        std::set<uint16_t> GetProblemPIDs() const;
+        
+    private:
+        FilterConfig filter_config_;
+        std::map<uint16_t, size_t> discontinuity_count_by_pid_;  // Track discontinuities per PID
+        std::map<uint16_t, std::chrono::steady_clock::time_point> last_discontinuity_time_;
+        std::set<uint16_t> auto_detected_problem_pids_;
+        mutable std::mutex filter_mutex_;
+        std::chrono::steady_clock::time_point stats_reset_time_;
+        
+        // Update auto-detection of problem PIDs
+        void UpdateProblemPIDDetection(uint16_t pid);
+    };
+
     // Transport Stream Router - main component for re-routing streams to media players
     class TransportStreamRouter {
     public:
@@ -173,6 +219,9 @@ namespace tsduck_transport {
             size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
             std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
             bool skip_old_segments = true;  // Skip older segments when catching up
+            
+            // PID-based discontinuity filtering (tspidfilter-like functionality)
+            PIDDiscontinuityFilter::FilterConfig pid_filter_config;
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -208,6 +257,11 @@ namespace tsduck_transport {
             uint32_t video_sync_loss_count = 0;
             bool video_stream_healthy = true;
             bool audio_stream_healthy = true;
+            
+            // PID-based discontinuity filtering statistics
+            std::map<uint16_t, size_t> discontinuity_count_by_pid;
+            std::set<uint16_t> problem_pids;  // Auto-detected problematic PIDs
+            size_t total_filtered_packets = 0;  // Total packets filtered due to discontinuities
         };
         BufferStats GetBufferStats() const;
         
@@ -226,6 +280,9 @@ namespace tsduck_transport {
         RouterConfig current_config_;
         std::function<void(const std::wstring&)> log_callback_;
         HANDLE player_process_handle_;
+        
+        // PID-based discontinuity filter (tspidfilter-like functionality)
+        std::unique_ptr<PIDDiscontinuityFilter> pid_filter_;
         
         // Frame Number Tagging statistics
         std::atomic<uint64_t> total_frames_processed_{0};
