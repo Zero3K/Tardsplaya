@@ -16,6 +16,9 @@
 #define NOMINMAX
 #include <windows.h>
 
+// TSReadEX integration
+#include "tsreadex_wrapper.h"
+
 namespace tsduck_transport {
 
     // Transport Stream packet size (MPEG-TS standard)
@@ -173,6 +176,12 @@ namespace tsduck_transport {
             size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
             std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
             bool skip_old_segments = true;  // Skip older segments when catching up
+            
+            // TSReadEX stream processing options
+            bool enable_tsreadex = false;           // Enable TSReadEX post-processing
+            bool tsreadex_remove_eit = true;        // Remove program guide data for cleaner streams
+            bool tsreadex_stabilize_audio = true;   // Ensure consistent audio streams
+            bool tsreadex_standardize_pids = true;  // Remap PIDs to standard values
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -217,6 +226,7 @@ namespace tsduck_transport {
     private:
         std::unique_ptr<TSBuffer> ts_buffer_;
         std::unique_ptr<HLSToTSConverter> hls_converter_;
+        std::unique_ptr<tardsplaya::TSReadEXProcessor> tsreadex_processor_;  // TSReadEX integration
         std::atomic<bool> routing_active_{false};
         std::thread hls_fetcher_thread_;
         std::thread ts_router_thread_;

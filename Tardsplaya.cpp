@@ -134,6 +134,11 @@ bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
 bool g_logToFile = false; // Enable logging to debug.log file
 
+// TSReadEX settings
+bool g_enableTSReadEX = false;         // Enable TSReadEX stream processing
+bool g_tsreadexRemoveEIT = true;       // Remove program guide data
+bool g_tsreadexStabilizeAudio = true;  // Stabilize audio streams
+
 
 
 // Tray icon support
@@ -198,6 +203,11 @@ void LoadSettings() {
     
     // Load verbose debug setting
     g_verboseDebug = GetPrivateProfileIntW(L"Settings", L"VerboseDebug", 0, iniPath.c_str()) != 0;
+    
+    // Load TSReadEX settings
+    g_enableTSReadEX = GetPrivateProfileIntW(L"Settings", L"EnableTSReadEX", 0, iniPath.c_str()) != 0;
+    g_tsreadexRemoveEIT = GetPrivateProfileIntW(L"Settings", L"TSReadEXRemoveEIT", 1, iniPath.c_str()) != 0;
+    g_tsreadexStabilizeAudio = GetPrivateProfileIntW(L"Settings", L"TSReadEXStabilizeAudio", 1, iniPath.c_str()) != 0;
 }
 
 void SaveSettings() {
@@ -225,6 +235,11 @@ void SaveSettings() {
     
     // Save verbose debug setting
     WritePrivateProfileStringW(L"Settings", L"VerboseDebug", g_verboseDebug ? L"1" : L"0", iniPath.c_str());
+    
+    // Save TSReadEX settings
+    WritePrivateProfileStringW(L"Settings", L"EnableTSReadEX", g_enableTSReadEX ? L"1" : L"0", iniPath.c_str());
+    WritePrivateProfileStringW(L"Settings", L"TSReadEXRemoveEIT", g_tsreadexRemoveEIT ? L"1" : L"0", iniPath.c_str());
+    WritePrivateProfileStringW(L"Settings", L"TSReadEXStabilizeAudio", g_tsreadexStabilizeAudio ? L"1" : L"0", iniPath.c_str());
 }
 
 void AddLog(const std::wstring& msg) {
@@ -922,10 +937,16 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
-    // TX-Queue IPC Mode is now the default streaming mode
-    StreamingMode mode = StreamingMode::TX_QUEUE_IPC;
+    // Choose streaming mode based on settings
+    StreamingMode mode = StreamingMode::TX_QUEUE_IPC; // Default high-performance mode
     
-    AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+    if (g_enableTSReadEX) {
+        // Use transport stream mode for TSReadEX processing
+        mode = StreamingMode::TRANSPORT_STREAM;
+        AddLog(L"[TS-ROUTER] Starting Transport Stream with TSReadEX for " + tab.channel + L" (" + standardQuality + L")");
+    } else {
+        AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+    }
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -1278,10 +1299,27 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         CheckDlgButton(hDlg, IDC_MINIMIZETOTRAY, g_minimizeToTray ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_VERBOSE_DEBUG, g_verboseDebug ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_LOG_TO_FILE, g_logToFile ? BST_CHECKED : BST_UNCHECKED);
+        
+        // Initialize TSReadEX settings
+        CheckDlgButton(hDlg, IDC_ENABLE_TSREADEX, g_enableTSReadEX ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_TSREADEX_REMOVE_EIT, g_tsreadexRemoveEIT ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_TSREADEX_STABILIZE_AUDIO, g_tsreadexStabilizeAudio ? BST_CHECKED : BST_UNCHECKED);
+        
+        // Enable/disable TSReadEX sub-options based on main setting
+        EnableWindow(GetDlgItem(hDlg, IDC_TSREADEX_REMOVE_EIT), g_enableTSReadEX);
+        EnableWindow(GetDlgItem(hDlg, IDC_TSREADEX_STABILIZE_AUDIO), g_enableTSReadEX);
         return TRUE;
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case IDC_ENABLE_TSREADEX:
+            // Enable/disable TSReadEX sub-options when main checkbox changes
+            {
+                bool enabled = IsDlgButtonChecked(hDlg, IDC_ENABLE_TSREADEX) == BST_CHECKED;
+                EnableWindow(GetDlgItem(hDlg, IDC_TSREADEX_REMOVE_EIT), enabled);
+                EnableWindow(GetDlgItem(hDlg, IDC_TSREADEX_STABILIZE_AUDIO), enabled);
+            }
+            return TRUE;
         case IDC_BROWSE_PLAYER: {
             OPENFILENAMEW ofn = { sizeof(ofn) };
             wchar_t szFile[MAX_PATH] = { 0 };
@@ -1316,6 +1354,11 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_minimizeToTray = IsDlgButtonChecked(hDlg, IDC_MINIMIZETOTRAY) == BST_CHECKED;
             g_verboseDebug = IsDlgButtonChecked(hDlg, IDC_VERBOSE_DEBUG) == BST_CHECKED;
             g_logToFile = IsDlgButtonChecked(hDlg, IDC_LOG_TO_FILE) == BST_CHECKED;
+            
+            // Save TSReadEX settings
+            g_enableTSReadEX = IsDlgButtonChecked(hDlg, IDC_ENABLE_TSREADEX) == BST_CHECKED;
+            g_tsreadexRemoveEIT = IsDlgButtonChecked(hDlg, IDC_TSREADEX_REMOVE_EIT) == BST_CHECKED;
+            g_tsreadexStabilizeAudio = IsDlgButtonChecked(hDlg, IDC_TSREADEX_STABILIZE_AUDIO) == BST_CHECKED;
             
             // Save settings to INI file
             SaveSettings();

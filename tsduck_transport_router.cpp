@@ -3,6 +3,7 @@
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
+#include "tsreadex_wrapper.h"
 #define NOMINMAX
 #include <windows.h>
 #include <winhttp.h>
@@ -679,6 +680,7 @@ TransportStreamRouter::TransportStreamRouter() {
     
     ts_buffer_ = std::make_unique<TSBuffer>(buffer_size);
     hls_converter_ = std::make_unique<HLSToTSConverter>();
+    tsreadex_processor_ = std::make_unique<tardsplaya::TSReadEXProcessor>();
 }
 
 TransportStreamRouter::~TransportStreamRouter() {
@@ -702,10 +704,36 @@ bool TransportStreamRouter::StartRouting(const std::wstring& hls_playlist_url,
     ts_buffer_->Reset(); // This will clear packets and reset producer_active
     ts_buffer_->SetLowLatencyMode(config.low_latency_mode); // Configure buffer for latency mode
     
+    // Initialize TSReadEX processor if enabled
+    if (config.enable_tsreadex) {
+        tardsplaya::TSReadEXProcessor::Config tsreadex_config;
+        tsreadex_config.enabled = true;
+        tsreadex_config.program_number = -1; // Select first program
+        tsreadex_config.remove_eit = config.tsreadex_remove_eit;
+        tsreadex_config.stabilize_audio = config.tsreadex_stabilize_audio;
+        tsreadex_config.standardize_pids = config.tsreadex_standardize_pids;
+        tsreadex_config.complement_missing_audio = true;
+        
+        if (!tsreadex_processor_->Initialize(tsreadex_config)) {
+            if (log_callback_) {
+                log_callback_(L"[TS_ROUTER] Warning: Failed to initialize TSReadEX processor, continuing without it");
+            }
+        } else {
+            if (log_callback_) {
+                log_callback_(L"[TS_ROUTER] TSReadEX processor initialized for stream enhancement");
+            }
+        }
+    }
+    
     if (log_callback_) {
         log_callback_(L"[TS_ROUTER] Starting TSDuck-inspired transport stream routing");
         log_callback_(L"[TS_ROUTER] Player: " + config.player_path);
         log_callback_(L"[TS_ROUTER] Buffer size: " + std::to_wstring(config.buffer_size_packets) + L" packets");
+        
+        if (config.enable_tsreadex) {
+            log_callback_(L"[TS_ROUTER] TSReadEX stream enhancement: " + 
+                         std::wstring(tsreadex_processor_->IsEnabled() ? L"ENABLED" : L"FAILED"));
+        }
         
         if (config.low_latency_mode) {
             log_callback_(L"[LOW_LATENCY] Mode enabled - targeting minimal stream delay");
@@ -1176,11 +1204,55 @@ void TransportStreamRouter::TSRouterThread(std::atomic<bool>& cancel_token) {
                 }
             }
             
-            if (!SendTSPacketToPlayer(player_stdin, packet)) {
-                if (log_callback_) {
-                    log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
+            // Apply TSReadEX processing if enabled
+            if (current_config_.enable_tsreadex && tsreadex_processor_->IsEnabled()) {
+                std::vector<uint8_t> input_data(packet.data, packet.data + TS_PACKET_SIZE);
+                std::vector<uint8_t> processed_data;
+                
+                if (tsreadex_processor_->ProcessChunk(input_data, processed_data)) {
+                    // TSReadEX may return multiple or no packets - send all processed packets
+                    size_t processed_packets = processed_data.size() / TS_PACKET_SIZE;
+                    
+                    for (size_t i = 0; i < processed_packets; ++i) {
+                        TSPacket processed_packet;
+                        memcpy(processed_packet.data, processed_data.data() + (i * TS_PACKET_SIZE), TS_PACKET_SIZE);
+                        processed_packet.ParseHeader(); // Update packet metadata
+                        
+                        if (!SendTSPacketToPlayer(player_stdin, processed_packet)) {
+                            if (log_callback_) {
+                                log_callback_(L"[TS_ROUTER] Failed to send processed TS packet to player");
+                            }
+                            goto cleanup_and_exit;
+                        }
+                    }
+                    
+                    if (processed_packets != 1) {
+                        // Log when TSReadEX filtering changes packet count
+                        static int filter_log_count = 0;
+                        if (filter_log_count < 5) { // Limit logging to prevent spam
+                            if (log_callback_) {
+                                log_callback_(L"[TSREADEX] Filtered 1 packet -> " + std::to_wstring(processed_packets) + L" packets");
+                            }
+                            filter_log_count++;
+                        }
+                    }
+                } else {
+                    // TSReadEX processing failed, fall back to original packet
+                    if (!SendTSPacketToPlayer(player_stdin, packet)) {
+                        if (log_callback_) {
+                            log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
+                        }
+                        goto cleanup_and_exit;
+                    }
                 }
-                goto cleanup_and_exit;
+            } else {
+                // Normal processing without TSReadEX
+                if (!SendTSPacketToPlayer(player_stdin, packet)) {
+                    if (log_callback_) {
+                        log_callback_(L"[TS_ROUTER] Failed to send TS packet to player - pipe may be broken");
+                    }
+                    goto cleanup_and_exit;
+                }
             }
             packets_sent++;
             last_packet_time = std::chrono::steady_clock::now();

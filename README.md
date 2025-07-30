@@ -8,6 +8,7 @@ A Twitch stream player for Windows with enhanced TLS support.
 - Quality selection
 - Windows 7+ compatibility
 - **Enhanced TLS Client Support** - Custom TLS implementation for better compatibility with older Windows versions
+- **TSReadEX Stream Enhancement** - Optional MPEG-TS stream processing for improved compatibility and quality
 
 ## TX-Queue IPC Integration for Enhanced Performance
 
@@ -79,6 +80,24 @@ The TLS client integration includes:
 The integration works as a fallback system:
 1. Primary: WinHTTP (standard Windows HTTP library)
 2. Fallback: Custom TLS client (when WinHTTP fails or on older systems)
+
+## TSReadEX Stream Enhancement
+
+Tardsplaya includes optional integration with TSReadEX for advanced MPEG-TS stream processing:
+
+- **Stream Filtering**: Removes unwanted data like program guide information for cleaner streams
+- **PID Standardization**: Remaps packet IDs to standard values for better player compatibility
+- **Audio Enhancement**: Ensures consistent audio streams and handles format conversion
+- **Stream Stabilization**: Processes transport streams to handle edge cases and improve reliability
+
+### Using TSReadEX
+
+1. Go to **Tools → Settings**
+2. Enable **"TSReadEX Stream Enhancement"**
+3. Configure options like removing program guide data and audio stabilization
+4. Streaming will automatically use Transport Stream mode with TSReadEX processing
+
+See [TSREADEX_INTEGRATION.md](TSREADEX_INTEGRATION.md) for detailed documentation.
 
 ## Building
 

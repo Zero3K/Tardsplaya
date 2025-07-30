@@ -4,6 +4,11 @@
 #include "stream_resource_manager.h"
 #include "tx_queue_ipc.h"
 
+// External global variables for settings
+extern bool g_enableTSReadEX;
+extern bool g_tsreadexRemoveEIT;
+extern bool g_tsreadexStabilizeAudio;
+
 std::thread StartStreamThread(
     const std::wstring& player_path,
     const std::wstring& playlist_url,
@@ -232,6 +237,12 @@ std::thread StartTransportStreamThread(
             config.max_segments_to_buffer = 2;  // Only buffer latest 2 segments
             config.playlist_refresh_interval = std::chrono::milliseconds(500);  // Check every 500ms
             config.skip_old_segments = true;
+            
+            // Configure TSReadEX based on global settings
+            config.enable_tsreadex = g_enableTSReadEX;
+            config.tsreadex_remove_eit = g_tsreadexRemoveEIT;
+            config.tsreadex_stabilize_audio = g_tsreadexStabilizeAudio;
+            config.tsreadex_standardize_pids = true;  // Always standardize PIDs for better compatibility
             
             if (log_callback) {
                 log_callback(L"[TS_MODE] Starting TSDuck transport stream routing");
