@@ -1,4 +1,5 @@
 #include "playlist_parser.h"
+#include "enhanced_playlist_parser.h"
 #include <sstream>
 
 // Helper: resolve relative URL
@@ -69,3 +70,5 @@ std::vector<PlaylistQuality> ParseM3U8MasterPlaylist(
 
     return result;
 }
+
+// Enhanced playlist parsing functions are now inline in enhanced_playlist_parser.h

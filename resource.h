@@ -32,6 +32,9 @@
 #define IDC_STOP        1104
 #define IDC_LOG_LIST    1105
 
+// Audio track selection
+#define IDC_AUDIO_TRACKS 1112
+
 // Favorites panel controls
 #define IDC_FAVORITES_LIST      1106
 #define IDC_FAVORITES_ADD       1107

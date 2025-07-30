@@ -324,3 +324,19 @@ namespace TLSClientHTTP {
         return false;
     }
 }
+
+// Implementation of tlsclient namespace functions for HLS fetcher
+namespace tlsclient {
+    bool get_https_content(const std::string& url, std::string& response) {
+        TLSClient client;
+        std::string fullResponse;
+        
+        if (client.HttpGet(url, fullResponse)) {
+            // Extract body from HTTP response using helper function
+            response = get_http_body(fullResponse);
+            return !response.empty();
+        }
+        
+        return false;
+    }
+}

@@ -64,3 +64,13 @@ namespace TLSClientHTTP {
     // HTTP GET with full URL
     bool HttpGetText(const std::wstring& url, std::string& out);
 }
+
+namespace tlsclient {
+    // Get HTTPS content using custom TLS client
+    bool get_https_content(const std::string& url, std::string& response);
+    
+    // Simple wrapper for HLS fetcher compatibility
+    inline bool get_https_content_simple(const std::string& url, std::string& response) {
+        return get_https_content(url, response);
+    }
+}
