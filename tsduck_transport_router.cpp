@@ -824,7 +824,7 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             // Apply discontinuity filtering to remove ad segments  
             std::string original_playlist = playlist_content;
             try {
-                playlist_content = FilterDiscontinuitySegments(playlist_content);
+                playlist_content = FilterDiscontinuitySegments(playlist_content, "");
                 
                 // Count segments filtered
                 std::istringstream original_ss(original_playlist);

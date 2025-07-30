@@ -912,7 +912,7 @@ bool BufferAndPipeStreamToPlayer(
             // Apply discontinuity filtering to remove ad segments
             std::string original_playlist = playlist;
             try {
-                playlist = FilterDiscontinuitySegments(playlist);
+                playlist = FilterDiscontinuitySegments(playlist, "");
                 size_t segments_removed = 0;
                 
                 // Count segments removed by comparing line counts
