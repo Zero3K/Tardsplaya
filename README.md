@@ -58,6 +58,41 @@ The integration works transparently:
 
 TX-Queue IPC Mode provides superior performance and reliability compared to traditional mutex-based streaming.
 
+## PID-Based Discontinuity Filtering
+
+**Transport Stream Quality Enhancement**: Tardsplaya includes advanced PID-based discontinuity filtering (similar to `tspidfilter`) to improve stream quality:
+
+### Discontinuity Detection and Filtering
+
+- **Automatic Detection**: Monitors Transport Stream packets for discontinuity indicators by PID
+- **Selective Filtering**: Filters out packets with discontinuity indicators from specific PIDs
+- **Auto-Detection**: Automatically identifies problematic PIDs with frequent discontinuities
+- **Statistics Tracking**: Provides detailed discontinuity statistics per PID
+- **Configurable Thresholds**: Adjustable sensitivity for auto-detection
+
+### Technical Benefits
+
+| Problem | Solution |
+|---------|----------|
+| **Ad insertion artifacts** | **Filters discontinuity packets from auxiliary streams** |
+| **Stream interruption glitches** | **Removes problematic packets from metadata PIDs** |
+| **Playback stuttering** | **Maintains smooth video/audio stream continuity** |
+| **Buffer overruns** | **Reduces unnecessary packet processing** |
+
+### Configuration
+
+The PID discontinuity filter can be configured through the `RouterConfig`:
+
+```cpp
+TransportStreamRouter::RouterConfig config;
+config.pid_filter_config.enable_discontinuity_filtering = true;
+config.pid_filter_config.filter_pids = {0x1001, 0x1002}; // Filter specific PIDs
+config.pid_filter_config.auto_detect_problem_pids = true;
+config.pid_filter_config.discontinuity_threshold = 5; // Auto-filter after 5/min
+```
+
+This feature helps resolve issues where discontinuities in auxiliary data streams cause playback problems, similar to the functionality provided by TSDuck's `tspidfilter` utility.
+
 ## TLS Client Integration
 
 This version includes an integrated TLS client from the [tlsclient](https://github.com/zero3k/tlsclient) repository, providing:
