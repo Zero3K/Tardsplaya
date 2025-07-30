@@ -798,8 +798,8 @@ void TSDemuxerStreamManager::Cleanup() {
         process_info_.hThread = nullptr;
     }
     
-    // Clean up temporary files
-    CleanupTempFiles();
+    // Clean up named pipes
+    CleanupNamedPipes();
 }
 
 TSDemuxerStreamManager::DemuxerStats TSDemuxerStreamManager::GetStats() const {
