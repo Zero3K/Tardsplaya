@@ -148,11 +148,12 @@ std::thread StartStreamThread(
                        L", BufferSegs=" + std::to_wstring(buffer_segments));
             
             try {
-                // Create demux wrapper with separate video/audio streams
+                // Create demux wrapper with single player mode (recommended)
                 auto demux_wrapper = tardsplaya::CreateDemuxWrapper(
                     player_path,
                     true,  // Enable separate streams
-                    g_verboseDebug  // Enable debug logging if verbose debug is on
+                    g_verboseDebug,  // Enable debug logging if verbose debug is on
+                    true   // Use single player mode with external audio (recommended)
                 );
                 
                 if (!demux_wrapper) {
@@ -172,12 +173,14 @@ std::thread StartStreamThread(
                 
                 // Store player process handles if pointer provided
                 if (player_process_handle) {
-                    // For demux mode, we have two players - store the video player handle
-                    *player_process_handle = demux_wrapper->GetVideoPlayerProcess();
+                    // For demux mode: store main player handle if using single player mode, otherwise video player handle
+                    *player_process_handle = demux_wrapper->GetMainPlayerProcess() ? 
+                                           demux_wrapper->GetMainPlayerProcess() : 
+                                           demux_wrapper->GetVideoPlayerProcess();
                 }
                 
                 if (log_callback) {
-                    log_callback(L"[DEMUX] Demux-MPEGTS streaming active for " + channel_name + L" (separate video/audio)");
+                    log_callback(L"[DEMUX] Demux-MPEGTS streaming active for " + channel_name + L" (single player with external audio)");
                 }
                 
                 // Monitor demuxing while active

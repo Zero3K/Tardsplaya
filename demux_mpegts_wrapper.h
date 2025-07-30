@@ -81,9 +81,26 @@ namespace tardsplaya {
         }
     };
 
+    // Media player type for command line format
+    enum class MediaPlayerType {
+        MPV,        // MPV media player
+        MPC_HC,     // MPC-HC or MPC-BE
+        VLC,        // VLC media player
+        GENERIC     // Generic/unknown player
+    };
+
     // Configuration for demux-mpegts integration
     struct DemuxConfig {
         std::wstring player_path = L"mpv.exe";
+        MediaPlayerType player_type = MediaPlayerType::MPV;
+        
+        // Single player mode (recommended) - uses external audio file
+        bool use_single_player_mode = true;   // Use single player with external audio instead of separate players
+        std::wstring video_file_extension = L".h264";  // Extension for video stream files
+        std::wstring audio_file_extension = L".aac";   // Extension for audio stream files
+        std::wstring temp_file_prefix = L"tardsplaya_stream_";  // Prefix for temporary files
+        
+        // Legacy separate player mode (fallback)
         std::wstring video_player_args = L"--video-only --no-audio --"; // Video-only stream
         std::wstring audio_player_args = L"--audio-only --no-video --"; // Audio-only stream
         std::wstring combined_player_args = L"--"; // Combined stream (fallback)
@@ -91,7 +108,7 @@ namespace tardsplaya {
         // Demuxing behavior
         bool enable_separate_streams = true;  // Main feature: separate video/audio
         bool enable_stream_recovery = true;   // Recover from discontinuities
-        bool enable_packet_buffering = true;  // Buffer packets for smooth playback
+        bool enable_packet_buffering = true;  // Buffer packets for smooth playbook
         uint16_t target_channel = 0;          // Channel to demux (0 = all)
         
         // Buffer settings
@@ -103,6 +120,12 @@ namespace tardsplaya {
         std::chrono::milliseconds stream_timeout{10000}; // Consider stream dead after this
         uint32_t max_consecutive_errors = 10;  // Max errors before stream reset
         bool auto_restart_streams = true;      // Automatically restart failed streams
+        
+        // File management for single player mode
+        std::chrono::milliseconds file_buffer_duration{5000}; // Duration to buffer before starting player
+        size_t max_file_size_mb = 100;        // Maximum size for temp files (MB)
+        bool cleanup_temp_files = true;       // Clean up temp files on exit
+        std::wstring temp_directory;          // Custom temp directory (empty = system temp)
         
         // Logging
         bool enable_debug_logging = false;
@@ -154,7 +177,11 @@ namespace tardsplaya {
         };
         DemuxStats GetStats() const;
 
-        // Player process management
+        // Player process management (for single player mode)
+        HANDLE GetMainPlayerProcess() const { return main_player_process_; }
+        bool IsMainPlayerRunning() const;
+        
+        // Legacy separate player process management  
         HANDLE GetVideoPlayerProcess() const { return video_player_process_; }
         HANDLE GetAudioPlayerProcess() const { return audio_player_process_; }
         bool IsVideoPlayerRunning() const;
@@ -197,12 +224,24 @@ namespace tardsplaya {
         std::thread demux_processor_thread_;
         std::thread video_output_thread_;
         std::thread audio_output_thread_;
+        std::thread file_output_thread_;  // For single player file mode
         
         // Player processes
-        HANDLE video_player_process_ = nullptr;
-        HANDLE audio_player_process_ = nullptr;
+        HANDLE main_player_process_ = nullptr;   // Single player mode
+        HANDLE video_player_process_ = nullptr;  // Separate players mode
+        HANDLE audio_player_process_ = nullptr;  // Separate players mode
         HANDLE video_player_stdin_ = nullptr;
         HANDLE audio_player_stdin_ = nullptr;
+        
+        // File-based streaming (single player mode)
+        std::wstring video_file_path_;
+        std::wstring audio_file_path_;
+        std::ofstream video_file_stream_;
+        std::ofstream audio_file_stream_;
+        std::atomic<bool> video_file_ready_{false};
+        std::atomic<bool> audio_file_ready_{false};
+        std::atomic<size_t> video_file_size_{0};
+        std::atomic<size_t> audio_file_size_{0};
         
         // Statistics and monitoring
         mutable std::mutex stats_mutex_;
@@ -217,21 +256,35 @@ namespace tardsplaya {
         // Thread functions
         void HLSDownloaderThread(const std::wstring& playlist_url, std::atomic<bool>& cancel_token);
         void DemuxProcessorThread(std::atomic<bool>& cancel_token);
-        void VideoOutputThread(std::atomic<bool>& cancel_token);
-        void AudioOutputThread(std::atomic<bool>& cancel_token);
+        void VideoOutputThread(std::atomic<bool>& cancel_token);  // For separate players mode
+        void AudioOutputThread(std::atomic<bool>& cancel_token);  // For separate players mode
+        void FileOutputThread(std::atomic<bool>& cancel_token);   // For single player mode
         
         // Stream processing
         bool ProcessDemuxedPacket(const TSDemux::STREAM_PKT& pkt);
         void UpdateStreamInfo(uint16_t pid, TSDemux::ElementaryStream* es);
         StreamType DetermineStreamType(const TSDemux::ElementaryStream* es) const;
         
-        // Player management
+        // Player management - single player mode
+        bool LaunchMainPlayer();
+        void TerminateMainPlayer();
+        std::wstring BuildSinglePlayerCommandLine() const;
+        MediaPlayerType DetectPlayerType() const;
+        
+        // Player management - separate players mode (legacy)
         bool LaunchVideoPlayer();
         bool LaunchAudioPlayer();
         void TerminateVideoPlayer();
         void TerminateAudioPlayer();
         bool SendVideoPacket(const DemuxedPacket& packet);
         bool SendAudioPacket(const DemuxedPacket& packet);
+        
+        // File management for single player mode
+        bool CreateTemporaryFiles();
+        void CleanupTemporaryFiles();
+        bool WriteVideoPacketToFile(const DemuxedPacket& packet);
+        bool WriteAudioPacketToFile(const DemuxedPacket& packet);
+        void CheckFileBufferStatus();
         
         // Utility functions
         void LogMessage(const std::wstring& message);
@@ -255,7 +308,8 @@ namespace tardsplaya {
     std::unique_ptr<DemuxMpegtsWrapper> CreateDemuxWrapper(
         const std::wstring& player_path = L"mpv.exe",
         bool enable_separate_streams = true,
-        bool enable_debug_logging = false
+        bool enable_debug_logging = false,
+        bool use_single_player_mode = true  // NEW: Use single player with external audio (recommended)
     );
 
 } // namespace tardsplaya

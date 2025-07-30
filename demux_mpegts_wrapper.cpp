@@ -90,12 +90,14 @@ DemuxMpegtsWrapper::DemuxMpegtsWrapper(const DemuxConfig& config)
         TSDemux::SetDBGMsgCallback(DemuxDebugCallback);
     }
     
-    LogMessage(L"DemuxMpegtsWrapper initialized with separate streams: " + 
-               std::wstring(config_.enable_separate_streams ? L"enabled" : L"disabled"));
+    LogMessage(L"DemuxMpegtsWrapper initialized - separate streams: " + 
+               std::wstring(config_.enable_separate_streams ? L"enabled" : L"disabled") + 
+               L", single player mode: " + std::wstring(config_.use_single_player_mode ? L"enabled" : L"disabled"));
 }
 
 DemuxMpegtsWrapper::~DemuxMpegtsWrapper() {
     StopDemuxing();
+    CleanupTemporaryFiles();
     LogMessage(L"DemuxMpegtsWrapper destroyed");
 }
 
@@ -156,11 +158,22 @@ bool DemuxMpegtsWrapper::StartDemuxing(const std::wstring& hls_playlist_url,
             audio_packet_queue_.swap(empty);
         }
         
-        // Launch player processes if separate streams enabled
+        // Launch player processes based on mode
         if (config_.enable_separate_streams) {
-            if (!LaunchVideoPlayer() || !LaunchAudioPlayer()) {
-                LogError(L"Failed to launch media players");
-                return false;
+            if (config_.use_single_player_mode) {
+                // Single player mode: create temporary files and launch single player with external audio
+                if (!CreateTemporaryFiles()) {
+                    LogError(L"Failed to create temporary files for single player mode");
+                    return false;
+                }
+                LogMessage(L"Single player mode: temporary files created");
+            } else {
+                // Legacy mode: launch separate video and audio players
+                if (!LaunchVideoPlayer() || !LaunchAudioPlayer()) {
+                    LogError(L"Failed to launch separate media players");
+                    return false;
+                }
+                LogMessage(L"Separate players mode: video and audio players launched");
             }
         }
         
@@ -174,10 +187,17 @@ bool DemuxMpegtsWrapper::StartDemuxing(const std::wstring& hls_playlist_url,
                                             std::ref(cancel_token));
         
         if (config_.enable_separate_streams) {
-            video_output_thread_ = std::thread(&DemuxMpegtsWrapper::VideoOutputThread, this, 
-                                             std::ref(cancel_token));
-            audio_output_thread_ = std::thread(&DemuxMpegtsWrapper::AudioOutputThread, this, 
-                                             std::ref(cancel_token));
+            if (config_.use_single_player_mode) {
+                // Single player mode: start file output thread
+                file_output_thread_ = std::thread(&DemuxMpegtsWrapper::FileOutputThread, this, 
+                                                 std::ref(cancel_token));
+            } else {
+                // Legacy mode: start separate video and audio output threads
+                video_output_thread_ = std::thread(&DemuxMpegtsWrapper::VideoOutputThread, this, 
+                                                 std::ref(cancel_token));
+                audio_output_thread_ = std::thread(&DemuxMpegtsWrapper::AudioOutputThread, this, 
+                                                 std::ref(cancel_token));
+            }
         }
         
         LogMessage(L"MPEG-TS demuxing started successfully");
@@ -206,6 +226,9 @@ void DemuxMpegtsWrapper::StopDemuxing() {
     if (demux_processor_thread_.joinable()) {
         demux_processor_thread_.join();
     }
+    if (file_output_thread_.joinable()) {
+        file_output_thread_.join();
+    }
     if (video_output_thread_.joinable()) {
         video_output_thread_.join();
     }
@@ -214,6 +237,7 @@ void DemuxMpegtsWrapper::StopDemuxing() {
     }
     
     // Terminate player processes
+    TerminateMainPlayer();
     TerminateVideoPlayer();
     TerminateAudioPlayer();
     
@@ -318,6 +342,16 @@ DemuxMpegtsWrapper::DemuxStats DemuxMpegtsWrapper::GetStats() const {
     return stats_;
 }
 
+bool DemuxMpegtsWrapper::IsMainPlayerRunning() const {
+    if (main_player_process_ == nullptr) return false;
+    
+    DWORD exit_code;
+    if (GetExitCodeProcess(main_player_process_, &exit_code)) {
+        return exit_code == STILL_ACTIVE;
+    }
+    return false;
+}
+
 bool DemuxMpegtsWrapper::IsVideoPlayerRunning() const {
     if (video_player_process_ == nullptr) return false;
     
@@ -385,16 +419,26 @@ void DemuxMpegtsWrapper::RecoverFromDiscontinuity() {
     
     // Restart players if needed
     if (config_.enable_separate_streams && config_.auto_restart_streams) {
-        if (!IsVideoPlayerRunning()) {
-            LogMessage(L"Restarting video player after discontinuity");
-            TerminateVideoPlayer();
-            LaunchVideoPlayer();
-        }
-        
-        if (!IsAudioPlayerRunning()) {
-            LogMessage(L"Restarting audio player after discontinuity");
-            TerminateAudioPlayer();
-            LaunchAudioPlayer();
+        if (config_.use_single_player_mode) {
+            // Single player mode: restart main player
+            if (!IsMainPlayerRunning()) {
+                LogMessage(L"Restarting main player after discontinuity");
+                TerminateMainPlayer();
+                LaunchMainPlayer();
+            }
+        } else {
+            // Legacy mode: restart separate players
+            if (!IsVideoPlayerRunning()) {
+                LogMessage(L"Restarting video player after discontinuity");
+                TerminateVideoPlayer();
+                LaunchVideoPlayer();
+            }
+            
+            if (!IsAudioPlayerRunning()) {
+                LogMessage(L"Restarting audio player after discontinuity");
+                TerminateAudioPlayer();
+                LaunchAudioPlayer();
+            }
         }
     }
 }
@@ -561,6 +605,71 @@ void DemuxMpegtsWrapper::DemuxProcessorThread(std::atomic<bool>& cancel_token) {
     }
     
     LogMessage(L"Demux processor thread stopped");
+}
+
+void DemuxMpegtsWrapper::FileOutputThread(std::atomic<bool>& cancel_token) {
+    LogMessage(L"File output thread started (single player mode)");
+    
+    while (demuxing_active_.load() && !cancel_token.load()) {
+        try {
+            bool processed_packet = false;
+            
+            // Process video packets
+            {
+                std::lock_guard<std::mutex> lock(video_queue_mutex_);
+                if (!video_packet_queue_.empty()) {
+                    DemuxedPacket packet = video_packet_queue_.front();
+                    video_packet_queue_.pop();
+                    
+                    if (packet.type == StreamType::VIDEO && WriteVideoPacketToFile(packet)) {
+                        processed_packet = true;
+                    }
+                }
+            }
+            
+            // Process audio packets
+            {
+                std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+                if (!audio_packet_queue_.empty()) {
+                    DemuxedPacket packet = audio_packet_queue_.front();
+                    audio_packet_queue_.pop();
+                    
+                    if (packet.type == StreamType::AUDIO && WriteAudioPacketToFile(packet)) {
+                        processed_packet = true;
+                    }
+                }
+            }
+            
+            // Check buffer status and potentially launch player
+            CheckFileBufferStatus();
+            
+            // Check file size limits
+            if (config_.max_file_size_mb > 0) {
+                size_t max_bytes = config_.max_file_size_mb * 1024 * 1024;
+                if (video_file_size_.load() > max_bytes || audio_file_size_.load() > max_bytes) {
+                    LogMessage(L"File size limit reached, may need to rotate files");
+                    // TODO: Implement file rotation if needed
+                }
+            }
+            
+            // Restart player if it died
+            if (video_file_ready_.load() && audio_file_ready_.load() && !IsMainPlayerRunning() && config_.auto_restart_streams) {
+                LogMessage(L"Player died, attempting restart");
+                LaunchMainPlayer();
+            }
+            
+            if (!processed_packet) {
+                // No packets available, wait a bit
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            
+        } catch (const std::exception& e) {
+            LogError(L"Exception in file output: " + Utf8ToWide(e.what()));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    
+    LogMessage(L"File output thread stopped");
 }
 
 void DemuxMpegtsWrapper::VideoOutputThread(std::atomic<bool>& cancel_token) {
@@ -768,6 +877,239 @@ StreamType DemuxMpegtsWrapper::DetermineStreamType(const TSDemux::ElementaryStre
 }
 
 // Player management functions
+
+MediaPlayerType DemuxMpegtsWrapper::DetectPlayerType() const {
+    std::wstring player_lower = config_.player_path;
+    std::transform(player_lower.begin(), player_lower.end(), player_lower.begin(), ::towlower);
+    
+    if (player_lower.find(L"mpv") != std::wstring::npos) {
+        return MediaPlayerType::MPV;
+    } else if (player_lower.find(L"mpc") != std::wstring::npos) {
+        return MediaPlayerType::MPC_HC;
+    } else if (player_lower.find(L"vlc") != std::wstring::npos) {
+        return MediaPlayerType::VLC;
+    } else {
+        return MediaPlayerType::GENERIC;
+    }
+}
+
+std::wstring DemuxMpegtsWrapper::BuildSinglePlayerCommandLine() const {
+    MediaPlayerType player_type = (config_.player_type == MediaPlayerType::GENERIC) ? 
+                                 DetectPlayerType() : config_.player_type;
+    
+    std::wstring cmdline = config_.player_path;
+    
+    switch (player_type) {
+        case MediaPlayerType::MPV:
+            // MPV: mpv.exe --audio-file=audio.aac video.h264
+            cmdline += L" --audio-file=\"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+            break;
+            
+        case MediaPlayerType::MPC_HC:
+            // MPC-HC: mpc-hc.exe /dub audio.aac video.h264
+            cmdline += L" /dub \"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+            break;
+            
+        case MediaPlayerType::VLC:
+            // VLC: vlc.exe --input-slave=audio.aac video.h264
+            // Note: VLC also supports --audio-file but it's less documented
+            cmdline += L" --input-slave=\"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+            break;
+            
+        case MediaPlayerType::GENERIC:
+        default:
+            // Generic/fallback: assume MPV-like syntax
+            cmdline += L" --audio-file=\"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+            LogMessage(L"Warning: Unknown player type, using MPV-like command line format");
+            break;
+    }
+    
+    return cmdline;
+}
+
+bool DemuxMpegtsWrapper::LaunchMainPlayer() {
+    if (IsMainPlayerRunning()) {
+        return true; // Already running
+    }
+    
+    // Wait for sufficient buffer before launching
+    if (!video_file_ready_.load() || !audio_file_ready_.load()) {
+        LogMessage(L"Waiting for sufficient buffer before launching player...");
+        return false; // Not ready yet
+    }
+    
+    // Build command line
+    std::wstring cmdline = BuildSinglePlayerCommandLine();
+    
+    STARTUPINFOW si = {sizeof(si)};
+    PROCESS_INFORMATION pi = {0};
+    
+    // Launch main player
+    if (!CreateProcessW(
+        nullptr,
+        const_cast<LPWSTR>(cmdline.c_str()),
+        nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+        &si, &pi)) {
+        LogError(L"Failed to launch main player: " + cmdline);
+        return false;
+    }
+    
+    // Store handles
+    main_player_process_ = pi.hProcess;
+    
+    CloseHandle(pi.hThread);
+    
+    LogMessage(L"Main player launched successfully: " + cmdline);
+    return true;
+}
+
+void DemuxMpegtsWrapper::TerminateMainPlayer() {
+    if (main_player_process_) {
+        // Try to terminate gracefully first
+        if (TerminateProcess(main_player_process_, 0)) {
+            WaitForSingleObject(main_player_process_, 3000); // Wait up to 3 seconds
+        }
+        CloseHandle(main_player_process_);
+        main_player_process_ = nullptr;
+    }
+    
+    LogMessage(L"Main player terminated");
+}
+
+bool DemuxMpegtsWrapper::CreateTemporaryFiles() {
+    // Determine temp directory
+    std::wstring temp_dir = config_.temp_directory;
+    if (temp_dir.empty()) {
+        wchar_t temp_path[MAX_PATH];
+        DWORD result = GetTempPathW(MAX_PATH, temp_path);
+        if (result == 0 || result > MAX_PATH) {
+            LogError(L"Failed to get system temp directory");
+            return false;
+        }
+        temp_dir = temp_path;
+    }
+    
+    // Ensure temp directory ends with backslash
+    if (!temp_dir.empty() && temp_dir.back() != L'\\') {
+        temp_dir += L'\\';
+    }
+    
+    // Generate unique filenames
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+    
+    std::wstringstream ss;
+    ss << config_.temp_file_prefix << time_t << L"_" << ms.count();
+    std::wstring base_name = ss.str();
+    
+    video_file_path_ = temp_dir + base_name + config_.video_file_extension;
+    audio_file_path_ = temp_dir + base_name + config_.audio_file_extension;
+    
+    // Create/open files
+    video_file_stream_.open(video_file_path_, std::ios::binary | std::ios::out);
+    audio_file_stream_.open(audio_file_path_, std::ios::binary | std::ios::out);
+    
+    if (!video_file_stream_.is_open() || !audio_file_stream_.is_open()) {
+        LogError(L"Failed to create temporary files: " + video_file_path_ + L", " + audio_file_path_);
+        CleanupTemporaryFiles();
+        return false;
+    }
+    
+    // Reset file status
+    video_file_ready_.store(false);
+    audio_file_ready_.store(false);
+    video_file_size_.store(0);
+    audio_file_size_.store(0);
+    
+    LogMessage(L"Created temporary files: " + video_file_path_ + L", " + audio_file_path_);
+    return true;
+}
+
+void DemuxMpegtsWrapper::CleanupTemporaryFiles() {
+    // Close file streams
+    if (video_file_stream_.is_open()) {
+        video_file_stream_.close();
+    }
+    if (audio_file_stream_.is_open()) {
+        audio_file_stream_.close();
+    }
+    
+    // Delete files if cleanup enabled
+    if (config_.cleanup_temp_files) {
+        if (!video_file_path_.empty()) {
+            DeleteFileW(video_file_path_.c_str());
+            LogMessage(L"Deleted temporary video file: " + video_file_path_);
+        }
+        if (!audio_file_path_.empty()) {
+            DeleteFileW(audio_file_path_.c_str());
+            LogMessage(L"Deleted temporary audio file: " + audio_file_path_);
+        }
+    }
+    
+    video_file_path_.clear();
+    audio_file_path_.clear();
+}
+
+bool DemuxMpegtsWrapper::WriteVideoPacketToFile(const DemuxedPacket& packet) {
+    if (!video_file_stream_.is_open() || packet.data.empty()) {
+        return false;
+    }
+    
+    video_file_stream_.write(reinterpret_cast<const char*>(packet.data.data()), packet.data.size());
+    video_file_stream_.flush(); // Ensure data is written immediately for streaming
+    
+    if (video_file_stream_.bad()) {
+        LogError(L"Failed to write video packet to file");
+        return false;
+    }
+    
+    size_t new_size = video_file_size_.load() + packet.data.size();
+    video_file_size_.store(new_size);
+    
+    return true;
+}
+
+bool DemuxMpegtsWrapper::WriteAudioPacketToFile(const DemuxedPacket& packet) {
+    if (!audio_file_stream_.is_open() || packet.data.empty()) {
+        return false;
+    }
+    
+    audio_file_stream_.write(reinterpret_cast<const char*>(packet.data.data()), packet.data.size());
+    audio_file_stream_.flush(); // Ensure data is written immediately for streaming
+    
+    if (audio_file_stream_.bad()) {
+        LogError(L"Failed to write audio packet to file");
+        return false;
+    }
+    
+    size_t new_size = audio_file_size_.load() + packet.data.size();
+    audio_file_size_.store(new_size);
+    
+    return true;
+}
+
+void DemuxMpegtsWrapper::CheckFileBufferStatus() {
+    // Check if we have enough buffered data to start playback
+    const size_t min_video_buffer = 1024 * 1024; // 1MB
+    const size_t min_audio_buffer = 512 * 1024;  // 512KB
+    
+    if (!video_file_ready_.load() && video_file_size_.load() >= min_video_buffer) {
+        video_file_ready_.store(true);
+        LogMessage(L"Video file buffer ready (" + std::to_wstring(video_file_size_.load()) + L" bytes)");
+    }
+    
+    if (!audio_file_ready_.load() && audio_file_size_.load() >= min_audio_buffer) {
+        audio_file_ready_.store(true);
+        LogMessage(L"Audio file buffer ready (" + std::to_wstring(audio_file_size_.load()) + L" bytes)");
+    }
+    
+    // Launch player when both files are ready
+    if (video_file_ready_.load() && audio_file_ready_.load() && !IsMainPlayerRunning()) {
+        LaunchMainPlayer();
+    }
+}
 
 bool DemuxMpegtsWrapper::LaunchVideoPlayer() {
     if (IsVideoPlayerRunning()) {
@@ -982,8 +1324,14 @@ void DemuxMpegtsWrapper::UpdateStats() {
     }
     
     // Update stream health
-    stats_.video_stream_healthy = IsVideoPlayerRunning();
-    stats_.audio_stream_healthy = IsAudioPlayerRunning();
+    if (config_.use_single_player_mode) {
+        bool main_running = IsMainPlayerRunning();
+        stats_.video_stream_healthy = main_running;
+        stats_.audio_stream_healthy = main_running;
+    } else {
+        stats_.video_stream_healthy = IsVideoPlayerRunning();
+        stats_.audio_stream_healthy = IsAudioPlayerRunning();
+    }
     
     // Calculate demux FPS
     auto now = std::chrono::steady_clock::now();
@@ -1115,12 +1463,21 @@ void DemuxMpegtsWrapper::RestartFailedStreams() {
         if (!stream.is_healthy && enabled_streams_[stream.pid]) {
             LogMessage(L"Attempting to restart failed stream PID " + std::to_wstring(stream.pid));
             
-            if (stream.type == StreamType::VIDEO && !IsVideoPlayerRunning()) {
-                TerminateVideoPlayer();
-                LaunchVideoPlayer();
-            } else if (stream.type == StreamType::AUDIO && !IsAudioPlayerRunning()) {
-                TerminateAudioPlayer();
-                LaunchAudioPlayer();
+            if (config_.use_single_player_mode) {
+                // Single player mode: restart main player
+                if (!IsMainPlayerRunning()) {
+                    TerminateMainPlayer();
+                    LaunchMainPlayer();
+                }
+            } else {
+                // Legacy mode: restart individual players
+                if (stream.type == StreamType::VIDEO && !IsVideoPlayerRunning()) {
+                    TerminateVideoPlayer();
+                    LaunchVideoPlayer();
+                } else if (stream.type == StreamType::AUDIO && !IsAudioPlayerRunning()) {
+                    TerminateAudioPlayer();
+                    LaunchAudioPlayer();
+                }
             }
             
             HandleStreamTimeout(stream.pid);
@@ -1132,12 +1489,14 @@ void DemuxMpegtsWrapper::RestartFailedStreams() {
 std::unique_ptr<DemuxMpegtsWrapper> CreateDemuxWrapper(
     const std::wstring& player_path,
     bool enable_separate_streams,
-    bool enable_debug_logging) {
+    bool enable_debug_logging,
+    bool use_single_player_mode) {
     
     DemuxConfig config;
     config.player_path = player_path;
     config.enable_separate_streams = enable_separate_streams;
     config.enable_debug_logging = enable_debug_logging;
+    config.use_single_player_mode = use_single_player_mode;
     
     return std::make_unique<DemuxMpegtsWrapper>(config);
 }

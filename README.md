@@ -13,12 +13,14 @@ A Twitch stream player for Windows with enhanced TLS support.
 
 **Demux-MPEGTS Integration** - Advanced MPEG transport stream demultiplexing for better stream reliability:
 
-- **Elementary Stream Separation**: Demuxes MPEG-TS into separate video and audio elementary streams
+- **Single Player Mode (Recommended)**: Uses one media player with external audio file support for better synchronization
+- **Elementary Stream Separation**: Demuxes MPEG-TS into separate video and audio elementary streams  
 - **Independent Stream Recovery**: Video and audio streams can recover independently from discontinuities
 - **Black Screen Prevention**: Prevents media players from freezing on last frame when discontinuities occur
-- **Automatic Stream Restart**: Monitors stream health and automatically restarts failed video or audio players
+- **Automatic Player Restart**: Monitors stream health and automatically restarts failed players
 - **Stream Health Monitoring**: Real-time monitoring of video/audio stream integrity with configurable thresholds
 - **Multi-Format Support**: Supports H.264, HEVC, AAC, AC3, MPEG audio, and other common stream formats
+- **Media Player Compatibility**: Supports MPV (--audio-file), MPC-HC (/dub), VLC (--input-slave), and generic players
 
 ### Demux-MPEGTS Technical Details
 
@@ -26,8 +28,9 @@ The Demux-MPEGTS integration includes:
 
 - `demux_mpegts_wrapper.h/cpp` - High-level wrapper for demux-mpegts library integration
 - `demux-mpegts/` - Complete demux-mpegts library source code for MPEG-TS parsing
-- Separate video and audio player process management with automatic restart
-- Thread-safe packet queues for smooth video/audio stream delivery
+- **Single Player Mode**: Temporary file-based streaming with external audio file support
+- **Legacy Mode**: Separate video and audio player process management with automatic restart
+- Thread-safe packet queues and file management for smooth video/audio stream delivery
 - Comprehensive error handling and recovery mechanisms
 - Real-time stream statistics and health monitoring
 
@@ -45,9 +48,9 @@ The Demux-MPEGTS integration includes:
 The demux-mpegts integration works seamlessly:
 1. **MPEG-TS Input**: Downloads HLS segments containing MPEG transport streams
 2. **Stream Demuxing**: Separates video and audio elementary streams using demux-mpegts
-3. **Dual Player Output**: Feeds video stream to video-only player, audio stream to audio-only player
-4. **Health Monitoring**: Continuously monitors both streams for discontinuities and errors
-5. **Automatic Recovery**: Restarts failed streams and recovers from discontinuities transparently
+3. **Single Player Output (Default)**: Feeds streams to one player with external audio file (e.g., `mpv --audio-file=audio.aac video.h264`)
+4. **Health Monitoring**: Continuously monitors streams for discontinuities and errors
+5. **Automatic Recovery**: Restarts player and recovers from discontinuities transparently
 
 ## TX-Queue IPC Integration for Enhanced Performance
 
@@ -82,7 +85,7 @@ The TX-Queue integration includes:
 | **Throughput** | **Limited by lock contention** | **High-performance lock-free design** |
 
 The integration works transparently with multiple streaming modes:
-1. **Primary**: Demux-MPEGTS separate video/audio streams (default) - Best discontinuity recovery
+1. **Primary**: Demux-MPEGTS single player mode (default) - Best discontinuity recovery with optimal synchronization
 2. **High-Performance**: TX-Queue IPC mode for optimal performance
 3. **Professional**: TSDuck transport stream mode for professional compatibility  
 4. **Legacy**: Traditional HLS segment streaming for maximum compatibility
@@ -91,14 +94,14 @@ The integration works transparently with multiple streaming modes:
 
 **Default Streaming Mode**: Demux-MPEGTS Mode is now the standard streaming method for better discontinuity handling:
 
-- **Separate Video/Audio Streams**: Launches separate video-only and audio-only media players to prevent sync issues
+- **Single Player Mode**: Uses one media player with external audio file support for better synchronization and performance
 - **Discontinuity Recovery**: Automatically detects and recovers from stream discontinuities that cause black screen/frozen video
-- **Stream Health Monitoring**: Independently monitors video and audio stream health with automatic restart capability
+- **Stream Health Monitoring**: Monitors player and stream health with automatic restart capability
 - **MPEG-TS Demuxing**: Uses the proven demux-mpegts library to separate elementary streams from transport streams
 - **Error Recovery**: Comprehensive error handling with automatic recovery mechanisms
 - **Real-time Statistics**: Detailed stream statistics and performance monitoring
 
-This mode specifically addresses the issue where media players get stuck on a black screen or last video frame with audio still playing after discontinuities, by providing the audio and video as separate streams that can recover independently.
+This mode specifically addresses the issue where media players get stuck on a black screen or last video frame with audio still playing after discontinuities, by demuxing streams and using a single player with external audio file support for better recovery and synchronization.
 
 ### TX-Queue IPC Mode
 
@@ -176,15 +179,15 @@ A C++ application that buffers Twitch streams to media players like MPC-HC, MPC-
 
 ## Configuration
 
-The application defaults to using Demux-MPEGTS mode with MPV as the media player for best discontinuity recovery. 
+The application defaults to using Demux-MPEGTS mode with MPV as the media player for best discontinuity recovery.
 
 For detailed configuration options and troubleshooting, see [DEMUX_CONFIGURATION.md](DEMUX_CONFIGURATION.md).
 
 Default settings:
-- Mode: Demux-MPEGTS separate video/audio streams  
+- Mode: Demux-MPEGTS single player with external audio file
 - Player: `mpv.exe`
-- Video Args: `--video-only --no-audio --`
-- Audio Args: `--audio-only --no-video --`
+- Command: `mpv.exe --audio-file=audio.aac video.h264`
+- Alternative: Legacy separate players mode also available
 
 To change the media player or configure advanced options, see the configuration guide.
 
