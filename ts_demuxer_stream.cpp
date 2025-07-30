@@ -602,7 +602,49 @@ bool TSDemuxerStreamManager::StartPlayerWithPipes() {
         return false;
     }
     
-    // Determine player type and build command line using named pipe paths
+    // Put named pipes in listening state FIRST, before starting the player
+    AddDebugLog(L"[TS_DEMUX] Putting named pipes in listening state for player connection...");
+    
+    // Start listening for connections on both pipes in non-blocking mode
+    // This ensures the pipes are ready when the player tries to access them
+    OVERLAPPED video_overlapped = {0};
+    OVERLAPPED audio_overlapped = {0};
+    
+    video_overlapped.hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    audio_overlapped.hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    
+    if (!video_overlapped.hEvent || !audio_overlapped.hEvent) {
+        AddDebugLog(L"[TS_DEMUX] Failed to create events for overlapped pipe operations");
+        if (video_overlapped.hEvent) CloseHandle(video_overlapped.hEvent);
+        if (audio_overlapped.hEvent) CloseHandle(audio_overlapped.hEvent);
+        return false;
+    }
+    
+    // Start non-blocking connect operations
+    BOOL video_connect = ConnectNamedPipe(video_pipe_, &video_overlapped);
+    BOOL audio_connect = ConnectNamedPipe(audio_pipe_, &audio_overlapped);
+    
+    DWORD video_error = GetLastError();
+    DWORD audio_error = GetLastError();
+    
+    // Check if connections are pending or already connected
+    if (!video_connect && video_error != ERROR_IO_PENDING && video_error != ERROR_PIPE_CONNECTED) {
+        AddDebugLog(L"[TS_DEMUX] Failed to start video pipe connection, error: " + std::to_wstring(video_error));
+        CloseHandle(video_overlapped.hEvent);
+        CloseHandle(audio_overlapped.hEvent);
+        return false;
+    }
+    
+    if (!audio_connect && audio_error != ERROR_IO_PENDING && audio_error != ERROR_PIPE_CONNECTED) {
+        AddDebugLog(L"[TS_DEMUX] Failed to start audio pipe connection, error: " + std::to_wstring(audio_error));
+        CloseHandle(video_overlapped.hEvent);
+        CloseHandle(audio_overlapped.hEvent);
+        return false;
+    }
+    
+    AddDebugLog(L"[TS_DEMUX] Named pipes are now ready for client connections");
+    
+    // Now start the player with command line pointing to the named pipes
     std::wstring player_name = player_path_;
     std::transform(player_name.begin(), player_name.end(), player_name.begin(), ::towlower);
     
@@ -633,31 +675,34 @@ bool TSDemuxerStreamManager::StartPlayerWithPipes() {
     if (!result) {
         DWORD error = GetLastError();
         AddDebugLog(L"[TS_DEMUX] Failed to create player process, error: " + std::to_wstring(error));
+        CloseHandle(video_overlapped.hEvent);
+        CloseHandle(audio_overlapped.hEvent);
         return false;
     }
     
     player_process_ = process_info_.hProcess;
+    AddDebugLog(L"[TS_DEMUX] Player process started, waiting for pipe connections...");
     
-    // Now wait for the player to connect to our named pipes
-    AddDebugLog(L"[TS_DEMUX] Waiting for player to connect to named pipes...");
+    // Wait for the player to actually connect to both pipes (with timeout)
+    HANDLE events[2] = { video_overlapped.hEvent, audio_overlapped.hEvent };
+    DWORD wait_result = WaitForMultipleObjects(2, events, TRUE, 10000); // 10 second timeout
     
-    // Connect video pipe (blocking call)
-    if (!ConnectNamedPipe(video_pipe_, nullptr)) {
+    if (wait_result == WAIT_TIMEOUT) {
+        AddDebugLog(L"[TS_DEMUX] Timeout waiting for player to connect to named pipes");
+        CloseHandle(video_overlapped.hEvent);
+        CloseHandle(audio_overlapped.hEvent);
+        return false;
+    } else if (wait_result == WAIT_FAILED) {
         DWORD error = GetLastError();
-        if (error != ERROR_PIPE_CONNECTED) {
-            AddDebugLog(L"[TS_DEMUX] Failed to connect video pipe, error: " + std::to_wstring(error));
-            return false;
-        }
+        AddDebugLog(L"[TS_DEMUX] Failed waiting for pipe connections, error: " + std::to_wstring(error));
+        CloseHandle(video_overlapped.hEvent);
+        CloseHandle(audio_overlapped.hEvent);
+        return false;
     }
     
-    // Connect audio pipe (blocking call)
-    if (!ConnectNamedPipe(audio_pipe_, nullptr)) {
-        DWORD error = GetLastError();
-        if (error != ERROR_PIPE_CONNECTED) {
-            AddDebugLog(L"[TS_DEMUX] Failed to connect audio pipe, error: " + std::to_wstring(error));
-            return false;
-        }
-    }
+    // Clean up events
+    CloseHandle(video_overlapped.hEvent);
+    CloseHandle(audio_overlapped.hEvent);
     
     LogMessage(L"TS Demuxer player started with named pipes for video/audio streaming");
     AddDebugLog(L"[TS_DEMUX] Named pipes connected successfully to player");
