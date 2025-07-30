@@ -681,7 +681,20 @@ bool TSDemuxerStreamManager::StartPlayerWithPipes() {
     }
     
     player_process_ = process_info_.hProcess;
-    AddDebugLog(L"[TS_DEMUX] Player process started, waiting for pipe connections...");
+    AddDebugLog(L"[TS_DEMUX] Player process started with PID: " + std::to_wstring(process_info_.dwProcessId));
+    
+    // Check if player process is still running immediately after creation
+    DWORD exit_code;
+    if (GetExitCodeProcess(player_process_, &exit_code)) {
+        if (exit_code != STILL_ACTIVE) {
+            AddDebugLog(L"[TS_DEMUX] Player process exited immediately with code: " + std::to_wstring(exit_code));
+            CloseHandle(video_overlapped.hEvent);
+            CloseHandle(audio_overlapped.hEvent);
+            return false;
+        }
+    }
+    
+    AddDebugLog(L"[TS_DEMUX] Player process running, waiting for pipe connections...");
     
     // Wait for the player to actually connect to both pipes (with timeout)
     HANDLE events[2] = { video_overlapped.hEvent, audio_overlapped.hEvent };
@@ -689,6 +702,17 @@ bool TSDemuxerStreamManager::StartPlayerWithPipes() {
     
     if (wait_result == WAIT_TIMEOUT) {
         AddDebugLog(L"[TS_DEMUX] Timeout waiting for player to connect to named pipes");
+        
+        // Check if player is still running
+        DWORD exit_code;
+        if (GetExitCodeProcess(player_process_, &exit_code)) {
+            if (exit_code != STILL_ACTIVE) {
+                AddDebugLog(L"[TS_DEMUX] Player process died during pipe connection wait, exit code: " + std::to_wstring(exit_code));
+            } else {
+                AddDebugLog(L"[TS_DEMUX] Player process still running but didn't connect to pipes");
+            }
+        }
+        
         CloseHandle(video_overlapped.hEvent);
         CloseHandle(audio_overlapped.hEvent);
         return false;
@@ -864,7 +888,16 @@ TSDemuxerStreamManager::DemuxerStats TSDemuxerStreamManager::GetStats() const {
     stats.video_packets = video_packets_.load();
     stats.audio_packets = audio_packets_.load();
     stats.bytes_transferred = bytes_transferred_.load();
-    stats.player_running = (player_process_ != INVALID_HANDLE_VALUE);
+    
+    // Check if player process is actually running, not just if handle is valid
+    stats.player_running = false;
+    if (player_process_ != INVALID_HANDLE_VALUE && player_process_ != nullptr) {
+        DWORD exit_code;
+        if (GetExitCodeProcess(player_process_, &exit_code)) {
+            stats.player_running = (exit_code == STILL_ACTIVE);
+        }
+    }
+    
     stats.demuxer_active = streaming_active_.load();
     return stats;
 }
