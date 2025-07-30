@@ -34,9 +34,11 @@ struct StreamTab {
     std::wstring channel;
     HWND hChild;
     HWND hQualities;
+    HWND hAudioTracks;  // Audio track selection listbox
     HWND hWatchBtn;
     HWND hStopBtn;
     std::vector<std::wstring> qualities;
+    std::vector<AudioTrack> audioTracks;  // Available audio tracks
     std::map<std::wstring, std::wstring> qualityToUrl;
     std::map<std::wstring, std::wstring> standardToOriginalQuality;
     std::thread streamThread;
@@ -48,16 +50,18 @@ struct StreamTab {
     std::atomic<int> chunkCount{0}; // Track actual chunk queue size
 
     // Make the struct movable but not copyable
-    StreamTab() : hChild(nullptr), hQualities(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr) {};
+    StreamTab() : hChild(nullptr), hQualities(nullptr), hAudioTracks(nullptr), hWatchBtn(nullptr), hStopBtn(nullptr) {};
     StreamTab(const StreamTab&) = delete;
     StreamTab& operator=(const StreamTab&) = delete;
     StreamTab(StreamTab&& other) noexcept 
         : channel(std::move(other.channel))
         , hChild(other.hChild)
         , hQualities(other.hQualities)
+        , hAudioTracks(other.hAudioTracks)
         , hWatchBtn(other.hWatchBtn)
         , hStopBtn(other.hStopBtn)
         , qualities(std::move(other.qualities))
+        , audioTracks(std::move(other.audioTracks))
         , qualityToUrl(std::move(other.qualityToUrl))
         , standardToOriginalQuality(std::move(other.standardToOriginalQuality))
         , streamThread(std::move(other.streamThread))
@@ -77,6 +81,7 @@ struct StreamTab {
         
         other.hChild = nullptr;
         other.hQualities = nullptr;
+        other.hAudioTracks = nullptr;
         other.hWatchBtn = nullptr;
         other.hStopBtn = nullptr;
         other.isStreaming = false;
@@ -93,9 +98,11 @@ struct StreamTab {
             channel = std::move(other.channel);
             hChild = other.hChild;
             hQualities = other.hQualities;
+            hAudioTracks = other.hAudioTracks;
             hWatchBtn = other.hWatchBtn;
             hStopBtn = other.hStopBtn;
             qualities = std::move(other.qualities);
+            audioTracks = std::move(other.audioTracks);
             qualityToUrl = std::move(other.qualityToUrl);
             standardToOriginalQuality = std::move(other.standardToOriginalQuality);
             streamThread = std::move(other.streamThread);
@@ -108,6 +115,7 @@ struct StreamTab {
             
             other.hChild = nullptr;
             other.hQualities = nullptr;
+            other.hAudioTracks = nullptr;
             other.hWatchBtn = nullptr;
             other.hStopBtn = nullptr;
             other.isStreaming = false;
@@ -719,6 +727,36 @@ void RefreshQualities(StreamTab& tab) {
         SendMessage(tab.hQualities, LB_ADDSTRING, 0, (LPARAM)q.c_str());
 }
 
+void RefreshAudioTracks(StreamTab& tab) {
+    SendMessage(tab.hAudioTracks, LB_RESETCONTENT, 0, 0);
+    
+    if (tab.audioTracks.empty()) {
+        // Add a default "Auto" option when no specific audio tracks are available
+        SendMessage(tab.hAudioTracks, LB_ADDSTRING, 0, (LPARAM)L"Auto (Default)");
+        SendMessage(tab.hAudioTracks, LB_SETCURSEL, 0, 0);
+        return;
+    }
+    
+    // Add audio tracks to listbox
+    for (const auto& track : tab.audioTracks) {
+        std::wstring displayName = track.getDisplayName();
+        if (track.is_default) {
+            displayName += L" [Default]";
+        }
+        SendMessage(tab.hAudioTracks, LB_ADDSTRING, 0, (LPARAM)displayName.c_str());
+    }
+    
+    // Select the default track if available, otherwise select the first one
+    int defaultIndex = 0;
+    for (size_t i = 0; i < tab.audioTracks.size(); ++i) {
+        if (tab.audioTracks[i].is_default) {
+            defaultIndex = static_cast<int>(i);
+            break;
+        }
+    }
+    SendMessage(tab.hAudioTracks, LB_SETCURSEL, defaultIndex, 0);
+}
+
 void InitLogList(HWND hList) {
     LVCOLUMN lvc = { 0 };
     lvc.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -786,12 +824,25 @@ void LoadChannel(StreamTab& tab) {
         AddLog(L"Failed to get playlist - channel may be offline or not exist.");
         return;
     }
-    AddLog(L"Parsing qualities...");
-    tab.qualityToUrl = ParsePlaylist(m3u8);
+    AddLog(L"Parsing qualities and audio tracks...");
+    
+    // Use enhanced parser to get both qualities and audio tracks
+    EnhancedPlaylistResult enhancedResult = ParseM3U8MasterPlaylistEnhanced(m3u8);
+    
+    // Extract qualities
+    tab.qualityToUrl.clear();
     tab.qualities.clear();
-    for (const auto& pair : tab.qualityToUrl)
-        tab.qualities.push_back(pair.first);
+    for (const auto& quality : enhancedResult.qualities) {
+        tab.qualityToUrl[quality.name] = quality.url;
+        tab.qualities.push_back(quality.name);
+    }
+    
+    // Extract audio tracks
+    tab.audioTracks = enhancedResult.audio_tracks;
+    
     RefreshQualities(tab);
+    RefreshAudioTracks(tab);
+    
     if (tab.qualities.empty()) {
         MessageBoxW(tab.hChild, L"No stream qualities found. The stream may use unsupported encoding or be unavailable.", L"Stream Error", MB_OK | MB_ICONERROR);
         AddLog(L"No qualities found - stream may use unsupported encoding.");
@@ -801,6 +852,16 @@ void LoadChannel(StreamTab& tab) {
         // Only enable the watch button if we're not currently streaming
         if (!tab.isStreaming) {
             EnableWindow(tab.hWatchBtn, TRUE);
+        }
+        
+        // Log audio track information
+        if (!tab.audioTracks.empty()) {
+            AddLog(L"Found " + std::to_wstring(tab.audioTracks.size()) + L" audio track(s)");
+            for (const auto& track : tab.audioTracks) {
+                AddLog(L"  Audio: " + track.getDisplayName());
+            }
+        } else {
+            AddLog(L"No separate audio tracks found - using default audio");
         }
     }
 }
@@ -827,9 +888,10 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
         
         EnableWindow(tab.hWatchBtn, TRUE);
         EnableWindow(tab.hStopBtn, FALSE);
-        // Re-enable channel textbox, quality listbox, and Load button when streaming stops
+        // Re-enable channel textbox, quality listbox, audio listbox, and Load button when streaming stops
         EnableWindow(GetDlgItem(tab.hChild, IDC_CHANNEL), TRUE);
         EnableWindow(tab.hQualities, TRUE);
+        EnableWindow(tab.hAudioTracks, TRUE);
         EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), TRUE);
         SetWindowTextW(tab.hWatchBtn, L"2. Watch");
         
@@ -953,9 +1015,10 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     tab.playerStarted = false;
     EnableWindow(tab.hWatchBtn, FALSE);
     EnableWindow(tab.hStopBtn, TRUE);
-    // Disable channel textbox, quality listbox, and Load button when streaming starts
+    // Disable channel textbox, quality listbox, audio listbox, and Load button when streaming starts
     EnableWindow(GetDlgItem(tab.hChild, IDC_CHANNEL), FALSE);
     EnableWindow(tab.hQualities, FALSE);
+    EnableWindow(tab.hAudioTracks, FALSE);
     EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), FALSE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
     UpdateStatusBar(L"Buffer: Buffering... | TX-Queue IPC Active");
@@ -1043,8 +1106,15 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
     HWND hQualityLabel = CreateWindowEx(0, L"STATIC", L"Quality:", WS_CHILD | WS_VISIBLE, 10, 40, 60, 18, hwnd, nullptr, g_hInst, nullptr);
     SendMessage(hQualityLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
-    HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, 120, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
+    HWND hQualList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 40, 200, 100, hwnd, (HMENU)IDC_QUALITIES, g_hInst, nullptr);
     SendMessage(hQualList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
+    // Audio track selection
+    HWND hAudioLabel = CreateWindowEx(0, L"STATIC", L"Audio:", WS_CHILD | WS_VISIBLE, 10, 150, 60, 18, hwnd, nullptr, g_hInst, nullptr);
+    SendMessage(hAudioLabel, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    
+    HWND hAudioList = CreateWindowEx(WS_EX_CLIENTEDGE, L"LISTBOX", 0, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 70, 150, 200, 60, hwnd, (HMENU)IDC_AUDIO_TRACKS, g_hInst, nullptr);
+    SendMessage(hAudioList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     
     HWND hLoad = CreateWindowEx(0, L"BUTTON", L"1. Load", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 280, 40, 60, 22, hwnd, (HMENU)IDC_LOAD, g_hInst, nullptr);
     SendMessage(hLoad, WM_SETFONT, (WPARAM)g_hFont, TRUE);
@@ -1061,6 +1131,7 @@ HWND CreateStreamChild(HWND hParent, StreamTab& tab, const wchar_t* channel = L"
 
     tab.hChild = hwnd;
     tab.hQualities = hQualList;
+    tab.hAudioTracks = hAudioList;
     tab.hWatchBtn = hWatch;
     tab.hStopBtn = hStop;
     // Store index instead of pointer to avoid vector reallocation issues
