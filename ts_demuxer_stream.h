@@ -82,6 +82,13 @@ private:
     std::wstring video_pipe_path_;
     std::wstring audio_pipe_path_;
     
+    // Temporary file paths as fallback for players that don't support pipes
+    std::wstring video_file_path_;
+    std::wstring audio_file_path_;
+    HANDLE video_file_;
+    HANDLE audio_file_;
+    bool use_named_pipes_; // false = use temp files, true = use named pipes
+    
     std::thread streaming_thread_;
     
     // Callbacks and state
@@ -94,8 +101,11 @@ private:
     
     // Helper functions
     bool StartPlayerWithPipes();
+    bool StartPlayerWithFiles();
     bool CreateNamedPipes();
+    bool CreateTempFiles();
     void CleanupNamedPipes();
+    void CleanupTempFiles();
     bool DownloadPlaylistSegments(const std::wstring& playlist_url, std::vector<std::wstring>& segment_urls);
     bool DownloadSegment(const std::wstring& segment_url, std::vector<char>& segment_data);
     bool ProcessSegmentWithDemuxer(const std::vector<char>& segment_data);
