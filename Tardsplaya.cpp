@@ -26,6 +26,7 @@
 #include "twitch_api.h"
 #include "favorites.h"
 #include "playlist_parser.h"
+#include "enhanced_playlist_parser.h"
 #include "tsduck_transport_router.h"
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")

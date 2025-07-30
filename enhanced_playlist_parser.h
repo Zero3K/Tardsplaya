@@ -149,7 +149,7 @@ public:
                 quality.resolution_height = variant.resolution_height;
                 quality.resolution_width = variant.resolution_width;
                 quality.codecs = variant.codecs;
-                quality.audio_group = StringToWString(variant.audio);
+                quality.audio_group = variant.audio;
                 quality.url = JoinUrl(base_url, variant.uri);
                 
                 // Generate display name
@@ -353,10 +353,13 @@ private:
 };
 
 // Enhanced playlist parsing with Simple HLS Client integration
-EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
+inline EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
     const std::wstring& playlist_content,
     const std::wstring& base_url = L""
-);
+) {
+    EnhancedPlaylistParser parser;
+    return parser.ParseM3U8MasterPlaylist(playlist_content, base_url);
+}
 
 // Discontinuity filtering functions for media playlists
 
@@ -382,10 +385,13 @@ EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
  * @param base_url Base URL for resolving relative URLs (optional).
  * @return A clean playlist string with discontinuity segments removed.
  */
-std::string FilterDiscontinuitySegments(
+inline std::string FilterDiscontinuitySegments(
     const std::string& playlist_content,
     const std::string& base_url = ""
-);
+) {
+    EnhancedPlaylistParser parser;
+    return parser.FilterDiscontinuitySegments(playlist_content, base_url);
+}
 
 /**
  * @brief Get filtered media segments without discontinuities.
@@ -396,8 +402,11 @@ std::string FilterDiscontinuitySegments(
  * @param playlist_content The M3U8 media playlist content.
  * @return Vector of segments without discontinuity markers.
  */
-std::vector<tsduck_hls::MediaSegment> GetFilteredSegments(
+inline std::vector<tsduck_hls::MediaSegment> GetFilteredSegments(
     const std::string& playlist_content
-);
+) {
+    EnhancedPlaylistParser parser;
+    return parser.GetFilteredSegments(playlist_content);
+}
 
 #endif // ENHANCED_PLAYLIST_PARSER_H
