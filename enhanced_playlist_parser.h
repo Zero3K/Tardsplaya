@@ -11,9 +11,13 @@
 #include <map>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
 #include "simple_hls_client/m3u8_parser.h"
 #include "simple_hls_client/hls_fetcher.h"
 #include "tsduck_hls_wrapper.h"
+
+// Forward declaration to avoid circular dependency
+struct PlaylistQuality;
 
 // Enhanced quality structure that includes audio track info
 struct EnhancedPlaylistQuality {
@@ -184,37 +188,14 @@ public:
             result.has_audio_variants = !result.audio_tracks.empty();
             result.has_iframe_streams = parser.hasIFrameStreams();
             
-            // Sort qualities by resolution (highest first)
-            auto stream_accessor = const_cast<M3U8Parser&>(parser).select<ParserType::STREAM>();
-            stream_accessor.sort(HLSTagParser::SortAttribute::RESOLUTION, HLSTagParser::SortAttribute::BANDWIDTH);
-            
-            // Re-extract sorted qualities
-            result.qualities.clear();
-            for (const auto& variant : stream_parser.variants_) {
-                EnhancedPlaylistQuality quality;
-                quality.bandwidth = variant.bandwidth;
-                quality.resolution_height = variant.resolution_height;
-                quality.resolution_width = variant.resolution_width;
-                quality.codecs = variant.codecs;
-                quality.audio_group = StringToWString(variant.audio);
-                quality.url = JoinUrl(base_url, variant.uri);
-                
-                if (variant.resolution_height > 0) {
-                    quality.name = std::to_wstring(variant.resolution_height) + L"p";
-                    if (variant.bandwidth > 0) {
-                        quality.name += L" (" + std::to_wstring(variant.bandwidth / 1000) + L"k)";
+            // Sort qualities by resolution (highest first) - simple sort
+            std::sort(result.qualities.begin(), result.qualities.end(), 
+                [](const EnhancedPlaylistQuality& a, const EnhancedPlaylistQuality& b) {
+                    if (a.resolution_height != b.resolution_height) {
+                        return a.resolution_height > b.resolution_height; // Higher resolution first
                     }
-                } else if (variant.bandwidth > 0) {
-                    quality.name = std::to_wstring(variant.bandwidth / 1000) + L"k";
-                } else {
-                    quality.name = L"unknown";
-                }
-                
-                result.qualities.push_back(quality);
-            }
-            
-            // Reverse to get highest quality first
-            std::reverse(result.qualities.begin(), result.qualities.end());
+                    return a.bandwidth > b.bandwidth; // Higher bandwidth first as tiebreaker
+                });
             
             // If no stream variants found, try legacy parsing
             if (result.qualities.empty()) {
@@ -369,24 +350,7 @@ private:
         
         return clean_playlist.str();
     }
-inline std::vector<PlaylistQuality> ParseM3U8MasterPlaylist(
-    const std::wstring& playlist_content,
-    const std::wstring& base_url = L""
-) {
-    EnhancedPlaylistParser parser;
-    auto result = parser.ParseM3U8MasterPlaylist(playlist_content, base_url);
-    
-    // Convert to legacy format
-    std::vector<PlaylistQuality> legacy_result;
-    for (const auto& quality : result.qualities) {
-        PlaylistQuality legacy_quality;
-        legacy_quality.name = quality.name;
-        legacy_quality.url = quality.url;
-        legacy_result.push_back(legacy_quality);
-    }
-    
-    return legacy_result;
-}
+};
 
 // Enhanced playlist parsing with Simple HLS Client integration
 EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(

@@ -1,4 +1,5 @@
 #include "playlist_parser.h"
+#include "enhanced_playlist_parser.h"
 #include <sstream>
 
 // Helper: resolve relative URL

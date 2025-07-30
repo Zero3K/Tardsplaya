@@ -1,7 +1,9 @@
 #pragma once
 #include <string>
 #include <vector>
-#include "enhanced_playlist_parser.h"
+
+// Forward declaration to avoid circular dependency
+struct EnhancedPlaylistResult;
 
 // Represents a stream quality entry in the playlist
 struct PlaylistQuality {
