@@ -97,6 +97,7 @@ A C++ application that buffers Twitch streams to media players like MPC-HC, MPC-
 - **Stream Buffering**: Downloads and buffers stream segments before sending to media player for smooth playback
 - **Multiple Quality Support**: Automatically detects and allows selection of available stream qualities
 - **Multi-Stream Support**: Open multiple tabs to watch different streams simultaneously
+- **MPEG-TS Demux Mode**: NEW! Separates video and audio streams for better discontinuity recovery
 - **Windows 7 Compatibility**: Includes certificate validation workarounds for older Windows versions
 - **Real-time Logging**: Shows detailed logs of streaming operations
 - **Modern C++ Implementation**: Clean, efficient C++17 code with minimal dependencies
@@ -124,18 +125,43 @@ A C++ application that buffers Twitch streams to media players like MPC-HC, MPC-
 
 ## Configuration
 
-The application defaults to using MPV as the media player. To use a different player:
+The application defaults to using TX-Queue IPC mode for high-performance streaming. To change the streaming mode or media player:
 
-1. Go to **Tools → Settings** (when implemented)
-2. Set the player path and arguments
+1. Go to **Tools → Settings**
+2. Configure your preferred options:
+   - **Player Path**: Set path to your media player (mpv.exe, vlc.exe, mpc-hc.exe, etc.)
+   - **Player Arguments**: Additional arguments (default: `-` for stdin)
+   - **Streaming Mode**: Choose from available modes:
+     - **TX-Queue IPC (High Performance)**: Default mode with lock-free queues
+     - **MPEG-TS Demux (Separate A/V)**: NEW! Demuxes streams for better discontinuity recovery
+     - **Transport Stream (TSDuck)**: Professional transport stream routing
+     - **HLS Segments (Fallback)**: Traditional segment-based streaming
+
+### MPEG-TS Demux Mode
+
+When using MPEG-TS Demux mode, the application:
+- Separates video and audio into individual elementary stream files
+- Uses media player-specific command line arguments:
+  - **MPC-HC/MPC-BE**: `/dub filename`
+  - **VLC**: `--input-slave=filename`  
+  - **MPV**: `--audio-file=filename`
+- Creates temporary files in system temp directory
+- Helps media players recover from stream discontinuities more effectively
 
 Default settings:
 - Player: `mpv.exe`
 - Arguments: `-` (reads from stdin)
+- Streaming Mode: `TX-Queue IPC (High Performance)`
 
 ## Technical Improvements
 
 This C++ version includes several improvements over the original:
+
+### MPEG-TS Demux Integration
+- Integrates janbar/demux-mpegts library for elementary stream separation
+- Creates separate video and audio files for better discontinuity recovery
+- Supports multiple media player command line formats (/dub, --audio-file, --input-slave)
+- Helps prevent black screen/audio desync issues during stream discontinuities
 
 ### Windows 7 Compatibility
 - Certificate validation bypass for HTTPS requests

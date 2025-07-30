@@ -105,6 +105,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="demux_mpegts_integration.cpp" />
     <ClCompile Include="favorites.cpp" />
     <ClCompile Include="playlist_parser.cpp" />
     <ClCompile Include="stream_memory_map.cpp" />
@@ -119,8 +120,21 @@
     <ClCompile Include="twitch_api.cpp" />
     <ClCompile Include="tx_queue_ipc.cpp" />
     <ClCompile Include="urlencode.cpp" />
+    <ClCompile Include="demux-mpegts\src\bitstream.cpp" />
+    <ClCompile Include="demux-mpegts\src\debug.cpp" />
+    <ClCompile Include="demux-mpegts\src\elementaryStream.cpp" />
+    <ClCompile Include="demux-mpegts\src\ES_AAC.cpp" />
+    <ClCompile Include="demux-mpegts\src\ES_AC3.cpp" />
+    <ClCompile Include="demux-mpegts\src\ES_h264.cpp" />
+    <ClCompile Include="demux-mpegts\src\ES_hevc.cpp" />
+    <ClCompile Include="demux-mpegts\src\ES_MPEGAudio.cpp" />
+    <ClCompile Include="demux-mpegts\src\ES_MPEGVideo.cpp" />
+    <ClCompile Include="demux-mpegts\src\ES_Subtitle.cpp" />
+    <ClCompile Include="demux-mpegts\src\ES_Teletext.cpp" />
+    <ClCompile Include="demux-mpegts\src\tsDemuxer.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="demux_mpegts_integration.h" />
     <ClInclude Include="favorites.h" />
     <ClInclude Include="json_minimal.h" />
     <ClInclude Include="tlsclient\lock.h" />
@@ -138,6 +152,21 @@
     <ClInclude Include="tx_queue_ipc.h" />
     <ClInclude Include="tx_queue_wrapper.h" />
     <ClInclude Include="urlencode.h" />
+    <ClInclude Include="demux-mpegts\src\bitstream.h" />
+    <ClInclude Include="demux-mpegts\src\debug.h" />
+    <ClInclude Include="demux-mpegts\src\elementaryStream.h" />
+    <ClInclude Include="demux-mpegts\src\ES_AAC.h" />
+    <ClInclude Include="demux-mpegts\src\ES_AC3.h" />
+    <ClInclude Include="demux-mpegts\src\ES_h264.h" />
+    <ClInclude Include="demux-mpegts\src\ES_hevc.h" />
+    <ClInclude Include="demux-mpegts\src\ES_MPEGAudio.h" />
+    <ClInclude Include="demux-mpegts\src\ES_MPEGVideo.h" />
+    <ClInclude Include="demux-mpegts\src\ES_Subtitle.h" />
+    <ClInclude Include="demux-mpegts\src\ES_Teletext.h" />
+    <ClInclude Include="demux-mpegts\src\mutex.h" />
+    <ClInclude Include="demux-mpegts\src\tsDemuxer.h" />
+    <ClInclude Include="demux-mpegts\src\tsPacket.h" />
+    <ClInclude Include="demux-mpegts\src\tsTable.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="resource.rc" />
