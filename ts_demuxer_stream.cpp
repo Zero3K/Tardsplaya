@@ -357,13 +357,13 @@ bool MemoryTSDemuxer::ParsePES(const unsigned char* payload, unsigned int length
             if (++video_continuation_count <= 3) {
                 AddDebugLog(L"[TS_DEMUX] Writing video continuation data - " + std::to_wstring(length) + L" bytes");
             }
-            return video_handler_(payload, length);
+            video_handler_(payload, length); // Don't fail packet parsing if write fails
         } else if (pid == audio_pid_ && audio_handler_ && length > 0) {
             static int audio_continuation_count = 0;
             if (++audio_continuation_count <= 3) {
                 AddDebugLog(L"[TS_DEMUX] Writing audio continuation data - " + std::to_wstring(length) + L" bytes");
             }
-            return audio_handler_(payload, length);
+            audio_handler_(payload, length); // Don't fail packet parsing if write fails
         }
         return true;
     }
@@ -385,13 +385,13 @@ bool MemoryTSDemuxer::ParsePES(const unsigned char* payload, unsigned int length
                 if (++video_pes_count <= 3) {
                     AddDebugLog(L"[TS_DEMUX] Writing video PES data - " + std::to_wstring(es_len) + L" bytes");
                 }
-                return video_handler_(es_data, es_len);
+                video_handler_(es_data, es_len); // Don't fail packet parsing if write fails
             } else if (pid == audio_pid_ && audio_handler_) {
                 static int audio_pes_count = 0;
                 if (++audio_pes_count <= 3) {
                     AddDebugLog(L"[TS_DEMUX] Writing audio PES data - " + std::to_wstring(es_len) + L" bytes");
                 }
-                return audio_handler_(es_data, es_len);
+                audio_handler_(es_data, es_len); // Don't fail packet parsing if write fails
             }
         }
     } else {
@@ -401,13 +401,13 @@ bool MemoryTSDemuxer::ParsePES(const unsigned char* payload, unsigned int length
             if (++video_raw_count <= 3) {
                 AddDebugLog(L"[TS_DEMUX] Writing raw video data - " + std::to_wstring(length) + L" bytes");
             }
-            return video_handler_(payload, length);
+            video_handler_(payload, length); // Don't fail packet parsing if write fails
         } else if (pid == audio_pid_ && audio_handler_) {
             static int audio_raw_count = 0;
             if (++audio_raw_count <= 3) {
                 AddDebugLog(L"[TS_DEMUX] Writing raw audio data - " + std::to_wstring(length) + L" bytes");
             }
-            return audio_handler_(payload, length);
+            audio_handler_(payload, length); // Don't fail packet parsing if write fails
         }
     }
     
@@ -437,6 +437,17 @@ bool TSDemuxerStreamManager::MemoryESOutput::WriteData(const unsigned char* data
     if (result && bytes_written == length) {
         bytes_written_ += bytes_written;
         return true;
+    }
+    
+    // Log specific error if write fails
+    DWORD error = GetLastError();
+    static int error_count = 0;
+    if (++error_count <= 5) { // Only log first 5 errors to avoid spam
+        AddDebugLog(L"[TS_DEMUX] WriteFile failed for " + 
+                   std::wstring(type_ == ES_OUTPUT_VIDEO ? L"video" : L"audio") + 
+                   L" pipe, error: " + std::to_wstring(error) + 
+                   L", bytes written: " + std::to_wstring(bytes_written) + 
+                   L"/" + std::to_wstring(length));
     }
     
     return false;
@@ -661,7 +672,16 @@ void TSDemuxerStreamManager::StreamingThreadFunction(const std::wstring& playlis
     try {
         std::vector<std::wstring> segment_urls;
         bool player_started = false;
-        int segments_before_player_start = 2; // Process 2 segments before starting player
+        
+        // Start player immediately and wait for connection
+        LogMessage(L"Starting player before processing segments to ensure pipe connections");
+        if (StartPlayerWithPipes()) {
+            player_started = true;
+            LogMessage(L"Player started successfully with named pipes for video/audio streaming");
+        } else {
+            LogMessage(L"Failed to start player - aborting TS Demuxer streaming");
+            return;
+        }
         
         while (!should_stop_.load() && !cancel_token_ptr_->load()) {
             // Download playlist and get segment URLs
@@ -680,17 +700,6 @@ void TSDemuxerStreamManager::StreamingThreadFunction(const std::wstring& playlis
                     if (ProcessSegmentWithDemuxer(segment_data)) {
                         segments_processed_++;
                         bytes_transferred_ += segment_data.size();
-                        
-                        // Start player after processing initial segments
-                        if (!player_started && segments_processed_ >= segments_before_player_start) {
-                            LogMessage(L"Starting player after processing " + std::to_wstring(segments_processed_) + L" segments");
-                            if (StartPlayerWithPipes()) {
-                                player_started = true;
-                                LogMessage(L"Player started successfully with named pipes for video/audio streaming");
-                            } else {
-                                LogMessage(L"Failed to start player - continuing to write to named pipes");
-                            }
-                        }
                         
                         if (chunk_count_ptr_) {
                             *chunk_count_ptr_ = static_cast<int>(segments_processed_.load());
