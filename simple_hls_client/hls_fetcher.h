@@ -11,6 +11,7 @@
 #define _WINSOCKAPI_
 #include <windows.h>
 #include <winhttp.h>
+#include <wininet.h>  // For ERROR_INTERNET_* constants
 #include <winerror.h>
 #include <string>
 #include <stdexcept>
