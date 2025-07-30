@@ -78,11 +78,9 @@ private:
     HANDLE audio_pipe_;
     PROCESS_INFORMATION process_info_;
     
-    // File paths for separate video/audio output
-    std::wstring video_file_path_;
-    std::wstring audio_file_path_;
-    HANDLE video_file_handle_;
-    HANDLE audio_file_handle_;
+    // Named pipe paths for separate video/audio output
+    std::wstring video_pipe_path_;
+    std::wstring audio_pipe_path_;
     
     std::thread streaming_thread_;
     
@@ -95,9 +93,9 @@ private:
     void StreamingThreadFunction(const std::wstring& playlist_url);
     
     // Helper functions
-    bool StartPlayerWithFiles();
-    bool CreateTempFiles();
-    void CleanupTempFiles();
+    bool StartPlayerWithPipes();
+    bool CreateNamedPipes();
+    void CleanupNamedPipes();
     bool DownloadPlaylistSegments(const std::wstring& playlist_url, std::vector<std::wstring>& segment_urls);
     bool DownloadSegment(const std::wstring& segment_url, std::vector<char>& segment_data);
     bool ProcessSegmentWithDemuxer(const std::vector<char>& segment_data);

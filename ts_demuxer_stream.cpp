@@ -447,16 +447,14 @@ TSDemuxerStreamManager::TSDemuxerStreamManager(const std::wstring& player_path, 
     : player_path_(player_path), channel_name_(channel_name),
       player_process_(INVALID_HANDLE_VALUE), 
       video_pipe_(INVALID_HANDLE_VALUE), 
-      audio_pipe_(INVALID_HANDLE_VALUE),
-      video_file_handle_(INVALID_HANDLE_VALUE),
-      audio_file_handle_(INVALID_HANDLE_VALUE) {
+      audio_pipe_(INVALID_HANDLE_VALUE) {
     memset(&process_info_, 0, sizeof(process_info_));
 }
 
 TSDemuxerStreamManager::~TSDemuxerStreamManager() {
     StopStreaming();
     Cleanup();
-    CleanupTempFiles();
+    CleanupNamedPipes();
 }
 
 bool TSDemuxerStreamManager::Initialize() {
@@ -479,9 +477,9 @@ bool TSDemuxerStreamManager::StartStreaming(
     cancel_token_ptr_ = &cancel_token;
     should_stop_ = false;
     
-    // Create temporary files first but don't start player yet
-    if (!CreateTempFiles()) {
-        LogMessage(L"Failed to create temporary files for video/audio separation");
+    // Create named pipes first but don't start player yet
+    if (!CreateNamedPipes()) {
+        LogMessage(L"Failed to create named pipes for video/audio separation");
         return false;
     }
     
@@ -507,114 +505,100 @@ void TSDemuxerStreamManager::StopStreaming() {
     }
 }
 
-bool TSDemuxerStreamManager::CreateTempFiles() {
-    // Create temporary directory for video/audio files
-    wchar_t temp_path[MAX_PATH];
-    DWORD temp_len = GetTempPathW(MAX_PATH, temp_path);
-    if (temp_len == 0) {
-        AddDebugLog(L"[TS_DEMUX] Failed to get temp path");
-        return false;
-    }
+bool TSDemuxerStreamManager::CreateNamedPipes() {
+    // Generate unique pipe names using process ID and timestamp
+    DWORD pid = GetCurrentProcessId();
+    DWORD timestamp = GetTickCount();
     
-    // Generate unique filenames
-    std::wstring temp_prefix = std::wstring(temp_path) + L"tardsplaya_ts_";
+    video_pipe_path_ = L"\\\\.\\pipe\\tardsplaya_video_" + std::to_wstring(pid) + L"_" + std::to_wstring(timestamp);
+    audio_pipe_path_ = L"\\\\.\\pipe\\tardsplaya_audio_" + std::to_wstring(pid) + L"_" + std::to_wstring(timestamp);
     
-    // Create video file with optimized flags for better streaming performance
-    video_file_path_ = temp_prefix + L"video_" + std::to_wstring(GetCurrentProcessId()) + L".h264";
-    video_file_handle_ = CreateFileW(
-        video_file_path_.c_str(),
-        GENERIC_WRITE,
-        FILE_SHARE_READ,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, // Optimized for sequential streaming
-        nullptr
+    // Create video named pipe
+    video_pipe_ = CreateNamedPipeW(
+        video_pipe_path_.c_str(),
+        PIPE_ACCESS_OUTBOUND,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+        1, // max instances
+        65536, // output buffer size
+        65536, // input buffer size
+        0, // default timeout
+        nullptr // default security
     );
     
-    if (video_file_handle_ == INVALID_HANDLE_VALUE) {
-        AddDebugLog(L"[TS_DEMUX] Failed to create video temp file: " + video_file_path_);
+    if (video_pipe_ == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        AddDebugLog(L"[TS_DEMUX] Failed to create video named pipe: " + video_pipe_path_ + L", error: " + std::to_wstring(error));
         return false;
     }
     
-    // Create audio file with optimized flags for better streaming performance
-    audio_file_path_ = temp_prefix + L"audio_" + std::to_wstring(GetCurrentProcessId()) + L".aac";
-    audio_file_handle_ = CreateFileW(
-        audio_file_path_.c_str(),
-        GENERIC_WRITE,
-        FILE_SHARE_READ,
-        nullptr,
-        CREATE_ALWAYS,
-        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, // Optimized for sequential streaming
-        nullptr
+    // Create audio named pipe
+    audio_pipe_ = CreateNamedPipeW(
+        audio_pipe_path_.c_str(),
+        PIPE_ACCESS_OUTBOUND,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+        1, // max instances
+        65536, // output buffer size
+        65536, // input buffer size
+        0, // default timeout
+        nullptr // default security
     );
     
-    if (audio_file_handle_ == INVALID_HANDLE_VALUE) {
-        CloseHandle(video_file_handle_);
-        video_file_handle_ = INVALID_HANDLE_VALUE;
-        AddDebugLog(L"[TS_DEMUX] Failed to create audio temp file: " + audio_file_path_);
+    if (audio_pipe_ == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        CloseHandle(video_pipe_);
+        video_pipe_ = INVALID_HANDLE_VALUE;
+        AddDebugLog(L"[TS_DEMUX] Failed to create audio named pipe: " + audio_pipe_path_ + L", error: " + std::to_wstring(error));
         return false;
     }
     
-    AddDebugLog(L"[TS_DEMUX] Created temp files - Video: " + video_file_path_ + L", Audio: " + audio_file_path_);
+    AddDebugLog(L"[TS_DEMUX] Created named pipes - Video: " + video_pipe_path_ + L", Audio: " + audio_pipe_path_);
     return true;
 }
 
-void TSDemuxerStreamManager::CleanupTempFiles() {
-    if (video_file_handle_ != INVALID_HANDLE_VALUE) {
-        CloseHandle(video_file_handle_);
-        video_file_handle_ = INVALID_HANDLE_VALUE;
+void TSDemuxerStreamManager::CleanupNamedPipes() {
+    // Clean up MemoryESOutput objects first
+    video_output_.reset();
+    audio_output_.reset();
+    
+    if (video_pipe_ != INVALID_HANDLE_VALUE) {
+        DisconnectNamedPipe(video_pipe_);
+        CloseHandle(video_pipe_);
+        video_pipe_ = INVALID_HANDLE_VALUE;
+        AddDebugLog(L"[TS_DEMUX] Closed video named pipe: " + video_pipe_path_);
     }
     
-    if (audio_file_handle_ != INVALID_HANDLE_VALUE) {
-        CloseHandle(audio_file_handle_);
-        audio_file_handle_ = INVALID_HANDLE_VALUE;
+    if (audio_pipe_ != INVALID_HANDLE_VALUE) {
+        DisconnectNamedPipe(audio_pipe_);
+        CloseHandle(audio_pipe_);
+        audio_pipe_ = INVALID_HANDLE_VALUE;
+        AddDebugLog(L"[TS_DEMUX] Closed audio named pipe: " + audio_pipe_path_);
     }
     
-    // Manually delete the temporary files
-    if (!video_file_path_.empty()) {
-        DeleteFileW(video_file_path_.c_str());
-        AddDebugLog(L"[TS_DEMUX] Deleted video temp file: " + video_file_path_);
-        video_file_path_.clear();
-    }
-    
-    if (!audio_file_path_.empty()) {
-        DeleteFileW(audio_file_path_.c_str());
-        AddDebugLog(L"[TS_DEMUX] Deleted audio temp file: " + audio_file_path_);
-        audio_file_path_.clear();
-    }
+    video_pipe_path_.clear();
+    audio_pipe_path_.clear();
 }
 
-bool TSDemuxerStreamManager::StartPlayerWithFiles() {
-    // Files should already be created by CreateTempFiles()
-    if (video_file_handle_ == INVALID_HANDLE_VALUE || audio_file_handle_ == INVALID_HANDLE_VALUE) {
-        LogMessage(L"Temp files not ready for player start");
+bool TSDemuxerStreamManager::StartPlayerWithPipes() {
+    // Named pipes should already be created by CreateNamedPipes()
+    if (video_pipe_ == INVALID_HANDLE_VALUE || audio_pipe_ == INVALID_HANDLE_VALUE) {
+        LogMessage(L"Named pipes not ready for player start");
         return false;
     }
     
-    // Flush file buffers to ensure data is available for player
-    if (video_file_handle_ != INVALID_HANDLE_VALUE) {
-        FlushFileBuffers(video_file_handle_);
-    }
-    if (audio_file_handle_ != INVALID_HANDLE_VALUE) {
-        FlushFileBuffers(audio_file_handle_);
-    }
-    
-    AddDebugLog(L"[TS_DEMUX] Flushed file buffers before starting player");
-    
-    // Determine player type and build command line
+    // Determine player type and build command line using named pipe paths
     std::wstring player_name = player_path_;
     std::transform(player_name.begin(), player_name.end(), player_name.begin(), ::towlower);
     
     std::wstring cmdline;
     if (player_name.find(L"mpv") != std::wstring::npos) {
         // MPV supports --audio-file= for separate audio track
-        cmdline = L"\"" + player_path_ + L"\" --audio-file=\"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+        cmdline = L"\"" + player_path_ + L"\" --audio-file=\"" + audio_pipe_path_ + L"\" \"" + video_pipe_path_ + L"\"";
     } else if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
         // MPC-HC supports /dub for separate audio track  
-        cmdline = L"\"" + player_path_ + L"\" /dub \"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+        cmdline = L"\"" + player_path_ + L"\" /dub \"" + audio_pipe_path_ + L"\" \"" + video_pipe_path_ + L"\"";
     } else {
         // Default: try MPV syntax
-        cmdline = L"\"" + player_path_ + L"\" --audio-file=\"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+        cmdline = L"\"" + player_path_ + L"\" --audio-file=\"" + audio_pipe_path_ + L"\" \"" + video_pipe_path_ + L"\"";
     }
     
     AddDebugLog(L"[TS_DEMUX] Player command: " + cmdline);
@@ -636,7 +620,34 @@ bool TSDemuxerStreamManager::StartPlayerWithFiles() {
     }
     
     player_process_ = process_info_.hProcess;
-    LogMessage(L"TS Demuxer player started with separate video/audio files");
+    
+    // Now wait for the player to connect to our named pipes
+    AddDebugLog(L"[TS_DEMUX] Waiting for player to connect to named pipes...");
+    
+    // Connect video pipe (blocking call)
+    if (!ConnectNamedPipe(video_pipe_, nullptr)) {
+        DWORD error = GetLastError();
+        if (error != ERROR_PIPE_CONNECTED) {
+            AddDebugLog(L"[TS_DEMUX] Failed to connect video pipe, error: " + std::to_wstring(error));
+            return false;
+        }
+    }
+    
+    // Connect audio pipe (blocking call)
+    if (!ConnectNamedPipe(audio_pipe_, nullptr)) {
+        DWORD error = GetLastError();
+        if (error != ERROR_PIPE_CONNECTED) {
+            AddDebugLog(L"[TS_DEMUX] Failed to connect audio pipe, error: " + std::to_wstring(error));
+            return false;
+        }
+    }
+    
+    // Now create MemoryESOutput objects that will write to the connected named pipes
+    video_output_ = std::make_unique<MemoryESOutput>(ES_OUTPUT_VIDEO, video_pipe_);
+    audio_output_ = std::make_unique<MemoryESOutput>(ES_OUTPUT_AUDIO, audio_pipe_);
+    
+    LogMessage(L"TS Demuxer player started with named pipes for video/audio streaming");
+    AddDebugLog(L"[TS_DEMUX] Named pipes connected successfully");
     return true;
 }
 
@@ -671,11 +682,11 @@ void TSDemuxerStreamManager::StreamingThreadFunction(const std::wstring& playlis
                         // Start player after processing initial segments
                         if (!player_started && segments_processed_ >= segments_before_player_start) {
                             LogMessage(L"Starting player after processing " + std::to_wstring(segments_processed_) + L" segments");
-                            if (StartPlayerWithFiles()) {
+                            if (StartPlayerWithPipes()) {
                                 player_started = true;
-                                LogMessage(L"Player started successfully with separate video/audio files");
+                                LogMessage(L"Player started successfully with named pipes for video/audio streaming");
                             } else {
-                                LogMessage(L"Failed to start player - continuing to write files");
+                                LogMessage(L"Failed to start player - continuing to write to named pipes");
                             }
                         }
                         
@@ -731,25 +742,14 @@ bool TSDemuxerStreamManager::ProcessSegmentWithDemuxer(const std::vector<char>& 
         return false;
     }
     
-    // Set up output handlers with optimized buffering
+    // Set up output handlers to write directly to named pipes
     demuxer.SetVideoOutput([this](const unsigned char* data, unsigned int length) -> bool {
         video_packets_++;
         if (video_output_) {
             return video_output_->WriteData(data, length);
         }
-        // Write directly to video file
-        if (video_file_handle_ == INVALID_HANDLE_VALUE) {
-            AddDebugLog(L"[TS_DEMUX] Warning: Video file handle is invalid");
-            return false;
-        }
-        DWORD written;
-        BOOL result = WriteFile(video_file_handle_, data, length, &written, nullptr);
-        if (!result || written != length) {
-            DWORD error = GetLastError();
-            AddDebugLog(L"[TS_DEMUX] Failed to write video data, error: " + std::to_wstring(error));
-            return false;
-        }
-        return true;
+        AddDebugLog(L"[TS_DEMUX] Warning: Video output not initialized");
+        return false;
     });
     
     demuxer.SetAudioOutput([this](const unsigned char* data, unsigned int length) -> bool {
@@ -757,36 +757,11 @@ bool TSDemuxerStreamManager::ProcessSegmentWithDemuxer(const std::vector<char>& 
         if (audio_output_) {
             return audio_output_->WriteData(data, length);
         }
-        // Write directly to audio file
-        if (audio_file_handle_ == INVALID_HANDLE_VALUE) {
-            AddDebugLog(L"[TS_DEMUX] Warning: Audio file handle is invalid");
-            return false;
-        }
-        DWORD written;
-        BOOL result = WriteFile(audio_file_handle_, data, length, &written, nullptr);
-        if (!result || written != length) {
-            DWORD error = GetLastError();
-            AddDebugLog(L"[TS_DEMUX] Failed to write audio data, error: " + std::to_wstring(error));
-            return false;
-        }
-        return true;
+        AddDebugLog(L"[TS_DEMUX] Warning: Audio output not initialized");
+        return false;
     });
     
     bool result = demuxer.Process();
-    
-    // Only flush file buffers every 5 segments instead of every segment to improve performance
-    static int flush_counter = 0;
-    flush_counter++;
-    if (flush_counter >= 5) {
-        flush_counter = 0;
-        if (video_file_handle_ != INVALID_HANDLE_VALUE) {
-            FlushFileBuffers(video_file_handle_);
-        }
-        if (audio_file_handle_ != INVALID_HANDLE_VALUE) {
-            FlushFileBuffers(audio_file_handle_);
-        }
-    }
-    
     return result;
 }
 
