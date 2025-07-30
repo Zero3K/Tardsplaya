@@ -3,6 +3,7 @@
 #include "tsduck_transport_router.h"
 #include "stream_resource_manager.h"
 #include "tx_queue_ipc.h"
+#include "ts_demuxer_stream.h"
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
@@ -19,6 +20,12 @@ std::thread StartStreamThread(
     StreamingMode mode,
     HANDLE* player_process_handle
 ) {
+    // Check for TS Demuxer mode (separate video/audio streams for discontinuity recovery)
+    if (mode == StreamingMode::TS_DEMUXER) {
+        return StartTSDemuxerThread(player_path, playlist_url, cancel_token, log_callback,
+                                   channel_name, chunk_count, main_window, tab_index, player_process_handle);
+    }
+    
     // Check for TX-Queue IPC mode (new high-performance mode)
     if (mode == StreamingMode::TX_QUEUE_IPC) {
         return std::thread([=, &cancel_token]() mutable {
