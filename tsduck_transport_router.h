@@ -16,6 +16,9 @@
 #define NOMINMAX
 #include <windows.h>
 
+// Forward declaration for PID filtering
+#include "ts_pid_filter.h"
+
 namespace tsduck_transport {
 
     // Transport Stream packet size (MPEG-TS standard)
@@ -173,6 +176,13 @@ namespace tsduck_transport {
             size_t max_segments_to_buffer = 2;  // Only buffer latest N segments for live edge
             std::chrono::milliseconds playlist_refresh_interval{500}; // Check for new segments every 500ms
             bool skip_old_segments = true;  // Skip older segments when catching up
+            
+            // PID filtering configuration
+            bool enable_pid_filtering = true;  // Enable PID-based filtering
+            TSPIDFilterManager::FilterPreset filter_preset = TSPIDFilterManager::FilterPreset::QUALITY_FOCUSED;
+            bool enable_discontinuity_filtering = true;  // Filter discontinuities
+            bool enable_auto_pid_detection = true;  // Automatically detect problematic PIDs
+            double discontinuity_threshold = 0.05;  // 5% discontinuity rate threshold
         };
         
         // Start routing HLS stream to media player via transport stream
@@ -208,15 +218,36 @@ namespace tsduck_transport {
             uint32_t video_sync_loss_count = 0;
             bool video_stream_healthy = true;
             bool audio_stream_healthy = true;
+            
+            // PID filtering statistics
+            size_t packets_filtered_by_pid = 0;
+            size_t discontinuities_detected = 0;
+            double discontinuity_rate = 0.0;
+            size_t active_pid_count = 0;
+            size_t problematic_pid_count = 0;
         };
         BufferStats GetBufferStats() const;
         
         // Get player process handle for external monitoring
         HANDLE GetPlayerProcessHandle() const { return player_process_handle_; }
         
+        // PID filtering interface
+        TSPIDFilterManager& GetPIDFilterManager() { return *pid_filter_manager_; }
+        const TSPIDFilterManager& GetPIDFilterManager() const { return *pid_filter_manager_; }
+        
+        // Configure PID filtering
+        void ConfigurePIDFiltering(const RouterConfig& config);
+        void EnablePIDFiltering(bool enable);
+        void SetPIDFilterPreset(TSPIDFilterManager::FilterPreset preset);
+        
+        // Get PID filtering statistics
+        std::vector<uint16_t> GetActivePIDs() const;
+        std::vector<uint16_t> GetProblematicPIDs() const;
+        
     private:
         std::unique_ptr<TSBuffer> ts_buffer_;
         std::unique_ptr<HLSToTSConverter> hls_converter_;
+        std::unique_ptr<TSPIDFilterManager> pid_filter_manager_;
         std::atomic<bool> routing_active_{false};
         std::thread hls_fetcher_thread_;
         std::thread ts_router_thread_;
