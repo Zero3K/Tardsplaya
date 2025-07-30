@@ -23,3 +23,9 @@ EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
     const std::wstring& playlist_content,
     const std::wstring& base_url = L""
 );
+
+// Filter discontinuity segments from media playlists (for ad removal)
+std::string FilterDiscontinuitySegments(
+    const std::string& playlist_content,
+    const std::string& base_url = ""
+);
