@@ -551,7 +551,13 @@ bool TSDemuxerStreamManager::CreateNamedPipes() {
         return false;
     }
     
+    // Create MemoryESOutput objects immediately after pipes are created
+    // This allows writing to pipes even before player connects
+    video_output_ = std::make_unique<MemoryESOutput>(ES_OUTPUT_VIDEO, video_pipe_);
+    audio_output_ = std::make_unique<MemoryESOutput>(ES_OUTPUT_AUDIO, audio_pipe_);
+    
     AddDebugLog(L"[TS_DEMUX] Created named pipes - Video: " + video_pipe_path_ + L", Audio: " + audio_pipe_path_);
+    AddDebugLog(L"[TS_DEMUX] Created output objects for immediate data writing");
     return true;
 }
 
@@ -642,12 +648,8 @@ bool TSDemuxerStreamManager::StartPlayerWithPipes() {
         }
     }
     
-    // Now create MemoryESOutput objects that will write to the connected named pipes
-    video_output_ = std::make_unique<MemoryESOutput>(ES_OUTPUT_VIDEO, video_pipe_);
-    audio_output_ = std::make_unique<MemoryESOutput>(ES_OUTPUT_AUDIO, audio_pipe_);
-    
     LogMessage(L"TS Demuxer player started with named pipes for video/audio streaming");
-    AddDebugLog(L"[TS_DEMUX] Named pipes connected successfully");
+    AddDebugLog(L"[TS_DEMUX] Named pipes connected successfully to player");
     return true;
 }
 
