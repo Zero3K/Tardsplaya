@@ -5,8 +5,10 @@
 #include <cmath>
 #include <cctype>
 
-// GPAC library headers
+// GPAC library headers - embedded source integration
+// Note: Include directories configured to find gpac headers locally
 extern "C" {
+#include <gpac/setup.h>
 #include <gpac/tools.h>
 #include <gpac/filters.h>
 #include <gpac/isomedia.h>
