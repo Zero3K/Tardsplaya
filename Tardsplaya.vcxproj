@@ -117,6 +117,13 @@
     <ClCompile Include="tsduck_hls_wrapper.cpp" />
     <ClCompile Include="tsduck_transport_router.cpp" />
     <ClCompile Include="twitch_api.cpp" />
+    <ClCompile Include="tsreadex_wrapper.cpp" />
+    <ClCompile Include="tsreadex\aac.cpp" />
+    <ClCompile Include="tsreadex\huffman.cpp" />
+    <ClCompile Include="tsreadex\id3conv.cpp" />
+    <ClCompile Include="tsreadex\servicefilter.cpp" />
+    <ClCompile Include="tsreadex\traceb24.cpp" />
+    <ClCompile Include="tsreadex\util.cpp" />
     <ClCompile Include="tx_queue_ipc.cpp" />
     <ClCompile Include="urlencode.cpp" />
   </ItemGroup>
@@ -135,6 +142,13 @@
     <ClInclude Include="tsduck_hls_wrapper.h" />
     <ClInclude Include="tsduck_transport_router.h" />
     <ClInclude Include="twitch_api.h" />
+    <ClInclude Include="tsreadex_wrapper.h" />
+    <ClInclude Include="tsreadex\aac.hpp" />
+    <ClInclude Include="tsreadex\huffman.hpp" />
+    <ClInclude Include="tsreadex\id3conv.hpp" />
+    <ClInclude Include="tsreadex\servicefilter.hpp" />
+    <ClInclude Include="tsreadex\traceb24.hpp" />
+    <ClInclude Include="tsreadex\util.hpp" />
     <ClInclude Include="tx_queue_ipc.h" />
     <ClInclude Include="tx_queue_wrapper.h" />
     <ClInclude Include="urlencode.h" />
