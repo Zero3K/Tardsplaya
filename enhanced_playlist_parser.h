@@ -211,28 +211,6 @@ public:
         return result;
     }
 
-private:
-    // Fallback to simple parsing for non-master playlists
-    EnhancedPlaylistResult ParseLegacyPlaylist(const std::wstring& content, const std::wstring& base_url) {
-        EnhancedPlaylistResult result;
-        
-        std::wistringstream ss(content);
-        std::wstring line;
-        
-        while (std::getline(ss, line)) {
-            if (line.empty() || line[0] == L'#')
-                continue;
-                
-            EnhancedPlaylistQuality single;
-            single.name = L"default";
-            single.url = JoinUrl(base_url, WStringToString(line));
-            result.qualities.push_back(single);
-            break;
-        }
-        
-        return result;
-    }
-
     /**
      * @brief Filter discontinuity segments from a media playlist.
      * @param playlist_content The M3U8 media playlist content (not master playlist).
@@ -294,6 +272,28 @@ private:
         }
         
         return filtered_segments;
+    }
+
+private:
+    // Fallback to simple parsing for non-master playlists
+    EnhancedPlaylistResult ParseLegacyPlaylist(const std::wstring& content, const std::wstring& base_url) {
+        EnhancedPlaylistResult result;
+        
+        std::wistringstream ss(content);
+        std::wstring line;
+        
+        while (std::getline(ss, line)) {
+            if (line.empty() || line[0] == L'#')
+                continue;
+                
+            EnhancedPlaylistQuality single;
+            single.name = L"default";
+            single.url = JoinUrl(base_url, WStringToString(line));
+            result.qualities.push_back(single);
+            break;
+        }
+        
+        return result;
     }
 
 private:
