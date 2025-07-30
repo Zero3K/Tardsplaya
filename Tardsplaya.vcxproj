@@ -105,6 +105,19 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="demux-mpegts\bitstream.cpp" />
+    <ClCompile Include="demux-mpegts\debug.cpp" />
+    <ClCompile Include="demux-mpegts\elementaryStream.cpp" />
+    <ClCompile Include="demux-mpegts\ES_AAC.cpp" />
+    <ClCompile Include="demux-mpegts\ES_AC3.cpp" />
+    <ClCompile Include="demux-mpegts\ES_h264.cpp" />
+    <ClCompile Include="demux-mpegts\ES_hevc.cpp" />
+    <ClCompile Include="demux-mpegts\ES_MPEGAudio.cpp" />
+    <ClCompile Include="demux-mpegts\ES_MPEGVideo.cpp" />
+    <ClCompile Include="demux-mpegts\ES_Subtitle.cpp" />
+    <ClCompile Include="demux-mpegts\ES_Teletext.cpp" />
+    <ClCompile Include="demux-mpegts\tsDemuxer.cpp" />
+    <ClCompile Include="demux_mpegts_wrapper.cpp" />
     <ClCompile Include="favorites.cpp" />
     <ClCompile Include="playlist_parser.cpp" />
     <ClCompile Include="stream_memory_map.cpp" />
@@ -121,6 +134,22 @@
     <ClCompile Include="urlencode.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="demux-mpegts\bitstream.h" />
+    <ClInclude Include="demux-mpegts\debug.h" />
+    <ClInclude Include="demux-mpegts\elementaryStream.h" />
+    <ClInclude Include="demux-mpegts\ES_AAC.h" />
+    <ClInclude Include="demux-mpegts\ES_AC3.h" />
+    <ClInclude Include="demux-mpegts\ES_h264.h" />
+    <ClInclude Include="demux-mpegts\ES_hevc.h" />
+    <ClInclude Include="demux-mpegts\ES_MPEGAudio.h" />
+    <ClInclude Include="demux-mpegts\ES_MPEGVideo.h" />
+    <ClInclude Include="demux-mpegts\ES_Subtitle.h" />
+    <ClInclude Include="demux-mpegts\ES_Teletext.h" />
+    <ClInclude Include="demux-mpegts\mutex.h" />
+    <ClInclude Include="demux-mpegts\tsDemuxer.h" />
+    <ClInclude Include="demux-mpegts\tsPacket.h" />
+    <ClInclude Include="demux-mpegts\tsTable.h" />
+    <ClInclude Include="demux_mpegts_wrapper.h" />
     <ClInclude Include="favorites.h" />
     <ClInclude Include="json_minimal.h" />
     <ClInclude Include="tlsclient\lock.h" />

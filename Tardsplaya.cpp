@@ -922,10 +922,10 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
-    // TX-Queue IPC Mode is now the default streaming mode
-    StreamingMode mode = StreamingMode::TX_QUEUE_IPC;
+    // Demux-MPEGTS Mode is now the default streaming mode for better discontinuity handling
+    StreamingMode mode = StreamingMode::DEMUX_MPEGTS_STREAMS;
     
-    AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+    AddLog(L"[DEMUX] Starting Demux-MPEGTS streaming for " + tab.channel + L" (" + standardQuality + L") with separate video/audio streams");
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -943,7 +943,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
         g_hMainWnd, // main window handle for auto-stop messages
         tabIndex, // tab index for identifying which stream to auto-stop
         originalQuality, // selected quality for ad recovery
-        mode, // streaming mode (HLS or Transport Stream)
+        mode, // streaming mode (DEMUX_MPEGTS_STREAMS for separate video/audio)
         &tab.playerProcess // player process handle for monitoring
     );
     

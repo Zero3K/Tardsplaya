@@ -3,6 +3,7 @@
 #include "tsduck_transport_router.h"
 #include "stream_resource_manager.h"
 #include "tx_queue_ipc.h"
+#include "demux_mpegts_wrapper.h"
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
@@ -126,6 +127,140 @@ std::thread StartStreamThread(
                     log_callback(L"[TX-QUEUE] Streaming stopped by user.");
                 } else {
                     log_callback(L"[TX-QUEUE] Stream ended normally.");
+                    // Post auto-stop message for this specific tab
+                    if (main_window && tab_index != SIZE_MAX) {
+                        AddDebugLog(L"StartStreamThread: Posting auto-stop for tab " + std::to_wstring(tab_index));
+                        PostMessage(main_window, WM_USER + 2, (WPARAM)tab_index, 0);
+                    }
+                }
+            }
+        });
+    }
+    
+    // Check for Demux-MPEGTS mode (separate video/audio streams for discontinuity recovery)
+    if (mode == StreamingMode::DEMUX_MPEGTS_STREAMS) {
+        return std::thread([=, &cancel_token]() mutable {
+            if (log_callback)
+                log_callback(L"Starting Demux-MPEGTS streaming thread for " + channel_name);
+            
+            AddDebugLog(L"StartStreamThread: Demux-MPEGTS mode - Channel=" + channel_name + 
+                       L", Tab=" + std::to_wstring(tab_index) + 
+                       L", BufferSegs=" + std::to_wstring(buffer_segments));
+            
+            try {
+                // Create demux wrapper with separate video/audio streams
+                auto demux_wrapper = tardsplaya::CreateDemuxWrapper(
+                    player_path,
+                    true,  // Enable separate streams
+                    g_verboseDebug  // Enable debug logging if verbose debug is on
+                );
+                
+                if (!demux_wrapper) {
+                    if (log_callback) {
+                        log_callback(L"[DEMUX] Failed to create demux wrapper");
+                    }
+                    return;
+                }
+                
+                // Start demuxing
+                if (!demux_wrapper->StartDemuxing(playlist_url, cancel_token, log_callback)) {
+                    if (log_callback) {
+                        log_callback(L"[DEMUX] Failed to start demuxing");
+                    }
+                    return;
+                }
+                
+                // Store player process handles if pointer provided
+                if (player_process_handle) {
+                    // For demux mode, we have two players - store the video player handle
+                    *player_process_handle = demux_wrapper->GetVideoPlayerProcess();
+                }
+                
+                if (log_callback) {
+                    log_callback(L"[DEMUX] Demux-MPEGTS streaming active for " + channel_name + L" (separate video/audio)");
+                }
+                
+                // Monitor demuxing while active
+                while (demux_wrapper->IsDemuxing() && !cancel_token.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    
+                    // Report statistics
+                    auto stats = demux_wrapper->GetStats();
+                    
+                    // Update chunk count for status bar (use buffered packets as indicator)
+                    if (chunk_count) {
+                        *chunk_count = static_cast<int>(stats.buffered_video_packets + stats.buffered_audio_packets);
+                    }
+                    
+                    // Periodic logging with detailed statistics
+                    if (log_callback && stats.total_packets_processed % 100 == 0 && stats.total_packets_processed > 0) {
+                        std::wstring status_msg = L"[DEMUX] Processed: " + std::to_wstring(stats.total_packets_processed) + 
+                                   L" packets, Video: " + std::to_wstring(stats.video_packets_processed) + 
+                                   L", Audio: " + std::to_wstring(stats.audio_packets_processed);
+                        
+                        if (stats.error_packets > 0) {
+                            status_msg += L", Errors: " + std::to_wstring(stats.error_packets);
+                        }
+                        
+                        status_msg += L", FPS: " + std::to_wstring(static_cast<int>(stats.demux_fps));
+                        
+                        // Add stream health indicators
+                        if (!stats.video_stream_healthy) {
+                            status_msg += L" [VIDEO UNHEALTHY]";
+                        }
+                        if (!stats.audio_stream_healthy) {
+                            status_msg += L" [AUDIO UNHEALTHY]";
+                        }
+                        
+                        log_callback(status_msg);
+                    }
+                    
+                    // Check for errors and attempt recovery
+                    if (demux_wrapper->HasStreamErrors()) {
+                        auto errors = demux_wrapper->GetLastErrors();
+                        if (!errors.empty() && log_callback) {
+                            log_callback(L"[DEMUX] Recent errors detected, attempting recovery...");
+                        }
+                        
+                        // Trigger recovery from discontinuity
+                        demux_wrapper->RecoverFromDiscontinuity();
+                    }
+                    
+                    // Check if we should break due to stream failure
+                    if (!stats.video_stream_healthy && !stats.audio_stream_healthy) {
+                        if (log_callback) {
+                            log_callback(L"[DEMUX] Both video and audio streams unhealthy, stopping...");
+                        }
+                        break;
+                    }
+                }
+                
+                // Stop demuxing
+                demux_wrapper->StopDemuxing();
+                
+                if (log_callback) {
+                    log_callback(L"[DEMUX] Demux-MPEGTS streaming completed for " + channel_name);
+                }
+                
+            } catch (const std::exception& e) {
+                std::string error_msg = e.what();
+                if (log_callback) {
+                    log_callback(L"[DEMUX] Error: " + std::wstring(error_msg.begin(), error_msg.end()));
+                }
+                AddDebugLog(L"StartStreamThread: Demux-MPEGTS exception: " + 
+                           std::wstring(error_msg.begin(), error_msg.end()));
+            }
+            
+            AddDebugLog(L"StartStreamThread: Demux-MPEGTS stream finished, Channel=" + channel_name + 
+                       L", Tab=" + std::to_wstring(tab_index));
+            
+            if (log_callback) {
+                bool user_stopped = user_requested_stop && user_requested_stop->load();
+                
+                if (user_stopped) {
+                    log_callback(L"[DEMUX] Streaming stopped by user.");
+                } else {
+                    log_callback(L"[DEMUX] Stream ended normally.");
                     // Post auto-stop message for this specific tab
                     if (main_window && tab_index != SIZE_MAX) {
                         AddDebugLog(L"StartStreamThread: Posting auto-stop for tab " + std::to_wstring(tab_index));
