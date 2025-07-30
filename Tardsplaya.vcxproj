@@ -124,13 +124,25 @@
     <ClCompile Include="urlencode.cpp" />
     <!-- GPAC embedded source files - real integration -->
     <ClCompile Include="gpac\src\gpac_minimal_stubs.c" />
-    <ClCompile Include="gpac\src\utils\os_thread.c" />
-    <ClCompile Include="gpac\src\utils\list.c" />
-    <ClCompile Include="gpac\src\utils\bitstream.c" />
-    <ClCompile Include="gpac\src\utils\error.c" />
-    <ClCompile Include="gpac\src\utils\os_file.c" />
+    <!-- Core utilities -->
     <ClCompile Include="gpac\src\utils\alloc.c" />
+    <ClCompile Include="gpac\src\utils\bitstream.c" />
     <ClCompile Include="gpac\src\utils\configfile.c" />
+    <ClCompile Include="gpac\src\utils\constants.c" />
+    <ClCompile Include="gpac\src\utils\downloader.c" />
+    <ClCompile Include="gpac\src\utils\error.c" />
+    <ClCompile Include="gpac\src\utils\list.c" />
+    <ClCompile Include="gpac\src\utils\math.c" />
+    <ClCompile Include="gpac\src\utils\module.c" />
+    <ClCompile Include="gpac\src\utils\os_config_init.c" />
+    <ClCompile Include="gpac\src\utils\os_divers.c" />
+    <ClCompile Include="gpac\src\utils\os_file.c" />
+    <ClCompile Include="gpac\src\utils\os_net.c" />
+    <ClCompile Include="gpac\src\utils\os_thread.c" />
+    <ClCompile Include="gpac\src\utils\token.c" />
+    <ClCompile Include="gpac\src\utils\url.c" />
+    <ClCompile Include="gpac\src\utils\utf.c" />
+    <!-- Filter core system -->
     <ClCompile Include="gpac\src\filter_core\filter_session.c" />
     <ClCompile Include="gpac\src\filter_core\filter.c" />
     <ClCompile Include="gpac\src\filter_core\filter_pck.c" />
@@ -138,14 +150,25 @@
     <ClCompile Include="gpac\src\filter_core\filter_register.c" />
     <ClCompile Include="gpac\src\filter_core\filter_props.c" />
     <ClCompile Include="gpac\src\filter_core\filter_queue.c" />
+    <!-- Essential filters for HLS and MP4 -->
     <ClCompile Include="gpac\src\filters\dmx_dash.c" />
     <ClCompile Include="gpac\src\filters\mux_isom.c" />
-    <ClCompile Include="gpac\src\media_tools\m3u8.c" />
+    <ClCompile Include="gpac\src\filters\write_generic.c" />
+    <!-- Media tools for HLS processing -->
     <ClCompile Include="gpac\src\media_tools\dash_client.c" />
-    <ClCompile Include="gpac\src\isomedia\isom_write.c" />
-    <ClCompile Include="gpac\src\isomedia\isom_read.c" />
-    <ClCompile Include="gpac\src\isomedia\box_funcs.c" />
+    <ClCompile Include="gpac\src\media_tools\m3u8.c" />
+    <!-- ISO media tools for MP4 -->
     <ClCompile Include="gpac\src\isomedia\box_code_base.c" />
+    <ClCompile Include="gpac\src\isomedia\box_funcs.c" />
+    <ClCompile Include="gpac\src\isomedia\data_map.c" />
+    <ClCompile Include="gpac\src\isomedia\isom_read.c" />
+    <ClCompile Include="gpac\src\isomedia\isom_write.c" />
+    <ClCompile Include="gpac\src\isomedia\media.c" />
+    <ClCompile Include="gpac\src\isomedia\movie_fragments.c" />
+    <ClCompile Include="gpac\src\isomedia\sample_descs.c" />
+    <ClCompile Include="gpac\src\isomedia\stbl_read.c" />
+    <ClCompile Include="gpac\src\isomedia\stbl_write.c" />
+    <ClCompile Include="gpac\src\isomedia\track.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="favorites.h" />
