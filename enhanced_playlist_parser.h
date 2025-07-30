@@ -355,7 +355,7 @@ private:
 // Enhanced playlist parsing with Simple HLS Client integration
 inline EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
     const std::wstring& playlist_content,
-    const std::wstring& base_url = L""
+    const std::wstring& base_url
 ) {
     EnhancedPlaylistParser parser;
     return parser.ParseM3U8MasterPlaylist(playlist_content, base_url);
@@ -387,7 +387,7 @@ inline EnhancedPlaylistResult ParseM3U8MasterPlaylistEnhanced(
  */
 inline std::string FilterDiscontinuitySegments(
     const std::string& playlist_content,
-    const std::string& base_url = ""
+    const std::string& base_url
 ) {
     EnhancedPlaylistParser parser;
     return parser.FilterDiscontinuitySegments(playlist_content, base_url);
