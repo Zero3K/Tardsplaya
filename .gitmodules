@@ -1,0 +1,3 @@
+[submodule "demux-mpegts"]
+	path = demux-mpegts
+	url = https://github.com/janbar/demux-mpegts.git

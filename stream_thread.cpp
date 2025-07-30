@@ -3,6 +3,10 @@
 #include "tsduck_transport_router.h"
 #include "stream_resource_manager.h"
 #include "tx_queue_ipc.h"
+#include "demux_mpegts_integration.h"
+
+// Forward declaration for utility function
+extern std::wstring Utf8ToWide(const std::string& str);
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
@@ -131,6 +135,99 @@ std::thread StartStreamThread(
                         AddDebugLog(L"StartStreamThread: Posting auto-stop for tab " + std::to_wstring(tab_index));
                         PostMessage(main_window, WM_USER + 2, (WPARAM)tab_index, 0);
                     }
+                }
+            }
+        });
+    }
+    
+    // Check for DEMUX_MPEGTS mode (separate video/audio streams)
+    if (mode == StreamingMode::DEMUX_MPEGTS) {
+        return std::thread([=, &cancel_token]() mutable {
+            if (log_callback)
+                log_callback(L"Starting MPEG-TS demux streaming thread for " + channel_name);
+            
+            AddDebugLog(L"StartStreamThread: DEMUX_MPEGTS mode - Channel=" + channel_name + 
+                       L", Tab=" + std::to_wstring(tab_index));
+            
+            try {
+                // Create demux stream manager
+                auto demux_manager = std::make_unique<tardsplaya::DemuxStreamManager>(player_path, channel_name);
+                
+                // Initialize the demux system
+                if (!demux_manager->Initialize()) {
+                    if (log_callback) {
+                        log_callback(L"[DEMUX] Failed to initialize demux system");
+                    }
+                    return;
+                }
+                
+                // Store player process handle if pointer provided
+                if (player_process_handle) {
+                    *player_process_handle = demux_manager->GetPlayerProcess();
+                }
+                
+                // Start demux streaming
+                if (!demux_manager->StartStreaming(playlist_url, cancel_token, log_callback, chunk_count)) {
+                    if (log_callback) {
+                        log_callback(L"[DEMUX] Failed to start demux streaming");
+                    }
+                    return;
+                }
+                
+                if (log_callback) {
+                    log_callback(L"[DEMUX] MPEG-TS demux streaming active for " + channel_name);
+                }
+                
+                // Monitor demux streaming while active
+                while (demux_manager->IsStreaming() && !cancel_token.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+                    
+                    // Report demux statistics
+                    auto stats = demux_manager->GetDemuxStats();
+                    
+                    // Update chunk count for status bar
+                    if (chunk_count) {
+                        *chunk_count = static_cast<int>(stats.total_bytes_processed / 1024); // KB processed
+                    }
+                    
+                    // Periodic logging with detailed statistics
+                    if (log_callback && (stats.total_bytes_processed % (1024 * 1024)) == 0 && stats.total_bytes_processed > 0) {
+                        std::wstring status_msg = L"[DEMUX] Processed: " + std::to_wstring(stats.total_bytes_processed / 1024) + L"KB";
+                        
+                        if (stats.video_streams_count > 0) {
+                            status_msg += L", Video: " + std::to_wstring(stats.video_bytes_written / 1024) + L"KB";
+                        }
+                        if (stats.audio_streams_count > 0) {
+                            status_msg += L", Audio: " + std::to_wstring(stats.audio_bytes_written / 1024) + L"KB";
+                        }
+                        
+                        log_callback(status_msg);
+                    }
+                }
+                
+                // Stop demux streaming
+                demux_manager->StopStreaming();
+                
+                if (log_callback) {
+                    log_callback(L"[DEMUX] MPEG-TS demux streaming stopped for " + channel_name);
+                }
+                
+            } catch (const std::exception& e) {
+                if (log_callback) {
+                    std::string error_msg = e.what();
+                    log_callback(L"[DEMUX] Exception in demux streaming: " + Utf8ToWide(error_msg));
+                }
+                AddDebugLog(L"StartStreamThread: DEMUX exception - " + Utf8ToWide(std::string(e.what())));
+                
+                // Set user_requested_stop to prevent auto-restart
+                if (user_requested_stop) {
+                    user_requested_stop->store(true);
+                }
+                
+                // Post auto-stop message for this specific tab
+                if (main_window && tab_index != SIZE_MAX) {
+                    AddDebugLog(L"StartStreamThread: Posting auto-stop for tab " + std::to_wstring(tab_index));
+                    PostMessage(main_window, WM_USER + 2, (WPARAM)tab_index, 0);
                 }
             }
         });

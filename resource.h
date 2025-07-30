@@ -26,6 +26,7 @@
 #define IDC_BROWSE_PLAYER   1303
 #define IDC_VERBOSE_DEBUG   1304
 #define IDC_LOG_TO_FILE     1305
+#define IDC_STREAMING_MODE  1306
 #define IDC_LOAD        1101
 #define IDC_QUALITIES   1102
 #define IDC_WATCH       1103

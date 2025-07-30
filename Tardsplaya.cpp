@@ -133,6 +133,7 @@ bool g_verboseDebug = false; // Enable verbose debug output for troubleshooting
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
 bool g_logToFile = false; // Enable logging to debug.log file
+StreamingMode g_streamingMode = StreamingMode::TX_QUEUE_IPC; // Default streaming mode
 
 
 
@@ -198,6 +199,10 @@ void LoadSettings() {
     
     // Load verbose debug setting
     g_verboseDebug = GetPrivateProfileIntW(L"Settings", L"VerboseDebug", 0, iniPath.c_str()) != 0;
+    
+    // Load streaming mode setting
+    int streamingModeInt = GetPrivateProfileIntW(L"Settings", L"StreamingMode", static_cast<int>(StreamingMode::TX_QUEUE_IPC), iniPath.c_str());
+    g_streamingMode = static_cast<StreamingMode>(streamingModeInt);
 }
 
 void SaveSettings() {
@@ -225,6 +230,9 @@ void SaveSettings() {
     
     // Save verbose debug setting
     WritePrivateProfileStringW(L"Settings", L"VerboseDebug", g_verboseDebug ? L"1" : L"0", iniPath.c_str());
+    
+    // Save streaming mode setting
+    WritePrivateProfileStringW(L"Settings", L"StreamingMode", std::to_wstring(static_cast<int>(g_streamingMode)).c_str(), iniPath.c_str());
 }
 
 void AddLog(const std::wstring& msg) {
@@ -922,10 +930,29 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
-    // TX-Queue IPC Mode is now the default streaming mode
-    StreamingMode mode = StreamingMode::TX_QUEUE_IPC;
+    // Use the configured streaming mode
+    StreamingMode mode = g_streamingMode;
     
-    AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+    std::wstring modeStr;
+    switch (mode) {
+        case StreamingMode::DEMUX_MPEGTS:
+            modeStr = L"DEMUX_MPEGTS";
+            AddLog(L"[DEMUX] Starting MPEG-TS demux streaming for " + tab.channel + L" (" + standardQuality + L")");
+            break;
+        case StreamingMode::TX_QUEUE_IPC:
+            modeStr = L"TX_QUEUE_IPC";
+            AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+            break;
+        case StreamingMode::TRANSPORT_STREAM:
+            modeStr = L"TRANSPORT_STREAM";
+            AddLog(L"[TS] Starting transport stream streaming for " + tab.channel + L" (" + standardQuality + L")");
+            break;
+        case StreamingMode::HLS_SEGMENTS:
+        default:
+            modeStr = L"HLS_SEGMENTS";
+            AddLog(L"[HLS] Starting HLS segment streaming for " + tab.channel + L" (" + standardQuality + L")");
+            break;
+    }
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -1278,6 +1305,17 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         CheckDlgButton(hDlg, IDC_MINIMIZETOTRAY, g_minimizeToTray ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_VERBOSE_DEBUG, g_verboseDebug ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_LOG_TO_FILE, g_logToFile ? BST_CHECKED : BST_UNCHECKED);
+        
+        // Initialize streaming mode combobox
+        {
+            HWND hCombo = GetDlgItem(hDlg, IDC_STREAMING_MODE);
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"HLS Segments (Fallback)");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Transport Stream (TSDuck)");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"TX-Queue IPC (High Performance)");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"MPEG-TS Demux (Separate A/V)");
+            SendMessage(hCombo, CB_SETCURSEL, static_cast<int>(g_streamingMode), 0);
+        }
+        
         return TRUE;
 
     case WM_COMMAND:
@@ -1316,6 +1354,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_minimizeToTray = IsDlgButtonChecked(hDlg, IDC_MINIMIZETOTRAY) == BST_CHECKED;
             g_verboseDebug = IsDlgButtonChecked(hDlg, IDC_VERBOSE_DEBUG) == BST_CHECKED;
             g_logToFile = IsDlgButtonChecked(hDlg, IDC_LOG_TO_FILE) == BST_CHECKED;
+            
+            // Save streaming mode
+            HWND hCombo = GetDlgItem(hDlg, IDC_STREAMING_MODE);
+            int selectedMode = SendMessage(hCombo, CB_GETCURSEL, 0, 0);
+            if (selectedMode != CB_ERR) {
+                g_streamingMode = static_cast<StreamingMode>(selectedMode);
+            }
             
             // Save settings to INI file
             SaveSettings();
