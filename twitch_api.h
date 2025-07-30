@@ -22,6 +22,10 @@ bool FetchTwitchStreamQualities(
 // Returns the access token in format "signature|token" or empty string on failure
 std::wstring GetModernAccessToken(const std::wstring& channel);
 
+// Generate VOD playlist URL for a channel (alternative to live HLS when discontinuities found)
+// Returns empty string if unable to generate VOD URL
+std::wstring GenerateVodPlaylistUrl(const std::wstring& channel);
+
 // Parse M3U8 playlist using improved logic from TLS client example
 // Returns a map of quality names to stream URLs
 std::map<std::wstring, std::wstring> ParseM3U8Playlist(const std::string& m3u8Content);

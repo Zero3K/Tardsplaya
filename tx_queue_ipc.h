@@ -209,6 +209,15 @@ private:
     std::atomic<int>* chunk_count_ptr_;
     std::atomic<bool>* cancel_token_ptr_;
     
+    // Discontinuity tracking for live VOD switching
+    std::atomic<bool> using_vod_playlist_{false};
+    std::atomic<int> discontinuity_count_{0};
+    std::atomic<int> consecutive_clean_cycles_{0};
+    std::wstring original_playlist_url_;
+    std::wstring vod_playlist_url_;
+    static constexpr int DISCONTINUITY_THRESHOLD = 3;      // Switch to VOD after 3 cycles with discontinuities
+    static constexpr int CLEAN_THRESHOLD = 5;              // Switch back after 5 clean cycles
+    
     // Thread functions
     void ProducerThreadFunction(const std::wstring& playlist_url);
     void ConsumerThreadFunction();
@@ -218,6 +227,12 @@ private:
     bool DownloadSegment(const std::wstring& segment_url, std::vector<char>& segment_data);
     void LogMessage(const std::wstring& message);
     void UpdateChunkCount(int count);
+    
+    // Live VOD switching helpers
+    void HandleDiscontinuityDetection(bool has_discontinuities);
+    std::wstring GetCurrentPlaylistUrl() const;
+    bool SwitchToVodPlaylist();
+    bool SwitchToOriginalPlaylist();
 };
 
 } // namespace tardsplaya
