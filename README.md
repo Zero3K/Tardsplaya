@@ -20,6 +20,19 @@ A Twitch stream player for Windows with enhanced TLS support.
 - **Zero-Copy Operations**: Minimizes memory allocations and data copying
 - **Cross-Stream Isolation**: Each stream uses independent tx-queue for optimal multi-stream performance
 
+## TS Demuxer Integration for Discontinuity Recovery
+
+**TS Demuxer Mode** - Advanced stream processing for better discontinuity handling:
+
+- **Video/Audio Separation**: Demuxes MPEG Transport Stream into separate H.264 video and ADTS AAC audio streams
+- **Discontinuity Recovery**: Helps media players recover from getting stuck on black screen/last frame during discontinuities
+- **Elementary Stream Processing**: Extracts clean elementary streams from TS packets
+- **PAT/PMT Parsing**: Proper MPEG-TS table parsing for accurate stream identification
+- **Memory-Based Processing**: Processes TS data in memory for optimal performance
+- **Real-Time Demuxing**: Processes HLS segments in real-time as they are downloaded
+
+The TS Demuxer mode is particularly useful when streams experience discontinuities that cause media players to freeze on the last video frame while audio continues playing. By sending separated video and audio streams, media players can recover more gracefully from such issues.
+
 ### TX-Queue Technical Details
 
 The TX-Queue integration includes:
@@ -40,11 +53,13 @@ The TX-Queue integration includes:
 | **Multi-Stream Performance** | **Degrades with concurrent streams** | **Scales linearly with isolated tx-queues** |
 | **Data Integrity** | **Basic error handling** | **Built-in checksum validation** |
 | **Throughput** | **Limited by lock contention** | **High-performance lock-free design** |
+| **Discontinuity Handling** | **Raw TS data can cause player freezes** | **Separated A/V streams aid recovery** |
 
-The integration works transparently:
-1. **Primary**: TX-Queue IPC mode for optimal performance (default)
-2. **Fallback**: TSDuck transport stream mode for professional compatibility  
-3. **Legacy**: Traditional HLS segment streaming for maximum compatibility
+The integration works transparently with multiple streaming modes:
+1. **TS Demuxer**: Video/audio separation for discontinuity recovery (recommended for problematic streams)
+2. **TX-Queue IPC**: High-performance lock-free streaming (optimal for stable streams)
+3. **TSDuck Transport Stream**: Professional transport stream mode for compatibility  
+4. **HLS Segments**: Traditional HLS segment streaming for maximum compatibility
 
 ### TX-Queue IPC Mode (Default)
 
@@ -57,6 +72,39 @@ The integration works transparently:
 - **Zero-Copy Design**: Minimizes memory allocations and data movement
 
 TX-Queue IPC Mode provides superior performance and reliability compared to traditional mutex-based streaming.
+
+## TS Demuxer Mode for Discontinuity Recovery
+
+**TS Demuxer Mode** addresses a specific issue where media players get stuck on a black screen or last video frame while audio continues playing after stream discontinuities stop being transmitted. This happens because:
+
+1. **Discontinuity Problem**: When a stream has discontinuities (breaks in transmission), the raw MPEG Transport Stream data can confuse media players
+2. **Player Behavior**: Players may freeze on the last received video frame while continuing to play audio
+3. **Recovery Solution**: By separating video and audio into clean elementary streams, players can recover more gracefully
+
+### How TS Demuxer Works
+
+The TS Demuxer mode processes streams as follows:
+
+1. **Downloads HLS segments** from the playlist like other modes
+2. **Parses MPEG-TS packets** to identify video and audio stream PIDs via PAT/PMT tables
+3. **Extracts elementary streams**:
+   - H.264 video stream (typically PID identified from PMT)
+   - ADTS AAC audio stream (typically PID identified from PMT)
+4. **Sends separated streams** to the media player instead of raw TS data
+5. **Maintains timing information** to help with synchronization
+
+### When to Use TS Demuxer Mode
+
+- Streams that frequently experience discontinuities
+- Channels that cause player freezing/black screen issues
+- Live streams with poor signal quality or transmission issues
+- When you need maximum recovery capability from stream problems
+
+The separated elementary streams help media players:
+- Recover faster from discontinuities
+- Avoid getting stuck on frozen frames
+- Maintain better audio/video synchronization
+- Handle problematic streams more gracefully
 
 ## TLS Client Integration
 
@@ -124,14 +172,27 @@ A C++ application that buffers Twitch streams to media players like MPC-HC, MPC-
 
 ## Configuration
 
-The application defaults to using MPV as the media player. To use a different player:
+The application defaults to using MPV as the media player and TX-Queue IPC streaming mode. To change settings:
 
-1. Go to **Tools → Settings** (when implemented)
-2. Set the player path and arguments
+1. Go to **Tools → Settings**
+2. Configure the following options:
+   - **Player Path**: Path to your preferred media player (default: `mpv.exe`)
+   - **Player Arguments**: Command line arguments for the player (default: `-`)
+   - **Streaming Mode**: Choose from:
+     - **HLS Segments (Legacy)**: Traditional segment-based streaming
+     - **Transport Stream (Professional)**: TSDuck transport stream routing
+     - **TX-Queue IPC (High Performance)**: Lock-free high-performance streaming
+     - **TS Demuxer (Video/Audio Separation)**: Demuxed streams for discontinuity recovery
+   - **Minimize to Tray**: Hide to system tray when minimized
+   - **Verbose Debug**: Enable detailed debug logging
+   - **Log to File**: Save logs to `debug.log` file
 
-Default settings:
-- Player: `mpv.exe`
-- Arguments: `-` (reads from stdin)
+### Streaming Mode Selection
+
+- **Use TS Demuxer mode** when experiencing player freezes during stream discontinuities
+- **Use TX-Queue IPC mode** for optimal performance with stable streams
+- **Use Transport Stream mode** for professional broadcast compatibility
+- **Use HLS Segments mode** for maximum compatibility with older systems
 
 ## Technical Improvements
 

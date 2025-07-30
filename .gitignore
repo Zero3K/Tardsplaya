@@ -418,3 +418,7 @@ demo_exit_fix
 demo_exit_fix.exe
 test_exit_behavior.cpp
 demo_exit_fix.cpp
+
+# TS Demuxer integration files
+ts_demuxer.zip
+ts_demuxer-main/

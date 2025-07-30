@@ -133,6 +133,7 @@ bool g_verboseDebug = false; // Enable verbose debug output for troubleshooting
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
 bool g_logToFile = false; // Enable logging to debug.log file
+StreamingMode g_streamingMode = StreamingMode::TX_QUEUE_IPC; // Default streaming mode
 
 
 
@@ -198,6 +199,14 @@ void LoadSettings() {
     
     // Load verbose debug setting
     g_verboseDebug = GetPrivateProfileIntW(L"Settings", L"VerboseDebug", 0, iniPath.c_str()) != 0;
+    
+    // Load streaming mode setting
+    int streamingModeInt = GetPrivateProfileIntW(L"Settings", L"StreamingMode", static_cast<int>(StreamingMode::TX_QUEUE_IPC), iniPath.c_str());
+    if (streamingModeInt >= 0 && streamingModeInt <= static_cast<int>(StreamingMode::TS_DEMUXER)) {
+        g_streamingMode = static_cast<StreamingMode>(streamingModeInt);
+    } else {
+        g_streamingMode = StreamingMode::TX_QUEUE_IPC; // Default fallback
+    }
 }
 
 void SaveSettings() {
@@ -225,6 +234,9 @@ void SaveSettings() {
     
     // Save verbose debug setting
     WritePrivateProfileStringW(L"Settings", L"VerboseDebug", g_verboseDebug ? L"1" : L"0", iniPath.c_str());
+    
+    // Save streaming mode setting
+    WritePrivateProfileStringW(L"Settings", L"StreamingMode", std::to_wstring(static_cast<int>(g_streamingMode)).c_str(), iniPath.c_str());
 }
 
 void AddLog(const std::wstring& msg) {
@@ -922,10 +934,29 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
-    // TX-Queue IPC Mode is now the default streaming mode
-    StreamingMode mode = StreamingMode::TX_QUEUE_IPC;
+    // Use the selected streaming mode from settings
+    StreamingMode mode = g_streamingMode;
     
-    AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+    std::wstring modeStr;
+    switch (mode) {
+        case StreamingMode::HLS_SEGMENTS:
+            modeStr = L"HLS Segments";
+            break;
+        case StreamingMode::TRANSPORT_STREAM:
+            modeStr = L"Transport Stream";
+            break;
+        case StreamingMode::TX_QUEUE_IPC:
+            modeStr = L"TX-Queue IPC";
+            break;
+        case StreamingMode::TS_DEMUXER:
+            modeStr = L"TS Demuxer (Video/Audio Separation)";
+            break;
+        default:
+            modeStr = L"Unknown";
+            break;
+    }
+    
+    AddLog(L"[" + modeStr + L"] Starting streaming for " + tab.channel + L" (" + standardQuality + L")");
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -958,7 +989,9 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     EnableWindow(tab.hQualities, FALSE);
     EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), FALSE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
-    UpdateStatusBar(L"Buffer: Buffering... | TX-Queue IPC Active");
+    
+    std::wstring statusMsg = L"Buffer: Buffering... | " + modeStr + L" Active";
+    UpdateStatusBar(statusMsg);
     
     AddDebugLog(L"WatchStream: UI updated, stream starting for tab " + std::to_wstring(tabIndex));
     
@@ -1278,6 +1311,17 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         CheckDlgButton(hDlg, IDC_MINIMIZETOTRAY, g_minimizeToTray ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_VERBOSE_DEBUG, g_verboseDebug ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_LOG_TO_FILE, g_logToFile ? BST_CHECKED : BST_UNCHECKED);
+        
+        // Initialize streaming mode combobox
+        {
+            HWND hCombo = GetDlgItem(hDlg, IDC_STREAMING_MODE);
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"HLS Segments (Legacy)");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"Transport Stream (Professional)");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"TX-Queue IPC (High Performance)");
+            SendMessage(hCombo, CB_ADDSTRING, 0, (LPARAM)L"TS Demuxer (Video/Audio Separation)");
+            SendMessage(hCombo, CB_SETCURSEL, static_cast<WPARAM>(g_streamingMode), 0);
+        }
+        
         return TRUE;
 
     case WM_COMMAND:
@@ -1316,6 +1360,13 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_minimizeToTray = IsDlgButtonChecked(hDlg, IDC_MINIMIZETOTRAY) == BST_CHECKED;
             g_verboseDebug = IsDlgButtonChecked(hDlg, IDC_VERBOSE_DEBUG) == BST_CHECKED;
             g_logToFile = IsDlgButtonChecked(hDlg, IDC_LOG_TO_FILE) == BST_CHECKED;
+            
+            // Save streaming mode selection
+            HWND hCombo = GetDlgItem(hDlg, IDC_STREAMING_MODE);
+            int selectedMode = (int)SendMessage(hCombo, CB_GETCURSEL, 0, 0);
+            if (selectedMode >= 0 && selectedMode <= static_cast<int>(StreamingMode::TS_DEMUXER)) {
+                g_streamingMode = static_cast<StreamingMode>(selectedMode);
+            }
             
             // Save settings to INI file
             SaveSettings();
@@ -1550,7 +1601,26 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             } else {
                 // No active streams, stop the timer
                 KillTimer(hwnd, TIMER_CHUNK_UPDATE);
-                UpdateStatusBar(L"Buffer: 0 packets | TX-Queue IPC Ready");
+                
+                std::wstring readyMsg;
+                switch (g_streamingMode) {
+                    case StreamingMode::HLS_SEGMENTS:
+                        readyMsg = L"Buffer: 0 packets | HLS Segments Ready";
+                        break;
+                    case StreamingMode::TRANSPORT_STREAM:
+                        readyMsg = L"Buffer: 0 packets | Transport Stream Ready";
+                        break;
+                    case StreamingMode::TX_QUEUE_IPC:
+                        readyMsg = L"Buffer: 0 packets | TX-Queue IPC Ready";
+                        break;
+                    case StreamingMode::TS_DEMUXER:
+                        readyMsg = L"Buffer: 0 packets | TS Demuxer Ready";
+                        break;
+                    default:
+                        readyMsg = L"Buffer: 0 packets";
+                        break;
+                }
+                UpdateStatusBar(readyMsg);
             }
         }
         break;
