@@ -1,6 +1,7 @@
 #include "tsduck_transport_router.h"
 #include "twitch_api.h"
 #include "playlist_parser.h"
+#include "enhanced_playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
 #define NOMINMAX
@@ -819,6 +820,41 @@ void TransportStreamRouter::HLSFetcherThread(const std::wstring& playlist_url, s
             }
             
             consecutive_failures = 0; // Reset failure counter on success
+            
+            // Apply discontinuity filtering to remove ad segments  
+            std::string original_playlist = playlist_content;
+            try {
+                playlist_content = FilterDiscontinuitySegments(playlist_content);
+                
+                // Count segments filtered
+                std::istringstream original_ss(original_playlist);
+                std::istringstream filtered_ss(playlist_content);
+                std::string line;
+                size_t original_segment_count = 0, filtered_segment_count = 0;
+                
+                while (std::getline(original_ss, line)) {
+                    if (!line.empty() && line[0] != '#') original_segment_count++;
+                }
+                while (std::getline(filtered_ss, line)) {
+                    if (!line.empty() && line[0] != '#') filtered_segment_count++;
+                }
+                
+                size_t segments_removed = (original_segment_count > filtered_segment_count) ? 
+                                        (original_segment_count - filtered_segment_count) : 0;
+                
+                if (segments_removed > 0 && log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Filtered out " + std::to_wstring(segments_removed) + 
+                                 L" discontinuity segments (ads) from playlist");
+                } else if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] No discontinuity segments found to filter");
+                }
+            } catch (const std::exception& e) {
+                if (log_callback_) {
+                    log_callback_(L"[TS_ROUTER] Discontinuity filtering failed, using original playlist - Error: " + 
+                                 std::wstring(e.what(), e.what() + strlen(e.what())));
+                }
+                playlist_content = original_playlist; // Fallback to original
+            }
             
             // Check for stream end before processing segments
             if (playlist_content.find("#EXT-X-ENDLIST") != std::string::npos) {

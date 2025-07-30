@@ -2,6 +2,7 @@
 #include "stream_thread.h"
 #include "twitch_api.h"
 #include "playlist_parser.h"
+#include "enhanced_playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
 #include <winsock2.h>
@@ -907,6 +908,40 @@ bool BufferAndPipeStreamToPlayer(
             consecutive_errors = 0;
             AddDebugLog(L"[DOWNLOAD] Playlist fetch SUCCESS for " + channel_name + 
                        L", size=" + std::to_wstring(playlist.size()) + L" bytes");
+
+            // Apply discontinuity filtering to remove ad segments
+            std::string original_playlist = playlist;
+            try {
+                playlist = FilterDiscontinuitySegments(playlist);
+                size_t segments_removed = 0;
+                
+                // Count segments removed by comparing line counts
+                std::istringstream original_ss(original_playlist);
+                std::istringstream filtered_ss(playlist);
+                std::string line;
+                size_t original_segment_count = 0, filtered_segment_count = 0;
+                
+                while (std::getline(original_ss, line)) {
+                    if (!line.empty() && line[0] != '#') original_segment_count++;
+                }
+                while (std::getline(filtered_ss, line)) {
+                    if (!line.empty() && line[0] != '#') filtered_segment_count++;
+                }
+                
+                segments_removed = (original_segment_count > filtered_segment_count) ? 
+                                 (original_segment_count - filtered_segment_count) : 0;
+                
+                if (segments_removed > 0) {
+                    AddDebugLog(L"[DISCONTINUITY] Filtered out " + std::to_wstring(segments_removed) + 
+                               L" discontinuity segments (ads) from playlist for " + channel_name);
+                } else {
+                    AddDebugLog(L"[DISCONTINUITY] No discontinuity segments found to filter for " + channel_name);
+                }
+            } catch (const std::exception& e) {
+                AddDebugLog(L"[DISCONTINUITY] Filtering failed, using original playlist for " + channel_name + 
+                           L" - Error: " + std::wstring(e.what(), e.what() + strlen(e.what())));
+                playlist = original_playlist; // Fallback to original
+            }
 
             // Check for stream end
             if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
