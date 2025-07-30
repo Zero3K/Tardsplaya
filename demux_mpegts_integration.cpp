@@ -6,7 +6,7 @@
 #include <chrono>
 #include <winhttp.h>
 #include <shellapi.h>
-#include <filesystem>
+#include <direct.h>  // For _wmkdir
 
 // Include existing utility functions
 extern std::string WideToUtf8(const std::wstring& w);
@@ -123,38 +123,46 @@ bool MpegTSDemuxer::ProcessTSData(const char* data, size_t size) {
             // Configure the context if needed
             if (!av_context_->is_configured) {
                 int ret = av_context_->TSResync();
-                if (ret != TSDemux::AVCONTEXT_CONTINUE) {
+                if (ret == TSDemux::AVCONTEXT_CONTINUE) {
                     av_context_->is_configured = true;
                     AddDebugLog(L"[DEMUX] TS stream configured");
                 }
             }
             
             // Process packets
-            while (buffer_pos_ >= FLUTS_NORMAL_TS_PACKETSIZE) {
+            while (av_context_->is_configured && buffer_pos_ >= av_context_->av_pkt_size) {
                 int ret = av_context_->ProcessTSPacket();
                 if (ret == TSDemux::AVCONTEXT_CONTINUE) {
                     // Success - check for new elementary streams
-                    for (auto& stream_pair : av_context_->GetStreams()) {
-                        uint16_t pid = stream_pair.first;
-                        TSDemux::ElementaryStream* es = stream_pair.second;
-                        
-                        if (streams_.find(pid) == streams_.end()) {
-                            CreateOutputStream(pid, es->stream_type);
+                    std::vector<TSDemux::ElementaryStream*> current_streams = av_context_->GetStreams();
+                    
+                    for (TSDemux::ElementaryStream* es : current_streams) {
+                        if (es && streams_.find(es->pid) == streams_.end()) {
+                            CreateOutputStream(es->pid, es->stream_type);
                         }
                         
-                        // Get stream data
-                        const unsigned char* stream_data = nullptr;
-                        size_t stream_size = 0;
-                        if (es->GetStreamData(stream_data, stream_size) && stream_data && stream_size > 0) {
-                            OnStreamData(pid, es->stream_type, stream_data, stream_size);
+                        // Get stream data if available
+                        if (es && es->sample_size > 0 && es->sample_buffer) {
+                            OnStreamData(es->pid, es->stream_type, 
+                                        reinterpret_cast<const unsigned char*>(es->sample_buffer), 
+                                        es->sample_size);
+                            // Reset sample after processing
+                            es->sample_size = 0;
                         }
                     }
                     
                     // Advance stream position
-                    stream_pos_ += FLUTS_NORMAL_TS_PACKETSIZE;
-                    buffer_pos_ -= FLUTS_NORMAL_TS_PACKETSIZE;
+                    stream_pos_ += av_context_->av_pkt_size;
+                    buffer_pos_ -= av_context_->av_pkt_size;
                     if (buffer_pos_ > 0) {
-                        memmove(buffer_.get(), buffer_.get() + FLUTS_NORMAL_TS_PACKETSIZE, buffer_pos_);
+                        memmove(buffer_.get(), buffer_.get() + av_context_->av_pkt_size, buffer_pos_);
+                    }
+                } else if (ret == TSDemux::AVCONTEXT_CONTINUE_NEXT) {
+                    // Continue with next packet
+                    stream_pos_ += av_context_->av_pkt_size;
+                    buffer_pos_ -= av_context_->av_pkt_size;
+                    if (buffer_pos_ > 0) {
+                        memmove(buffer_.get(), buffer_.get() + av_context_->av_pkt_size, buffer_pos_);
                     }
                 } else {
                     // Error or need more data
@@ -444,19 +452,18 @@ std::wstring DemuxStreamManager::GenerateUniqueOutputDirectory() {
 }
 
 bool DemuxStreamManager::CreateOutputDirectory() {
-    try {
-        std::filesystem::path dir_path(output_dir_);
-        if (std::filesystem::create_directories(dir_path)) {
-            AddDebugLog(L"[DEMUX] Created output directory: " + output_dir_);
-            return true;
-        } else if (std::filesystem::exists(dir_path)) {
-            AddDebugLog(L"[DEMUX] Output directory already exists: " + output_dir_);
-            return true;
-        }
-    } catch (const std::exception& e) {
-        AddDebugLog(L"[DEMUX] Exception creating directory: " + Utf8ToWide(e.what()));
+    // Use Windows API to create directory
+    int result = _wmkdir(output_dir_.c_str());
+    if (result == 0) {
+        AddDebugLog(L"[DEMUX] Created output directory: " + output_dir_);
+        return true;
+    } else if (errno == EEXIST) {
+        AddDebugLog(L"[DEMUX] Output directory already exists: " + output_dir_);
+        return true;
+    } else {
+        AddDebugLog(L"[DEMUX] Failed to create output directory: " + output_dir_);
+        return false;
     }
-    return false;
 }
 
 void DemuxStreamManager::DownloadThreadFunction(const std::wstring& playlist_url) {
