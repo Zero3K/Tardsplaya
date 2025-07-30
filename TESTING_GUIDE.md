@@ -116,7 +116,26 @@ wine Tardsplaya.exe
 5. Malformed API responses ✓
 ```
 
-### **Phase 4: Windows 7 Specific**
+### **Phase 4: Live VOD Switching Testing**
+**NEW**: Test automatic discontinuity handling and playlist switching:
+
+```
+1. Start stream on channel with ad breaks ✓
+2. Monitor debug logs for discontinuity detection ✓
+3. Verify automatic switch to VOD playlist ✓
+4. Confirm smooth playback during transition ✓
+5. Wait for clean stream periods ✓
+6. Verify switch back to original playlist ✓
+7. Test multiple discontinuity/recovery cycles ✓
+```
+
+**Debug Log Indicators**:
+- `[PRODUCER] Discontinuities detected in playlist`
+- `[LIVE-VOD] Discontinuity threshold reached (3/3), switching to VOD playlist`
+- `[LIVE-VOD] Clean playback restored (5/5), switching back to original playlist`
+- `[LIVE-VOD] Switched to VOD playlist: https://usher.ttvnw.net/...`
+
+### **Phase 5: Windows 7 Specific**
 ```
 1. Run on clean Windows 7 VM ✓
 2. Test without updated certificates ✓

@@ -58,6 +58,18 @@ The integration works transparently:
 
 TX-Queue IPC Mode provides superior performance and reliability compared to traditional mutex-based streaming.
 
+### Live VOD Switching for Discontinuity Handling
+
+**Smart Playlist Switching**: Automatic detection and handling of stream discontinuities:
+
+- **Discontinuity Detection**: Uses TSDuck HLS wrapper to detect stream discontinuities in real-time
+- **Automatic VOD Switching**: Switches to VOD-style playlist when discontinuities persist (3+ cycles)
+- **Seamless Recovery**: Returns to original playlist when stream quality stabilizes (5+ clean cycles)
+- **Minimal Disruption**: Maintains playback continuity during playlist transitions
+- **Configurable Thresholds**: Tunable sensitivity for different streaming conditions
+
+This feature addresses ad insertion discontinuities and stream quality issues by dynamically switching between live HLS and VOD-style playlists based on detected discontinuities, ensuring smooth playback experience.
+
 ## TLS Client Integration
 
 This version includes an integrated TLS client from the [tlsclient](https://github.com/zero3k/tlsclient) repository, providing:
