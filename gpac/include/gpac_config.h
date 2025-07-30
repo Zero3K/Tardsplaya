@@ -7,9 +7,18 @@
 // Platform detection
 #ifdef _WIN32
 #define WIN32 1
+#define GPAC_CONFIG_WIN32 1
 #define GPAC_DISABLE_IPV6 1
 #else
 #define UNIX 1
+#define GPAC_CONFIG_LINUX 1
+// Define platform for configuration header
+#ifndef GPAC_CONFIG_STATIC
+#define GPAC_CONFIG_STATIC 1
+#endif
+#ifndef GPAC_STATIC_MODULES
+#define GPAC_STATIC_MODULES 1
+#endif
 #endif
 
 // Essential features for HLS processing

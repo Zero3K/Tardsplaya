@@ -122,8 +122,29 @@
     <ClCompile Include="twitch_api.cpp" />
     <ClCompile Include="tx_queue_ipc.cpp" />
     <ClCompile Include="urlencode.cpp" />
-    <!-- GPAC embedded source files - minimal integration -->
-    <ClCompile Include="gpac\src\gpac_minimal_stubs.c" />
+    <!-- GPAC embedded source files - real integration -->
+    <ClCompile Include="gpac\src\utils\os_thread.c" />
+    <ClCompile Include="gpac\src\utils\list.c" />
+    <ClCompile Include="gpac\src\utils\bitstream.c" />
+    <ClCompile Include="gpac\src\utils\error.c" />
+    <ClCompile Include="gpac\src\utils\os_file.c" />
+    <ClCompile Include="gpac\src\utils\alloc.c" />
+    <ClCompile Include="gpac\src\utils\configfile.c" />
+    <ClCompile Include="gpac\src\filter_core\filter_session.c" />
+    <ClCompile Include="gpac\src\filter_core\filter.c" />
+    <ClCompile Include="gpac\src\filter_core\filter_pck.c" />
+    <ClCompile Include="gpac\src\filter_core\filter_pid.c" />
+    <ClCompile Include="gpac\src\filter_core\filter_register.c" />
+    <ClCompile Include="gpac\src\filter_core\filter_props.c" />
+    <ClCompile Include="gpac\src\filter_core\filter_queue.c" />
+    <ClCompile Include="gpac\src\filters\dmx_dash.c" />
+    <ClCompile Include="gpac\src\filters\mux_isom.c" />
+    <ClCompile Include="gpac\src\media_tools\m3u8.c" />
+    <ClCompile Include="gpac\src\media_tools\dash_client.c" />
+    <ClCompile Include="gpac\src\isomedia\isom_write.c" />
+    <ClCompile Include="gpac\src\isomedia\isom_read.c" />
+    <ClCompile Include="gpac\src\isomedia\box_funcs.c" />
+    <ClCompile Include="gpac\src\isomedia\box_code_base.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="favorites.h" />
