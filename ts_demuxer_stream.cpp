@@ -321,9 +321,13 @@ bool MemoryTSDemuxer::ParsePMT(const unsigned char* payload, unsigned int length
         if (video_pid_ == 0) {
             if (stream_type == 0x1B ||  // H.264/AVC
                 stream_type == 0x24 ||  // H.265/HEVC 
+                stream_type == 0x27 ||  // H.265/HEVC (alternate)
                 stream_type == 0x02) {  // MPEG-2 Video
                 video_pid_ = stream_pid;
                 AddDebugLog(L"[TS_DEMUX] Found video stream - Type: 0x" + std::to_wstring(stream_type) + 
+                           L", PID: 0x" + std::to_wstring(stream_pid) + L" (ASSIGNED)");
+            } else {
+                AddDebugLog(L"[TS_DEMUX] Ignoring video stream type 0x" + std::to_wstring(stream_type) + 
                            L", PID: 0x" + std::to_wstring(stream_pid));
             }
         }
@@ -331,10 +335,14 @@ bool MemoryTSDemuxer::ParsePMT(const unsigned char* payload, unsigned int length
         if (audio_pid_ == 0) {
             if (stream_type == 0x0F ||  // ADTS AAC
                 stream_type == 0x11 ||  // LATM AAC
+                stream_type == 0x15 ||  // AAC elementary stream
                 stream_type == 0x03 ||  // MPEG-1 Audio
                 stream_type == 0x04) {  // MPEG-2 Audio
                 audio_pid_ = stream_pid;
                 AddDebugLog(L"[TS_DEMUX] Found audio stream - Type: 0x" + std::to_wstring(stream_type) + 
+                           L", PID: 0x" + std::to_wstring(stream_pid) + L" (ASSIGNED)");
+            } else {
+                AddDebugLog(L"[TS_DEMUX] Ignoring audio stream type 0x" + std::to_wstring(stream_type) + 
                            L", PID: 0x" + std::to_wstring(stream_pid));
             }
         }
@@ -349,8 +357,16 @@ bool MemoryTSDemuxer::ParsePES(const unsigned char* payload, unsigned int length
     if (!unit_start || length < 3) {
         // Continue with existing PES packet or insufficient data
         if (pid == video_pid_ && video_handler_ && length > 0) {
+            static int video_continuation_count = 0;
+            if (++video_continuation_count <= 3) {
+                AddDebugLog(L"[TS_DEMUX] Writing video continuation data - " + std::to_wstring(length) + L" bytes");
+            }
             return video_handler_(payload, length);
         } else if (pid == audio_pid_ && audio_handler_ && length > 0) {
+            static int audio_continuation_count = 0;
+            if (++audio_continuation_count <= 3) {
+                AddDebugLog(L"[TS_DEMUX] Writing audio continuation data - " + std::to_wstring(length) + L" bytes");
+            }
             return audio_handler_(payload, length);
         }
         return true;
@@ -369,16 +385,32 @@ bool MemoryTSDemuxer::ParsePES(const unsigned char* payload, unsigned int length
             unsigned int es_len = length - pes_header_len;
             
             if (pid == video_pid_ && video_handler_) {
+                static int video_pes_count = 0;
+                if (++video_pes_count <= 3) {
+                    AddDebugLog(L"[TS_DEMUX] Writing video PES data - " + std::to_wstring(es_len) + L" bytes");
+                }
                 return video_handler_(es_data, es_len);
             } else if (pid == audio_pid_ && audio_handler_) {
+                static int audio_pes_count = 0;
+                if (++audio_pes_count <= 3) {
+                    AddDebugLog(L"[TS_DEMUX] Writing audio PES data - " + std::to_wstring(es_len) + L" bytes");
+                }
                 return audio_handler_(es_data, es_len);
             }
         }
     } else {
         // No PES start code - treat as raw elementary stream data
         if (pid == video_pid_ && video_handler_) {
+            static int video_raw_count = 0;
+            if (++video_raw_count <= 3) {
+                AddDebugLog(L"[TS_DEMUX] Writing raw video data - " + std::to_wstring(length) + L" bytes");
+            }
             return video_handler_(payload, length);
         } else if (pid == audio_pid_ && audio_handler_) {
+            static int audio_raw_count = 0;
+            if (++audio_raw_count <= 3) {
+                AddDebugLog(L"[TS_DEMUX] Writing raw audio data - " + std::to_wstring(length) + L" bytes");
+            }
             return audio_handler_(payload, length);
         }
     }
