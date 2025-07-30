@@ -51,6 +51,8 @@ bool MemoryTSDemuxer::Initialize(const char* buffer, size_t buffer_size) {
     buffer_size_ = buffer_size;
     current_offset_ = 0;
     
+    AddDebugLog(L"[TS_DEMUX] Initializing demuxer with " + std::to_wstring(buffer_size) + L" bytes");
+    
     // Reset state
     pmt_pid_ = 0;
     pcr_pid_ = 0;
@@ -58,40 +60,56 @@ bool MemoryTSDemuxer::Initialize(const char* buffer, size_t buffer_size) {
     audio_pid_ = 0;
     memset(&stats_, 0, sizeof(stats_));
     
-    return DetectPacketSize();
+    bool result = DetectPacketSize();
+    if (!result) {
+        AddDebugLog(L"[TS_DEMUX] Failed to detect packet size - stream may not be valid MPEG-TS");
+    }
+    return result;
 }
 
 bool MemoryTSDemuxer::DetectPacketSize() {
     if (!buffer_ || buffer_size_ < 1024) return false;
     
-    // Look for sync bytes to determine packet size
+    // Look for sync bytes to determine packet size - require multiple consistent sync bytes
     for (size_t i = 0; i < std::min(buffer_size_, size_t(512)); i++) {
         if (buffer_[i] == 0x47) { // TS sync byte
             // Check for consistent sync bytes at 188, 192, or 204 byte intervals
-            bool found_188 = false, found_192 = false, found_204 = false;
+            // Require at least 2-3 consecutive sync bytes for confidence
+            int found_188 = 0, found_192 = 0, found_204 = 0;
             
-            if (i + 188 < buffer_size_ && buffer_[i + 188] == 0x47) found_188 = true;
-            if (i + 192 < buffer_size_ && buffer_[i + 192] == 0x47) found_192 = true;
-            if (i + 204 < buffer_size_ && buffer_[i + 204] == 0x47) found_204 = true;
+            for (int check = 0; check < 3; check++) {
+                size_t pos_188 = i + (check + 1) * 188;
+                size_t pos_192 = i + (check + 1) * 192;
+                size_t pos_204 = i + (check + 1) * 204;
+                
+                if (pos_188 < buffer_size_ && buffer_[pos_188] == 0x47) found_188++;
+                if (pos_192 < buffer_size_ && buffer_[pos_192] == 0x47) found_192++;
+                if (pos_204 < buffer_size_ && buffer_[pos_204] == 0x47) found_204++;
+            }
             
-            if (found_188) {
+            // Choose the packet size with the most consecutive sync bytes
+            if (found_188 >= 2) {
                 packet_size_ = 188;
                 current_offset_ = i;
+                AddDebugLog(L"[TS_DEMUX] Detected packet size: 188 bytes at offset " + std::to_wstring(i));
                 return true;
             }
-            if (found_192) {
+            if (found_192 >= 2) {
                 packet_size_ = 192;
                 current_offset_ = i;
+                AddDebugLog(L"[TS_DEMUX] Detected packet size: 192 bytes at offset " + std::to_wstring(i));
                 return true;
             }
-            if (found_204) {
+            if (found_204 >= 2) {
                 packet_size_ = 204;
                 current_offset_ = i;
+                AddDebugLog(L"[TS_DEMUX] Detected packet size: 204 bytes at offset " + std::to_wstring(i));
                 return true;
             }
         }
     }
     
+    AddDebugLog(L"[TS_DEMUX] Failed to detect consistent packet size in buffer of " + std::to_wstring(buffer_size_) + L" bytes");
     return false;
 }
 
@@ -158,6 +176,12 @@ bool MemoryTSDemuxer::Process() {
     stats_.pcr_pid = pcr_pid_;
     stats_.has_video = (video_pid_ != 0);
     stats_.has_audio = (audio_pid_ != 0);
+    
+    // Log completion summary
+    AddDebugLog(L"[TS_DEMUX] Processing complete - Packets: " + std::to_wstring(stats_.packets_processed) + 
+               L", Video PID: 0x" + std::to_wstring(video_pid_) + 
+               L", Audio PID: 0x" + std::to_wstring(audio_pid_) + 
+               L", PMT PID: 0x" + std::to_wstring(pmt_pid_));
     
     return true;
 }
