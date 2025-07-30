@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <regex>
 #include <chrono>
+#include <algorithm>
 #include <winhttp.h>
 #include <random>
 #include <set>
@@ -318,33 +319,28 @@ bool MemoryTSDemuxer::ParsePMT(const unsigned char* payload, unsigned int length
         if (i + 5 + es_info_len > streams_len) break;
         
         // Identify video and audio streams - support more formats
-        if (video_pid_ == 0) {
-            if (stream_type == 0x1B ||  // H.264/AVC
-                stream_type == 0x24 ||  // H.265/HEVC 
-                stream_type == 0x27 ||  // H.265/HEVC (alternate)
-                stream_type == 0x02) {  // MPEG-2 Video
-                video_pid_ = stream_pid;
-                AddDebugLog(L"[TS_DEMUX] Found video stream - Type: 0x" + std::to_wstring(stream_type) + 
-                           L", PID: 0x" + std::to_wstring(stream_pid) + L" (ASSIGNED)");
-            } else {
-                AddDebugLog(L"[TS_DEMUX] Ignoring video stream type 0x" + std::to_wstring(stream_type) + 
-                           L", PID: 0x" + std::to_wstring(stream_pid));
-            }
-        }
-        
-        if (audio_pid_ == 0) {
-            if (stream_type == 0x0F ||  // ADTS AAC
-                stream_type == 0x11 ||  // LATM AAC
-                stream_type == 0x15 ||  // AAC elementary stream
-                stream_type == 0x03 ||  // MPEG-1 Audio
-                stream_type == 0x04) {  // MPEG-2 Audio
-                audio_pid_ = stream_pid;
-                AddDebugLog(L"[TS_DEMUX] Found audio stream - Type: 0x" + std::to_wstring(stream_type) + 
-                           L", PID: 0x" + std::to_wstring(stream_pid) + L" (ASSIGNED)");
-            } else {
-                AddDebugLog(L"[TS_DEMUX] Ignoring audio stream type 0x" + std::to_wstring(stream_type) + 
-                           L", PID: 0x" + std::to_wstring(stream_pid));
-            }
+        bool is_video_type = (stream_type == 0x1B ||  // H.264/AVC
+                              stream_type == 0x24 ||  // H.265/HEVC 
+                              stream_type == 0x27 ||  // H.265/HEVC (alternate)
+                              stream_type == 0x02);   // MPEG-2 Video
+                              
+        bool is_audio_type = (stream_type == 0x0F ||  // ADTS AAC
+                              stream_type == 0x11 ||  // LATM AAC
+                              stream_type == 0x15 ||  // AAC elementary stream
+                              stream_type == 0x03 ||  // MPEG-1 Audio
+                              stream_type == 0x04);   // MPEG-2 Audio
+                              
+        if (is_video_type && video_pid_ == 0) {
+            video_pid_ = stream_pid;
+            AddDebugLog(L"[TS_DEMUX] Found video stream - Type: 0x" + std::to_wstring(stream_type) + 
+                       L", PID: 0x" + std::to_wstring(stream_pid) + L" (ASSIGNED)");
+        } else if (is_audio_type && audio_pid_ == 0) {
+            audio_pid_ = stream_pid;
+            AddDebugLog(L"[TS_DEMUX] Found audio stream - Type: 0x" + std::to_wstring(stream_type) + 
+                       L", PID: 0x" + std::to_wstring(stream_pid) + L" (ASSIGNED)");
+        } else if (!is_video_type && !is_audio_type) {
+            AddDebugLog(L"[TS_DEMUX] Ignoring unknown stream type 0x" + std::to_wstring(stream_type) + 
+                       L", PID: 0x" + std::to_wstring(stream_pid));
         }
         
         i += 5 + es_info_len;
@@ -451,13 +447,16 @@ TSDemuxerStreamManager::TSDemuxerStreamManager(const std::wstring& player_path, 
     : player_path_(player_path), channel_name_(channel_name),
       player_process_(INVALID_HANDLE_VALUE), 
       video_pipe_(INVALID_HANDLE_VALUE), 
-      audio_pipe_(INVALID_HANDLE_VALUE) {
+      audio_pipe_(INVALID_HANDLE_VALUE),
+      video_file_handle_(INVALID_HANDLE_VALUE),
+      audio_file_handle_(INVALID_HANDLE_VALUE) {
     memset(&process_info_, 0, sizeof(process_info_));
 }
 
 TSDemuxerStreamManager::~TSDemuxerStreamManager() {
     StopStreaming();
     Cleanup();
+    CleanupTempFiles();
 }
 
 bool TSDemuxerStreamManager::Initialize() {
@@ -480,9 +479,9 @@ bool TSDemuxerStreamManager::StartStreaming(
     cancel_token_ptr_ = &cancel_token;
     should_stop_ = false;
     
-    // Create player with named pipes for video and audio
-    if (!CreatePlayerWithPipes()) {
-        LogMessage(L"Failed to create player with pipes");
+    // Create temporary files first but don't start player yet
+    if (!CreateTempFiles()) {
+        LogMessage(L"Failed to create temporary files for video/audio separation");
         return false;
     }
     
@@ -506,6 +505,120 @@ void TSDemuxerStreamManager::StopStreaming() {
         Cleanup();
         LogMessage(L"TS Demuxer streaming stopped for " + channel_name_);
     }
+}
+
+bool TSDemuxerStreamManager::CreateTempFiles() {
+    // Create temporary directory for video/audio files
+    wchar_t temp_path[MAX_PATH];
+    DWORD temp_len = GetTempPathW(MAX_PATH, temp_path);
+    if (temp_len == 0) {
+        AddDebugLog(L"[TS_DEMUX] Failed to get temp path");
+        return false;
+    }
+    
+    // Generate unique filenames
+    std::wstring temp_prefix = std::wstring(temp_path) + L"tardsplaya_ts_";
+    
+    // Create video file
+    video_file_path_ = temp_prefix + L"video_" + std::to_wstring(GetCurrentProcessId()) + L".h264";
+    video_file_handle_ = CreateFileW(
+        video_file_path_.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
+        nullptr
+    );
+    
+    if (video_file_handle_ == INVALID_HANDLE_VALUE) {
+        AddDebugLog(L"[TS_DEMUX] Failed to create video temp file: " + video_file_path_);
+        return false;
+    }
+    
+    // Create audio file
+    audio_file_path_ = temp_prefix + L"audio_" + std::to_wstring(GetCurrentProcessId()) + L".aac";
+    audio_file_handle_ = CreateFileW(
+        audio_file_path_.c_str(),
+        GENERIC_WRITE,
+        FILE_SHARE_READ,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE,
+        nullptr
+    );
+    
+    if (audio_file_handle_ == INVALID_HANDLE_VALUE) {
+        CloseHandle(video_file_handle_);
+        video_file_handle_ = INVALID_HANDLE_VALUE;
+        AddDebugLog(L"[TS_DEMUX] Failed to create audio temp file: " + audio_file_path_);
+        return false;
+    }
+    
+    AddDebugLog(L"[TS_DEMUX] Created temp files - Video: " + video_file_path_ + L", Audio: " + audio_file_path_);
+    return true;
+}
+
+void TSDemuxerStreamManager::CleanupTempFiles() {
+    if (video_file_handle_ != INVALID_HANDLE_VALUE) {
+        CloseHandle(video_file_handle_);
+        video_file_handle_ = INVALID_HANDLE_VALUE;
+        // File will be auto-deleted due to FILE_FLAG_DELETE_ON_CLOSE
+    }
+    
+    if (audio_file_handle_ != INVALID_HANDLE_VALUE) {
+        CloseHandle(audio_file_handle_);
+        audio_file_handle_ = INVALID_HANDLE_VALUE;
+        // File will be auto-deleted due to FILE_FLAG_DELETE_ON_CLOSE
+    }
+    
+    video_file_path_.clear();
+    audio_file_path_.clear();
+}
+
+bool TSDemuxerStreamManager::StartPlayerWithFiles() {
+    // Files should already be created by CreateTempFiles()
+    if (video_file_handle_ == INVALID_HANDLE_VALUE || audio_file_handle_ == INVALID_HANDLE_VALUE) {
+        LogMessage(L"Temp files not ready for player start");
+        return false;
+    }
+    
+    // Determine player type and build command line
+    std::wstring player_name = player_path_;
+    std::transform(player_name.begin(), player_name.end(), player_name.begin(), ::towlower);
+    
+    std::wstring cmdline;
+    if (player_name.find(L"mpv") != std::wstring::npos) {
+        // MPV supports --audio-file= for separate audio track
+        cmdline = L"\"" + player_path_ + L"\" --audio-file=\"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+    } else if (player_name.find(L"mpc") != std::wstring::npos || player_name.find(L"mphc") != std::wstring::npos) {
+        // MPC-HC supports /dub for separate audio track  
+        cmdline = L"\"" + player_path_ + L"\" /dub \"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+    } else {
+        // Default: try MPV syntax
+        cmdline = L"\"" + player_path_ + L"\" --audio-file=\"" + audio_file_path_ + L"\" \"" + video_file_path_ + L"\"";
+    }
+    
+    AddDebugLog(L"[TS_DEMUX] Player command: " + cmdline);
+    
+    STARTUPINFOW si = { sizeof(si) };
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    
+    wchar_t* cmdline_buf = _wcsdup(cmdline.c_str());
+    BOOL result = CreateProcessW(nullptr, cmdline_buf, nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &process_info_);
+    free(cmdline_buf);
+    
+    if (!result) {
+        AddDebugLog(L"[TS_DEMUX] Failed to create player process");
+        return false;
+    }
+    
+    player_process_ = process_info_.hProcess;
+    LogMessage(L"TS Demuxer player started with separate video/audio files");
+    return true;
 }
 
 bool TSDemuxerStreamManager::CreatePlayerWithPipes() {
@@ -555,6 +668,8 @@ void TSDemuxerStreamManager::StreamingThreadFunction(const std::wstring& playlis
     
     try {
         std::vector<std::wstring> segment_urls;
+        bool player_started = false;
+        int segments_before_player_start = 2; // Process 2 segments before starting player
         
         while (!should_stop_.load() && !cancel_token_ptr_->load()) {
             // Download playlist and get segment URLs
@@ -573,6 +688,17 @@ void TSDemuxerStreamManager::StreamingThreadFunction(const std::wstring& playlis
                     if (ProcessSegmentWithDemuxer(segment_data)) {
                         segments_processed_++;
                         bytes_transferred_ += segment_data.size();
+                        
+                        // Start player after processing initial segments
+                        if (!player_started && segments_processed_ >= segments_before_player_start) {
+                            LogMessage(L"Starting player after processing " + std::to_wstring(segments_processed_) + L" segments");
+                            if (StartPlayerWithFiles()) {
+                                player_started = true;
+                                LogMessage(L"Player started successfully with separate video/audio files");
+                            } else {
+                                LogMessage(L"Failed to start player - continuing to write files");
+                            }
+                        }
                         
                         if (chunk_count_ptr_) {
                             *chunk_count_ptr_ = static_cast<int>(segments_processed_.load());
@@ -632,9 +758,9 @@ bool TSDemuxerStreamManager::ProcessSegmentWithDemuxer(const std::vector<char>& 
         if (video_output_) {
             return video_output_->WriteData(data, length);
         }
-        // Write directly to pipe for now
+        // Write directly to video file
         DWORD written;
-        return WriteFile(video_pipe_, data, length, &written, nullptr) && written == length;
+        return WriteFile(video_file_handle_, data, length, &written, nullptr) && written == length;
     });
     
     demuxer.SetAudioOutput([this](const unsigned char* data, unsigned int length) -> bool {
@@ -642,12 +768,22 @@ bool TSDemuxerStreamManager::ProcessSegmentWithDemuxer(const std::vector<char>& 
         if (audio_output_) {
             return audio_output_->WriteData(data, length);
         }
-        // Write directly to pipe for now
+        // Write directly to audio file
         DWORD written;
-        return WriteFile(audio_pipe_, data, length, &written, nullptr) && written == length;
+        return WriteFile(audio_file_handle_, data, length, &written, nullptr) && written == length;
     });
     
-    return demuxer.Process();
+    bool result = demuxer.Process();
+    
+    // Flush the file handles to ensure data is written
+    if (video_file_handle_ != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(video_file_handle_);
+    }
+    if (audio_file_handle_ != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(audio_file_handle_);
+    }
+    
+    return result;
 }
 
 void TSDemuxerStreamManager::LogMessage(const std::wstring& message) {
@@ -682,6 +818,9 @@ void TSDemuxerStreamManager::Cleanup() {
         CloseHandle(process_info_.hThread);
         process_info_.hThread = nullptr;
     }
+    
+    // Clean up temporary files
+    CleanupTempFiles();
 }
 
 TSDemuxerStreamManager::DemuxerStats TSDemuxerStreamManager::GetStats() const {
