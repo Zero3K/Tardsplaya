@@ -53,7 +53,7 @@ MpegTSDemuxer::MpegTSDemuxer(const std::wstring& channel_name, const std::wstrin
     AddDebugLog(L"[DEMUX] Creating MPEG-TS demuxer for channel: " + channel_name_);
     
     // Set demux debug level
-    TSDemux::DBGLevel(TSDemux::DEMUX_DBG_INFO);
+    TSDemux::DBGLevel(DEMUX_DBG_INFO);
 }
 
 MpegTSDemuxer::~MpegTSDemuxer() {
