@@ -1,7 +1,7 @@
 #pragma once
 // GPAC-based media decoder for Tardsplaya
-// Replaces TSDuck functionality to decode audio and video into raw MP4/WAV
-// which are then piped to the media player
+// Uses GPAC library directly for HLS processing and MP4 output
+// No external gpac.exe dependencies
 
 #include <string>
 #include <vector>
@@ -13,6 +13,14 @@
 #include <mutex>
 #include <functional>
 #include <memory>
+
+// GPAC library headers
+extern "C" {
+#include <gpac/tools.h>
+#include <gpac/filters.h>
+#include <gpac/isomedia.h>
+#include <gpac/constants.h>
+}
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -125,20 +133,20 @@ namespace gpac_decoder {
         std::atomic<bool> producer_active_{true};
     };
     
-    // GPAC-based HLS decoder
+    // GPAC-based HLS decoder using libgpac
     class GpacHLSDecoder {
     public:
         GpacHLSDecoder();
         ~GpacHLSDecoder();
         
-        // Initialize GPAC decoder
+        // Initialize GPAC library and filter session
         bool Initialize();
         
-        // Decode HLS segment to raw AVI/WAV data
-        std::vector<MediaPacket> DecodeSegment(const std::vector<uint8_t>& hls_data, bool is_first_segment = false);
+        // Process HLS URL directly to MP4 output
+        bool ProcessHLS(const std::wstring& hls_url, std::vector<uint8_t>& mp4_output, std::wstring& error_msg);
         
         // Set decoder parameters
-        void SetOutputFormat(bool enable_avi = true, bool enable_wav = true);
+        void SetOutputFormat(const std::string& format = "mp4"); // mp4, avi, wav
         void SetQuality(int video_bitrate = 0, int audio_bitrate = 0); // 0 = auto
         
         // Reset decoder state
@@ -157,45 +165,38 @@ namespace gpac_decoder {
         DecoderStats GetStats() const;
         
     private:
-        // GPAC context and decoder state
-        void* gpac_context_ = nullptr;
-        void* video_decoder_ = nullptr;
-        void* audio_decoder_ = nullptr;
-        void* avi_muxer_ = nullptr;
-        void* wav_muxer_ = nullptr;
+        // GPAC library context
+        GF_FilterSession* filter_session_ = nullptr;
+        GF_Filter* input_filter_ = nullptr;
+        GF_Filter* output_filter_ = nullptr;
+        
+        // Output buffer for collecting MP4 data
+        std::vector<uint8_t> output_buffer_;
+        std::mutex output_mutex_;
         
         // Decoder configuration
-        bool enable_avi_output_ = true;
-        bool enable_wav_output_ = true;
+        std::string output_format_ = "mp4";
         int target_video_bitrate_ = 0;
         int target_audio_bitrate_ = 0;
-        
-        // Frame tracking
-        uint64_t global_frame_counter_ = 0;
-        uint32_t segment_frame_counter_ = 0;
-        std::chrono::steady_clock::time_point last_frame_time_;
         
         // Statistics
         mutable std::mutex stats_mutex_;
         DecoderStats stats_;
         
-        // Internal decoder methods
-        bool InitializeGpacContext();
-        bool SetupVideoDecoder();
-        bool SetupAudioDecoder();
-        bool SetupMuxers();
-        void CleanupGpacContext();
+        // Internal GPAC methods
+        bool InitializeGpacLibrary();
+        void CleanupGpacLibrary();
+        bool CreateFilterSession();
+        bool SetupHLSInput(const std::wstring& hls_url);
+        bool SetupMP4Output();
+        bool RunFilterSession();
+        void CollectOutputData();
         
-        // Segment processing
-        bool ProcessVideoTrack(const uint8_t* data, size_t size, std::vector<MediaPacket>& output);
-        bool ProcessAudioTrack(const uint8_t* data, size_t size, std::vector<MediaPacket>& output);
-        
-        // Output formatting
-        std::vector<uint8_t> CreateAVIHeader(int width, int height, double fps);
-        std::vector<uint8_t> CreateWAVHeader(int sample_rate, int channels, int bits_per_sample);
+        // GPAC callbacks
+        static void OnFilterOutput(void* user_data, const uint8_t* data, size_t size);
     };
     
-    // GPAC-based stream router - replaces TSDuck transport stream router
+    // GPAC-based stream router - direct library integration
     class GpacStreamRouter {
     public:
         GpacStreamRouter();
@@ -208,14 +209,12 @@ namespace gpac_decoder {
             int target_video_bitrate = 0;  // 0 = auto
             int target_audio_bitrate = 0;  // 0 = auto
             
-            // Low-latency streaming optimizations
-            bool low_latency_mode = true;
-            size_t max_segments_to_buffer = 2;
-            std::chrono::milliseconds playlist_refresh_interval{500};
-            bool skip_old_segments = true;
+            // Output format options
+            bool use_mp4_output = true;  // Use MP4 instead of AVI/WAV
+            std::string output_format = "mp4";  // mp4, avi, wav
         };
         
-        // Start GPAC decoding and routing to media player
+        // Start GPAC processing and routing to media player
         bool StartRouting(const std::wstring& hls_playlist_url, 
                          const RouterConfig& config,
                          std::atomic<bool>& cancel_token,
@@ -253,19 +252,24 @@ namespace gpac_decoder {
         
     private:
         std::atomic<bool> routing_active_{false};
-        std::thread gpac_streaming_thread_;
-        std::atomic<size_t> total_bytes_streamed_{0};
+        std::thread gpac_processing_thread_;
+        std::atomic<size_t> total_bytes_processed_{0};
         
         RouterConfig current_config_;
         std::function<void(const std::wstring&)> log_callback_;
         HANDLE player_process_handle_;
         
+        // GPAC decoder for direct library integration
+        std::unique_ptr<GpacHLSDecoder> gpac_decoder_;
+        
         // Statistics tracking
         mutable std::mutex stats_mutex_;
         std::chrono::steady_clock::time_point stream_start_time_;
         
-        // Worker threads
-        void GpacStreamingThread(const std::wstring& hls_url, std::atomic<bool>& cancel_token);
+        // Worker thread using GPAC library directly
+        void GpacProcessingThread(const std::wstring& hls_url, std::atomic<bool>& cancel_token);
+        bool LaunchMediaPlayer(const RouterConfig& config, HANDLE& process_handle, HANDLE& stdin_handle);
+        bool SendDataToPlayer(HANDLE stdin_handle, const std::vector<uint8_t>& data);
     };
     
 } // namespace gpac_decoder
