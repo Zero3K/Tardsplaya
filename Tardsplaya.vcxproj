@@ -123,6 +123,7 @@
     <ClCompile Include="tx_queue_ipc.cpp" />
     <ClCompile Include="urlencode.cpp" />
     <!-- GPAC embedded source files - real integration -->
+    <ClCompile Include="gpac\src\gpac_minimal_stubs.c" />
     <ClCompile Include="gpac\src\utils\os_thread.c" />
     <ClCompile Include="gpac\src\utils\list.c" />
     <ClCompile Include="gpac\src\utils\bitstream.c" />
