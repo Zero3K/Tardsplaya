@@ -660,6 +660,14 @@ bool TSDemuxerStreamManager::StartPlayerWithPipes() {
         cmdline = L"\"" + player_path_ + L"\" --audio-file=\"" + audio_pipe_path_ + L"\" \"" + video_pipe_path_ + L"\"";
     }
     
+    // Validate player path exists before trying to start it
+    if (GetFileAttributesW(player_path_.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        AddDebugLog(L"[TS_DEMUX] Player executable not found: " + player_path_);
+        CloseHandle(video_overlapped.hEvent);
+        CloseHandle(audio_overlapped.hEvent);
+        return false;
+    }
+    
     AddDebugLog(L"[TS_DEMUX] Player command: " + cmdline);
     
     STARTUPINFOW si = { sizeof(si) };
@@ -695,6 +703,19 @@ bool TSDemuxerStreamManager::StartPlayerWithPipes() {
     }
     
     AddDebugLog(L"[TS_DEMUX] Player process running, waiting for pipe connections...");
+    
+    // Give the player a moment to initialize before expecting pipe connections
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // Check again if player is still running after initialization delay
+    if (GetExitCodeProcess(player_process_, &exit_code)) {
+        if (exit_code != STILL_ACTIVE) {
+            AddDebugLog(L"[TS_DEMUX] Player process died during initialization, exit code: " + std::to_wstring(exit_code));
+            CloseHandle(video_overlapped.hEvent);
+            CloseHandle(audio_overlapped.hEvent);
+            return false;
+        }
+    }
     
     // Wait for the player to actually connect to both pipes (with timeout)
     HANDLE events[2] = { video_overlapped.hEvent, audio_overlapped.hEvent };
