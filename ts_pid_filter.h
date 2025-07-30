@@ -10,6 +10,7 @@
 #include <atomic>
 #include <memory>
 #include <chrono>
+#include <functional>
 
 namespace tsduck_transport {
 
