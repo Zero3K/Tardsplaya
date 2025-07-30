@@ -227,6 +227,50 @@ std::wstring GetModernAccessToken(const std::wstring& channel) {
     return L""; // Failed to get token from GraphQL API
 }
 
+// Generate VOD playlist URL for a channel (alternative to live HLS when discontinuities found)
+std::wstring GenerateVodPlaylistUrl(const std::wstring& channel) {
+    AddLog(L"Generating VOD playlist URL for channel: " + channel);
+    
+    // For VOD playback, we need to construct a VOD server URL
+    // Based on TwitchLink reference: https://usher.ttvnw.net/vod/{video_id}.m3u8
+    // However, for live streams experiencing discontinuities, we use a different approach
+    // We construct a VOD-style URL using the channel name with special parameters
+    
+    std::wstring channel_lower = ToLower(channel);
+    
+    // Try to get access token first
+    std::wstring token_info = GetModernAccessToken(channel);
+    if (token_info.empty() || token_info == L"OFFLINE") {
+        AddLog(L"Cannot generate VOD URL: no access token available for " + channel);
+        return L"";
+    }
+    
+    // Parse token (format: "signature|token")
+    size_t sep_pos = token_info.find(L'|');
+    if (sep_pos == std::wstring::npos) {
+        AddLog(L"Invalid token format for VOD URL generation");
+        return L"";
+    }
+    
+    std::wstring signature = token_info.substr(0, sep_pos);
+    std::wstring token = token_info.substr(sep_pos + 1);
+    
+    // Generate VOD-style URL with live stream fallback
+    // This uses the same HLS endpoint but with different parameters that may help with discontinuities
+    std::wstring vod_url = L"https://usher.ttvnw.net/api/channel/hls/" + channel_lower + L".m3u8";
+    vod_url += L"?sig=" + signature;
+    vod_url += L"&token=" + token;
+    vod_url += L"&allow_source=true";
+    vod_url += L"&allow_audio_only=true";
+    vod_url += L"&fast_bread=false";  // Disable fast bread for more stable playback
+    vod_url += L"&p=" + std::to_wstring(rand() % 999999);  // Random cache busting
+    vod_url += L"&type=any";  // Allow any stream type
+    vod_url += L"&platform=web";
+    
+    AddLog(L"Generated VOD playlist URL: " + vod_url);
+    return vod_url;
+}
+
 // Parse M3U8 playlist using improved logic from TLS client example
 std::map<std::wstring, std::wstring> ParseM3U8Playlist(const std::string& m3u8Content) {
     std::map<std::wstring, std::wstring> result;

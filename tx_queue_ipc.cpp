@@ -2,6 +2,7 @@
 #include "stream_thread.h"
 #include "stream_pipe.h"
 #include "tsduck_hls_wrapper.h"
+#include "twitch_api.h"
 #include <sstream>
 #include <iomanip>
 #include <regex>
@@ -505,6 +506,13 @@ bool TxQueueStreamManager::StartStreaming(
     chunk_count_ptr_ = chunk_count;
     should_stop_ = false;
     
+    // Initialize discontinuity tracking
+    original_playlist_url_ = playlist_url;
+    using_vod_playlist_.store(false);
+    discontinuity_count_.store(0);
+    consecutive_clean_cycles_.store(0);
+    vod_playlist_url_.clear();
+    
     // Start producer thread (downloads segments and feeds to tx-queue)
     producer_thread_ = std::thread(&TxQueueStreamManager::ProducerThreadFunction, this, playlist_url);
     
@@ -562,9 +570,12 @@ void TxQueueStreamManager::ProducerThreadFunction(const std::wstring& playlist_u
     tsduck_hls::PlaylistParser playlist_parser;
     
     while (!should_stop_.load() && (!cancel_token_ptr_ || !cancel_token_ptr_->load())) {
+        // Get the current playlist URL (may switch between original and VOD)
+        std::wstring current_playlist_url = GetCurrentPlaylistUrl();
+        
         // Download current playlist
         std::string playlist_content;
-        if (!HttpGetText(playlist_url, playlist_content, cancel_token_ptr_)) {
+        if (!HttpGetText(current_playlist_url, playlist_content, cancel_token_ptr_)) {
             consecutive_errors++;
             LogMessage(L"[PRODUCER] Failed to download playlist, attempt " + 
                       std::to_wstring(consecutive_errors) + L"/" + std::to_wstring(max_errors));
@@ -591,6 +602,9 @@ void TxQueueStreamManager::ProducerThreadFunction(const std::wstring& playlist_u
         auto media_segments = playlist_parser.GetSegments();
         bool playlist_has_discontinuities = playlist_parser.HasDiscontinuities();
         
+        // Handle discontinuity detection for live VOD switching
+        HandleDiscontinuityDetection(playlist_has_discontinuities);
+        
         if (playlist_has_discontinuities) {
             LogMessage(L"[PRODUCER] Discontinuities detected in playlist - buffer flushing enabled");
         }
@@ -602,7 +616,7 @@ void TxQueueStreamManager::ProducerThreadFunction(const std::wstring& playlist_u
             // Convert segment URL to wide string and make absolute
             std::wstring segment_url = media_segment.url;
             if (segment_url.find(L"http") != 0) {
-                segment_url = JoinUrl(playlist_url, segment_url);
+                segment_url = JoinUrl(current_playlist_url, segment_url);
             }
             
             // Skip already downloaded segments
@@ -761,4 +775,56 @@ void TxQueueStreamManager::UpdateChunkCount(int count) {
     if (chunk_count_ptr_) {
         chunk_count_ptr_->store(count);
     }
+}
+
+// Live VOD switching helper methods
+void TxQueueStreamManager::HandleDiscontinuityDetection(bool has_discontinuities) {
+    if (has_discontinuities) {
+        consecutive_clean_cycles_.store(0);
+        int current_count = discontinuity_count_.fetch_add(1) + 1;
+        
+        // Switch to VOD if we hit the threshold and aren't already using VOD
+        if (current_count >= DISCONTINUITY_THRESHOLD && !using_vod_playlist_.load()) {
+            LogMessage(L"[LIVE-VOD] Discontinuity threshold reached (" + 
+                      std::to_wstring(current_count) + L"/" + std::to_wstring(DISCONTINUITY_THRESHOLD) + 
+                      L"), switching to VOD playlist");
+            SwitchToVodPlaylist();
+        }
+    } else {
+        discontinuity_count_.store(0);
+        int clean_count = consecutive_clean_cycles_.fetch_add(1) + 1;
+        
+        // Switch back to original if we have enough clean cycles and are using VOD
+        if (clean_count >= CLEAN_THRESHOLD && using_vod_playlist_.load()) {
+            LogMessage(L"[LIVE-VOD] Clean playback restored (" + 
+                      std::to_wstring(clean_count) + L"/" + std::to_wstring(CLEAN_THRESHOLD) + 
+                      L"), switching back to original playlist");
+            SwitchToOriginalPlaylist();
+        }
+    }
+}
+
+std::wstring TxQueueStreamManager::GetCurrentPlaylistUrl() const {
+    return using_vod_playlist_.load() ? vod_playlist_url_ : original_playlist_url_;
+}
+
+bool TxQueueStreamManager::SwitchToVodPlaylist() {
+    if (vod_playlist_url_.empty()) {
+        // Generate VOD playlist URL
+        vod_playlist_url_ = GenerateVodPlaylistUrl(channel_name_);
+        if (vod_playlist_url_.empty()) {
+            LogMessage(L"[LIVE-VOD] Failed to generate VOD playlist URL for " + channel_name_);
+            return false;
+        }
+    }
+    
+    using_vod_playlist_.store(true);
+    LogMessage(L"[LIVE-VOD] Switched to VOD playlist: " + vod_playlist_url_);
+    return true;
+}
+
+bool TxQueueStreamManager::SwitchToOriginalPlaylist() {
+    using_vod_playlist_.store(false);
+    LogMessage(L"[LIVE-VOD] Switched back to original playlist: " + original_playlist_url_);
+    return true;
 }
