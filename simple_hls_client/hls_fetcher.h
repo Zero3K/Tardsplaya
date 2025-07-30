@@ -11,8 +11,13 @@
 #define _WINSOCKAPI_
 #include <windows.h>
 #include <winhttp.h>
-#include <wininet.h>  // For ERROR_INTERNET_* constants
 #include <winerror.h>
+
+// Define WinINet error constant without including wininet.h to avoid type conflicts
+// This constant is used for TLS client fallback error handling
+#ifndef ERROR_INTERNET_CONNECTION_ABORTED
+#define ERROR_INTERNET_CONNECTION_ABORTED 12030L
+#endif
 #include <string>
 #include <stdexcept>
 
