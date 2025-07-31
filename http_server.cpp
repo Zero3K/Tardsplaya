@@ -112,13 +112,25 @@ void HttpStreamServer::AddStreamData(const std::vector<uint8_t>& data) {
         temp_queue.pop();
     }
     
+    OutputDebugStringA(("Buffer size before adding: " + std::to_string(stream_buffer_.size()) + " segments, " + std::to_string(current_size) + " bytes").c_str());
+    
     // Remove old data if buffer is too large
     while (current_size + data.size() > MAX_BUFFER_SIZE && !stream_buffer_.empty()) {
-        current_size -= stream_buffer_.front().size();
+        size_t removed_size = stream_buffer_.front().size();
+        current_size -= removed_size;
         stream_buffer_.pop();
+        OutputDebugStringA(("Removed old segment: " + std::to_string(removed_size) + " bytes").c_str());
     }
     
     stream_buffer_.push(data);
+    OutputDebugStringA(("Buffer size after adding: " + std::to_string(stream_buffer_.size()) + " segments").c_str());
+    
+    // Mark buffer as ready when we have enough segments
+    if (stream_buffer_.size() >= MIN_BUFFER_SEGMENTS && !buffer_ready_.load()) {
+        buffer_ready_.store(true);
+        OutputDebugStringA(("Buffer ready! Have " + std::to_string(stream_buffer_.size()) + " segments (min " + std::to_string(MIN_BUFFER_SEGMENTS) + ")").c_str());
+    }
+    
     buffer_cv_.notify_all();
 }
 
@@ -126,6 +138,8 @@ void HttpStreamServer::ClearBuffer() {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     std::queue<std::vector<uint8_t>> empty;
     stream_buffer_.swap(empty);
+    buffer_ready_.store(false);
+    OutputDebugStringA("Buffer cleared and reset to not ready");
 }
 
 std::wstring HttpStreamServer::GetStreamUrl() const {
@@ -342,15 +356,15 @@ std::string HttpStreamServer::GetMimeType(const std::string& path) {
 void HttpStreamServer::ServeStreamData(SOCKET client_socket) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     
-    OutputDebugStringA(("ServeStreamData: Buffer has " + std::to_string(stream_buffer_.size()) + " segments").c_str());
+    OutputDebugStringA(("ServeStreamData: Buffer has " + std::to_string(stream_buffer_.size()) + " segments, ready=" + (buffer_ready_.load() ? "true" : "false")).c_str());
     
-    // Get the oldest buffered segment if available
-    if (!stream_buffer_.empty()) {
+    // Only serve data if buffer is ready (has enough segments)
+    if (buffer_ready_.load() && !stream_buffer_.empty()) {
         std::vector<uint8_t> segment_data = stream_buffer_.front();
         stream_buffer_.pop();
         
         // Debug log
-        OutputDebugStringA(("Serving segment data: " + std::to_string(segment_data.size()) + " bytes").c_str());
+        OutputDebugStringA(("Serving segment data: " + std::to_string(segment_data.size()) + " bytes, " + std::to_string(stream_buffer_.size()) + " segments remaining").c_str());
         
         // Send HTTP response with the segment data
         SendHttpResponse(client_socket, "video/mp2t", segment_data);
@@ -359,8 +373,10 @@ void HttpStreamServer::ServeStreamData(SOCKET client_socket) {
         total_bytes_served_ += segment_data.size();
         OutputDebugStringA(("Total bytes served: " + std::to_string(total_bytes_served_.load())).c_str());
     } else {
-        // No data available, send empty response
-        OutputDebugStringA("No stream data available, sending 204 No Content");
+        // No data available or buffer not ready, send empty response
+        std::string reason = buffer_ready_.load() ? "buffer empty" : "buffer not ready (need " + std::to_string(MIN_BUFFER_SEGMENTS) + " segments)";
+        OutputDebugStringA(("No stream data available (" + reason + "), sending 204 No Content").c_str());
+        
         std::string response = "HTTP/1.1 204 No Content\r\n"
                              "Access-Control-Allow-Origin: *\r\n"
                              "Cache-Control: no-cache\r\n"
@@ -505,8 +521,13 @@ function testConnectivity() {
     })
     .then(text => {
         console.log('Ping response text:', text);
-        updateStatus('Server connectivity OK (received: ' + text + '), starting stream fetch...');
-        fetchSegments();
+        updateStatus('Server connectivity OK (received: ' + text + '), waiting for buffer to build...');
+        
+        // Add a delay to allow the server to buffer some segments before we start requesting
+        setTimeout(() => {
+            updateStatus('Starting stream fetch...');
+            fetchSegments();
+        }, 3000); // Wait 3 seconds for buffering
     })
     .catch(error => {
         console.error('Connectivity test failed:', error);

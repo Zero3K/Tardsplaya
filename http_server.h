@@ -61,9 +61,12 @@ private:
     std::mutex buffer_mutex_;
     std::condition_variable buffer_cv_;
     std::atomic<size_t> total_bytes_served_{0};
+    std::atomic<bool> buffer_ready_{false}; // Track when we have enough buffered data
     
     // Maximum buffer size (10MB)
     static const size_t MAX_BUFFER_SIZE = 10 * 1024 * 1024;
+    // Minimum segments to buffer before serving
+    static const size_t MIN_BUFFER_SEGMENTS = 3;
 };
 
 } // namespace tardsplaya
