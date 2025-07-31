@@ -23,6 +23,7 @@ HttpStreamServer::~HttpStreamServer() {
 
 bool HttpStreamServer::StartServer(int port) {
     if (server_running_.load()) {
+        OutputDebugStringA("HTTP server already running");
         return false; // Already running
     }
     
@@ -31,6 +32,7 @@ bool HttpStreamServer::StartServer(int port) {
     // Create socket
     server_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (server_socket_ == INVALID_SOCKET) {
+        OutputDebugStringA("Failed to create server socket");
         return false;
     }
     
@@ -45,6 +47,7 @@ bool HttpStreamServer::StartServer(int port) {
     server_addr.sin_port = htons(port_);
     
     if (bind(server_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        OutputDebugStringA(("Failed to bind to port " + std::to_string(port_)).c_str());
         closesocket(server_socket_);
         server_socket_ = INVALID_SOCKET;
         return false;
@@ -52,10 +55,13 @@ bool HttpStreamServer::StartServer(int port) {
     
     // Start listening
     if (listen(server_socket_, SOMAXCONN) == SOCKET_ERROR) {
+        OutputDebugStringA("Failed to start listening on socket");
         closesocket(server_socket_);
         server_socket_ = INVALID_SOCKET;
         return false;
     }
+    
+    OutputDebugStringA(("HTTP server listening on port " + std::to_string(port_)).c_str());
     
     server_running_ = true;
     server_thread_ = std::thread(&HttpStreamServer::ServerThread, this);
@@ -84,6 +90,9 @@ void HttpStreamServer::StopServer() {
 
 void HttpStreamServer::AddStreamData(const std::vector<uint8_t>& data) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    // Debug log
+    OutputDebugStringA(("Adding stream data: " + std::to_string(data.size()) + " bytes").c_str());
     
     // Check buffer size limit
     size_t current_size = 0;
@@ -159,6 +168,16 @@ void HttpStreamServer::HandleClient(SOCKET client_socket) {
                 // Serve the JavaScript file
                 OutputDebugStringA("Serving player.js");
                 ServePlayerJs(client_socket);
+            } else if (path == "/ping") {
+                // Simple connectivity test endpoint
+                OutputDebugStringA("Serving ping response");
+                std::string ping_response = "HTTP/1.1 200 OK\r\n"
+                                          "Content-Type: text/plain\r\n"
+                                          "Content-Length: 4\r\n"
+                                          "Access-Control-Allow-Origin: *\r\n"
+                                          "\r\n"
+                                          "pong";
+                send(client_socket, ping_response.c_str(), ping_response.length(), 0);
             } else {
                 // 404 Not Found
                 OutputDebugStringA(("404 Not Found: " + path).c_str());
@@ -170,6 +189,17 @@ void HttpStreamServer::HandleClient(SOCKET client_socket) {
                                       "File not found";
                 send(client_socket, not_found.c_str(), not_found.length(), 0);
             }
+        } else if (method == "OPTIONS") {
+            // Handle CORS preflight requests
+            OutputDebugStringA("Handling CORS preflight request");
+            std::string cors_response = "HTTP/1.1 200 OK\r\n"
+                                      "Access-Control-Allow-Origin: *\r\n"
+                                      "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                                      "Access-Control-Allow-Headers: Content-Type\r\n"
+                                      "Access-Control-Max-Age: 86400\r\n"
+                                      "Content-Length: 0\r\n"
+                                      "\r\n";
+            send(client_socket, cors_response.c_str(), cors_response.length(), 0);
         }
     }
     
@@ -277,6 +307,9 @@ void HttpStreamServer::ServeStreamData(SOCKET client_socket) {
         std::vector<uint8_t> segment_data = stream_buffer_.front();
         stream_buffer_.pop();
         
+        // Debug log
+        OutputDebugStringA(("Serving segment data: " + std::to_string(segment_data.size()) + " bytes").c_str());
+        
         // Send HTTP response with the segment data
         SendHttpResponse(client_socket, "video/mp2t", segment_data);
         
@@ -284,6 +317,7 @@ void HttpStreamServer::ServeStreamData(SOCKET client_socket) {
         total_bytes_served_ += segment_data.size();
     } else {
         // No data available, send empty response
+        OutputDebugStringA("No stream data available, sending 204 No Content");
         std::string response = "HTTP/1.1 204 No Content\r\n"
                              "Access-Control-Allow-Origin: *\r\n"
                              "Cache-Control: no-cache\r\n"
@@ -388,8 +422,8 @@ function startPlayback() {
                 updateStatus('SourceBuffer error - check console');
             });
             
-            updateStatus('Buffer ready, starting stream fetch...');
-            fetchSegments();
+            updateStatus('Buffer ready, testing connectivity...');
+            testConnectivity();
             
         } catch (e) {
             console.error('Failed to create SourceBuffer:', e);
@@ -405,6 +439,27 @@ function startPlayback() {
     isPlaying = true;
 }
 
+function testConnectivity() {
+    fetch('/ping', { 
+        method: 'GET',
+        cache: 'no-cache'
+    })
+    .then(response => {
+        if (response.ok) {
+            updateStatus('Server connectivity OK, starting stream fetch...');
+            fetchSegments();
+        } else {
+            throw new Error('Server responded with status: ' + response.status);
+        }
+    })
+    .catch(error => {
+        console.error('Connectivity test failed:', error);
+        updateStatus('Server connectivity failed: ' + error.message);
+        // Still try to fetch segments after delay
+        setTimeout(fetchSegments, 2000);
+    });
+}
+
 function fetchSegments() {
     if (!isPlaying || !sourceBuffer) return;
     
@@ -413,6 +468,7 @@ function fetchSegments() {
         cache: 'no-cache'
     })
     .then(response => {
+        console.log('Fetch response status:', response.status, 'statusText:', response.statusText);
         if (response.status === 204) {
             // No content available, retry after delay
             updateStatus('No data available, retrying...');
@@ -421,7 +477,7 @@ function fetchSegments() {
             }
             return null;
         } else if (!response.ok) {
-            throw new Error('Network response was not ok: ' + response.status);
+            throw new Error('Network response was not ok: ' + response.status + ' ' + response.statusText);
         }
         return response.arrayBuffer();
     })
@@ -440,8 +496,10 @@ function fetchSegments() {
         }
     })
     .catch(error => {
-        console.error('Fetch error:', error);
-        updateStatus('Fetch error: ' + error.message);
+        console.error('Fetch error details:', error);
+        console.error('Error type:', error.constructor.name);
+        console.error('Error message:', error.message);
+        updateStatus('Fetch error: ' + error.message + ' (type: ' + error.constructor.name + ')');
         
         // Retry after error with longer delay
         if (isPlaying) {

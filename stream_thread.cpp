@@ -60,6 +60,9 @@ std::thread StartStreamThread(
                     log_callback(L"[BROWSER] Player URL: " + stream_url);
                 }
                 
+                // Give the server thread a moment to fully start listening
+                Sleep(500);
+                
                 // Launch browser to view the stream
                 ShellExecuteW(nullptr, L"open", stream_url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 
