@@ -4,6 +4,7 @@
 #include "stream_resource_manager.h"
 #include "tx_queue_ipc.h"
 #include "http_server.h"
+#include <shellapi.h>
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
