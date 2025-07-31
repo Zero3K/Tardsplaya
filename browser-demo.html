@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Tardsplaya Browser Player Demo</title>
+    <meta charset="utf-8">
+    <style>
+        body { 
+            margin: 0; 
+            padding: 20px; 
+            background: #000; 
+            font-family: Arial, sans-serif; 
+            color: white;
+        }
+        #videoContainer { 
+            text-align: center; 
+            margin: 20px 0;
+        }
+        video { 
+            max-width: 100%; 
+            height: auto; 
+            background: #000;
+            border: 2px solid #333;
+        }
+        #controls { 
+            text-align: center; 
+            margin: 20px 0;
+        }
+        button { 
+            padding: 10px 20px; 
+            margin: 0 10px; 
+            font-size: 16px;
+            background: #333;
+            color: white;
+            border: 1px solid #666;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #555;
+        }
+        #status {
+            text-align: center;
+            margin: 10px 0;
+            font-size: 14px;
+            color: #ccc;
+        }
+        .demo-info {
+            background: #222;
+            padding: 15px;
+            margin: 20px 0;
+            border-left: 4px solid #9146ff;
+        }
+        .feature-list {
+            background: #111;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+        }
+        .feature-list ul {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+        .feature-list li {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎮 Tardsplaya Browser Player</h1>
+    
+    <div class="demo-info">
+        <h3>Demo Mode - Browser Playback Feature</h3>
+        <p>This demonstrates how Tardsplaya would serve Twitch streams directly to your browser instead of external media players.</p>
+    </div>
+    
+    <div id="videoContainer">
+        <video id="videoPlayer" controls width="800" height="450" poster="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODAwIiBoZWlnaHQ9IjQ1MCIgdmlld0JveD0iMCAwIDgwMCA0NTAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxyZWN0IHdpZHRoPSI4MDAiIGhlaWdodD0iNDUwIiBmaWxsPSIjMTExIi8+Cjx0ZXh0IHg9IjQwMCIgeT0iMjI1IiBmaWxsPSIjNzc3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMjQiPkJyb3dzZXIgUGxheWJhY2sgUmVhZHk8L3RleHQ+Cjwvc3ZnPg==">
+            Your browser supports modern video playback!
+        </video>
+    </div>
+    
+    <div id="controls">
+        <button onclick="showDemo()">▶️ Demo Browser Playback</button>
+        <button onclick="toggleFullscreen()">🔍 Fullscreen</button>
+        <button onclick="showFeatures()">📋 Features</button>
+    </div>
+    
+    <div id="status">Status: Demo mode - showing browser playback concept</div>
+    
+    <div class="feature-list">
+        <h3>🌟 Browser Playback Benefits</h3>
+        <ul>
+            <li><strong>No External Players Needed</strong> - No need to install MPV, VLC, etc.</li>
+            <li><strong>Native Browser Controls</strong> - Familiar video interface with standard controls</li>
+            <li><strong>Multi-Stream Support</strong> - Easy to open multiple streams in different tabs</li>
+            <li><strong>Cross-Platform</strong> - Works on Windows, Mac, Linux with any modern browser</li>
+            <li><strong>Web Integration</strong> - Better integration with web-based workflows</li>
+            <li><strong>MediaSource API</strong> - Uses native browser video streaming capabilities</li>
+        </ul>
+    </div>
+    
+    <div class="demo-info">
+        <h3>🔧 How It Works</h3>
+        <ol>
+            <li><strong>Enable Browser Mode</strong> - Check "Use browser playback" in Tardsplaya settings</li>
+            <li><strong>Load Channel</strong> - Enter channel name and select quality (same as before)</li>
+            <li><strong>Click Watch</strong> - Browser opens automatically instead of media player</li>
+            <li><strong>Stream Plays</strong> - Tardsplaya downloads segments and serves them via HTTP to browser</li>
+        </ol>
+    </div>
+
+    <script>
+        function showDemo() {
+            updateStatus('Demo: This would connect to Tardsplaya HTTP server for live stream');
+            
+            // Create a simple demo "stream" using canvas
+            const video = document.getElementById('videoPlayer');
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 800;
+            canvas.height = 450;
+            
+            // Simple animated demo
+            let frame = 0;
+            function animate() {
+                ctx.fillStyle = '#111';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                // Animated gradient
+                const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+                gradient.addColorStop(0, '#9146ff');
+                gradient.addColorStop(0.5, '#6441a4');
+                gradient.addColorStop(1, '#2e1a4a');
+                
+                ctx.fillStyle = gradient;
+                ctx.fillRect(50 + Math.sin(frame * 0.02) * 50, 50, canvas.width - 100, canvas.height - 100);
+                
+                // Demo text
+                ctx.fillStyle = 'white';
+                ctx.font = '32px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('🎮 TARDSPLAYA BROWSER DEMO', canvas.width / 2, canvas.height / 2 - 50);
+                
+                ctx.font = '18px Arial';
+                ctx.fillText('Live Stream Would Play Here', canvas.width / 2, canvas.height / 2);
+                ctx.fillText('Frame: ' + frame, canvas.width / 2, canvas.height / 2 + 30);
+                
+                frame++;
+                if (frame < 300) { // 10 seconds at 30fps
+                    requestAnimationFrame(animate);
+                } else {
+                    updateStatus('Demo complete - in real use, stream would continue indefinitely');
+                }
+            }
+            
+            // Convert canvas to video stream (if supported)
+            if (canvas.captureStream) {
+                const stream = canvas.captureStream(30);
+                video.srcObject = stream;
+                video.play();
+                animate();
+                updateStatus('Demo playing - simulating browser video stream');
+            } else {
+                updateStatus('Canvas streaming not supported - would work with real MPEG-TS stream');
+                animate(); // Still show the animation
+            }
+        }
+        
+        function toggleFullscreen() {
+            const video = document.getElementById('videoPlayer');
+            if (video.requestFullscreen) {
+                video.requestFullscreen();
+            } else if (video.webkitRequestFullscreen) {
+                video.webkitRequestFullscreen();
+            } else if (video.msRequestFullscreen) {
+                video.msRequestFullscreen();
+            }
+        }
+        
+        function showFeatures() {
+            updateStatus('Scroll down to see full feature list and technical details');
+        }
+        
+        function updateStatus(message) {
+            document.getElementById('status').textContent = 'Status: ' + message;
+        }
+        
+        // Check MediaSource support
+        window.addEventListener('load', function() {
+            if ('MediaSource' in window) {
+                updateStatus('✅ MediaSource API supported - browser playback would work perfectly');
+            } else {
+                updateStatus('❌ MediaSource API not supported - would need browser upgrade');
+            }
+        });
+    </script>
+</body>
+</html>
