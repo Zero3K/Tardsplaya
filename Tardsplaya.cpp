@@ -133,6 +133,7 @@ bool g_verboseDebug = false; // Enable verbose debug output for troubleshooting
 bool g_logAutoScroll = true;
 bool g_minimizeToTray = false;
 bool g_logToFile = false; // Enable logging to debug.log file
+bool g_useBrowserPlayback = false; // Enable browser-based playback using mpegts.js
 
 
 
@@ -198,6 +199,9 @@ void LoadSettings() {
     
     // Load verbose debug setting
     g_verboseDebug = GetPrivateProfileIntW(L"Settings", L"VerboseDebug", 0, iniPath.c_str()) != 0;
+    
+    // Load browser playback setting
+    g_useBrowserPlayback = GetPrivateProfileIntW(L"Settings", L"UseBrowserPlayback", 0, iniPath.c_str()) != 0;
 }
 
 void SaveSettings() {
@@ -225,6 +229,9 @@ void SaveSettings() {
     
     // Save verbose debug setting
     WritePrivateProfileStringW(L"Settings", L"VerboseDebug", g_verboseDebug ? L"1" : L"0", iniPath.c_str());
+    
+    // Save browser playback setting
+    WritePrivateProfileStringW(L"Settings", L"UseBrowserPlayback", g_useBrowserPlayback ? L"1" : L"0", iniPath.c_str());
 }
 
 void AddLog(const std::wstring& msg) {
@@ -843,7 +850,8 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
         }
         
         if (!hasActiveStream) {
-            UpdateStatusBar(L"Buffer: 0 packets");
+            UpdateStatusBar(L"Buffer: 0 packets | " + 
+                           (g_useBrowserPlayback ? L"Browser Playback Ready" : L"TX-Queue IPC Ready"));
         }
         
         AddLog(L"Stream stopped.");
@@ -920,12 +928,14 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     tab.userRequestedStop = false;
     
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
+               L", Mode=" + (mode == StreamingMode::BROWSER_PLAYBACK ? L"BROWSER" : L"TX_QUEUE") +
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
     
     // TX-Queue IPC Mode is now the default streaming mode
-    StreamingMode mode = StreamingMode::TX_QUEUE_IPC;
+    // StreamingMode mode = StreamingMode::TX_QUEUE_IPC;
     
-    AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+    // AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+    // ^^ These lines are now moved above
     
     // Start the buffering thread
     tab.streamThread = StartStreamThread(
@@ -958,7 +968,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     EnableWindow(tab.hQualities, FALSE);
     EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), FALSE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
-    UpdateStatusBar(L"Buffer: Buffering... | TX-Queue IPC Active");
+    UpdateStatusBar(L"Buffer: Buffering... | " + 
+                   (mode == StreamingMode::BROWSER_PLAYBACK ? L"Browser Playback Active" : L"TX-Queue IPC Active"));
     
     AddDebugLog(L"WatchStream: UI updated, stream starting for tab " + std::to_wstring(tabIndex));
     
@@ -969,6 +980,17 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     SetTimer(g_hMainWnd, TIMER_CHUNK_UPDATE, 2000, nullptr);
     
     // Don't detach the thread - keep it joinable for proper synchronization
+
+    // Determine streaming mode based on settings
+    StreamingMode mode = StreamingMode::TX_QUEUE_IPC; // Default
+    
+    if (g_useBrowserPlayback) {
+        mode = StreamingMode::BROWSER_PLAYBACK;
+        AddLog(L"[BROWSER] Starting Browser Playback streaming for " + tab.channel + L" (" + standardQuality + L")");
+    } else {
+        // TX-Queue IPC Mode is the default streaming mode for media players
+        AddLog(L"[TX-QUEUE] Starting TX-Queue IPC streaming for " + tab.channel + L" (" + standardQuality + L")");
+    }
 }
 
 LRESULT CALLBACK StreamChildProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1278,6 +1300,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         CheckDlgButton(hDlg, IDC_MINIMIZETOTRAY, g_minimizeToTray ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_VERBOSE_DEBUG, g_verboseDebug ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_LOG_TO_FILE, g_logToFile ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(hDlg, IDC_BROWSER_PLAYBACK, g_useBrowserPlayback ? BST_CHECKED : BST_UNCHECKED);
         return TRUE;
 
     case WM_COMMAND:
@@ -1316,6 +1339,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             g_minimizeToTray = IsDlgButtonChecked(hDlg, IDC_MINIMIZETOTRAY) == BST_CHECKED;
             g_verboseDebug = IsDlgButtonChecked(hDlg, IDC_VERBOSE_DEBUG) == BST_CHECKED;
             g_logToFile = IsDlgButtonChecked(hDlg, IDC_LOG_TO_FILE) == BST_CHECKED;
+            g_useBrowserPlayback = IsDlgButtonChecked(hDlg, IDC_BROWSER_PLAYBACK) == BST_CHECKED;
             
             // Save settings to INI file
             SaveSettings();
@@ -1550,7 +1574,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             } else {
                 // No active streams, stop the timer
                 KillTimer(hwnd, TIMER_CHUNK_UPDATE);
-                UpdateStatusBar(L"Buffer: 0 packets | TX-Queue IPC Ready");
+                UpdateStatusBar(L"Buffer: 0 packets | " + 
+                               (g_useBrowserPlayback ? L"Browser Playback Ready" : L"TX-Queue IPC Ready"));
             }
         }
         break;
