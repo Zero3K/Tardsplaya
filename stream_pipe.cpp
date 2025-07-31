@@ -4,6 +4,7 @@
 #include "playlist_parser.h"
 #include "tsduck_hls_wrapper.h"
 #include "stream_resource_manager.h"
+#include "http_server.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>

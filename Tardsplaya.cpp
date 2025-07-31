@@ -850,7 +850,7 @@ void StopStream(StreamTab& tab, bool userInitiated = false) {
         }
         
         if (!hasActiveStream) {
-            UpdateStatusBar(L"Buffer: 0 packets | " + 
+            UpdateStatusBar(std::wstring(L"Buffer: 0 packets | ") + 
                            (g_useBrowserPlayback ? L"Browser Playback Ready" : L"TX-Queue IPC Ready"));
         }
         
@@ -975,7 +975,7 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     EnableWindow(tab.hQualities, FALSE);
     EnableWindow(GetDlgItem(tab.hChild, IDC_LOAD), FALSE);
     SetWindowTextW(tab.hWatchBtn, L"Starting...");
-    UpdateStatusBar(L"Buffer: Buffering... | " + 
+    UpdateStatusBar(std::wstring(L"Buffer: Buffering... | ") + 
                    (mode == StreamingMode::BROWSER_PLAYBACK ? L"Browser Playback Active" : L"TX-Queue IPC Active"));
     
     AddDebugLog(L"WatchStream: UI updated, stream starting for tab " + std::to_wstring(tabIndex));
@@ -1578,7 +1578,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             } else {
                 // No active streams, stop the timer
                 KillTimer(hwnd, TIMER_CHUNK_UPDATE);
-                UpdateStatusBar(L"Buffer: 0 packets | " + 
+                UpdateStatusBar(std::wstring(L"Buffer: 0 packets | ") + 
                                (g_useBrowserPlayback ? L"Browser Playback Ready" : L"TX-Queue IPC Ready"));
             }
         }

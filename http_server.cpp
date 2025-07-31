@@ -182,69 +182,69 @@ void HttpStreamServer::SendHttpResponse(SOCKET client_socket, const std::string&
 }
 
 void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
-    std::string html = R"(<!DOCTYPE html>
-<html>
-<head>
-    <title>Tardsplaya Browser Player</title>
-    <meta charset="utf-8">
-    <style>
-        body { 
-            margin: 0; 
-            padding: 20px; 
-            background: #000; 
-            font-family: Arial, sans-serif; 
-            color: white;
-        }
-        #videoContainer { 
-            text-align: center; 
-            margin: 20px 0;
-        }
-        video { 
-            max-width: 100%; 
-            height: auto; 
-            background: #000;
-        }
-        #controls { 
-            text-align: center; 
-            margin: 20px 0;
-        }
-        button { 
-            padding: 10px 20px; 
-            margin: 0 10px; 
-            font-size: 16px;
-            background: #333;
-            color: white;
-            border: 1px solid #666;
-            cursor: pointer;
-        }
-        button:hover {
-            background: #555;
-        }
-        #status {
-            text-align: center;
-            margin: 10px 0;
-            font-size: 14px;
-            color: #ccc;
-        }
-    </style>
-</head>
-<body>
-    <h1>Tardsplaya Browser Player</h1>
-    <div id="videoContainer">
-        <video id="videoPlayer" controls width="800" height="450">
-            Your browser does not support the video tag.
-        </video>
-    </div>
-    <div id="controls">
-        <button onclick="startPlayback()">Start</button>
-        <button onclick="stopPlayback()">Stop</button>
-        <button onclick="toggleFullscreen()">Fullscreen</button>
-    </div>
-    <div id="status">Status: Initializing browser player...</div>
-
-    <script src="/player.js"></script>
-</body>
-</html>)";
+    std::string html = "<!DOCTYPE html>\n"
+        "<html>\n"
+        "<head>\n"
+        "    <title>Tardsplaya Browser Player</title>\n"
+        "    <meta charset=\"utf-8\">\n"
+        "    <style>\n"
+        "        body { \n"
+        "            margin: 0; \n"
+        "            padding: 20px; \n"
+        "            background: #000; \n"
+        "            font-family: Arial, sans-serif; \n"
+        "            color: white;\n"
+        "        }\n"
+        "        #videoContainer { \n"
+        "            text-align: center; \n"
+        "            margin: 20px 0;\n"
+        "        }\n"
+        "        video { \n"
+        "            max-width: 100%; \n"
+        "            height: auto; \n"
+        "            background: #000;\n"
+        "        }\n"
+        "        #controls { \n"
+        "            text-align: center; \n"
+        "            margin: 20px 0;\n"
+        "        }\n"
+        "        button { \n"
+        "            padding: 10px 20px; \n"
+        "            margin: 0 10px; \n"
+        "            font-size: 16px;\n"
+        "            background: #333;\n"
+        "            color: white;\n"
+        "            border: 1px solid #666;\n"
+        "            cursor: pointer;\n"
+        "        }\n"
+        "        button:hover {\n"
+        "            background: #555;\n"
+        "        }\n"
+        "        #status {\n"
+        "            text-align: center;\n"
+        "            margin: 10px 0;\n"
+        "            font-size: 14px;\n"
+        "            color: #ccc;\n"
+        "        }\n"
+        "    </style>\n"
+        "</head>\n"
+        "<body>\n"
+        "    <h1>Tardsplaya Browser Player</h1>\n"
+        "    <div id=\"videoContainer\">\n"
+        "        <video id=\"videoPlayer\" controls width=\"800\" height=\"450\">\n"
+        "            Your browser does not support the video tag.\n"
+        "        </video>\n"
+        "    </div>\n"
+        "    <div id=\"controls\">\n"
+        "        <button onclick=\"startPlayback()\">Start</button>\n"
+        "        <button onclick=\"stopPlayback()\">Stop</button>\n"
+        "        <button onclick=\"toggleFullscreen()\">Fullscreen</button>\n"
+        "    </div>\n"
+        "    <div id=\"status\">Status: Initializing browser player...</div>\n"
+        "\n"
+        "    <script src=\"/player.js\"></script>\n"
+        "</body>\n"
+        "</html>";
     
     SendHttpResponse(client_socket, "text/html", std::vector<uint8_t>(html.begin(), html.end()));
 }
