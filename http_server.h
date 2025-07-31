@@ -48,6 +48,7 @@ private:
     void SendPlayerHtml(SOCKET client_socket);
     void ServeStreamData(SOCKET client_socket);
     void ServeStaticFile(SOCKET client_socket, const std::string& filename);
+    void ServePlayerJs(SOCKET client_socket);
     std::string GetMimeType(const std::string& path);
 
     std::atomic<bool> server_running_{false};

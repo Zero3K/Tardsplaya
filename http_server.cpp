@@ -144,18 +144,30 @@ void HttpStreamServer::HandleClient(SOCKET client_socket) {
         std::string method, path, version;
         iss >> method >> path >> version;
         
+        // Debug logging for HTTP requests
+        OutputDebugStringA(("HTTP Request: " + method + " " + path).c_str());
+        
         if (method == "GET") {
             if (path == "/" || path == "/player.html") {
+                OutputDebugStringA("Serving player HTML");
                 SendPlayerHtml(client_socket);
             } else if (path.find("/stream.ts") == 0) {
                 // Serve actual buffered stream data
+                OutputDebugStringA("Serving stream data");
                 ServeStreamData(client_socket);
             } else if (path == "/player.js") {
                 // Serve the JavaScript file
-                ServeStaticFile(client_socket, "player.js");
+                OutputDebugStringA("Serving player.js");
+                ServePlayerJs(client_socket);
             } else {
                 // 404 Not Found
-                std::string not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                OutputDebugStringA(("404 Not Found: " + path).c_str());
+                std::string not_found = "HTTP/1.1 404 Not Found\r\n"
+                                      "Content-Type: text/plain\r\n"
+                                      "Content-Length: 13\r\n"
+                                      "Access-Control-Allow-Origin: *\r\n"
+                                      "\r\n"
+                                      "File not found";
                 send(client_socket, not_found.c_str(), not_found.length(), 0);
             }
         }
@@ -282,8 +294,13 @@ void HttpStreamServer::ServeStreamData(SOCKET client_socket) {
 }
 
 void HttpStreamServer::ServeStaticFile(SOCKET client_socket, const std::string& filename) {
+    // Debug logging for file serving
+    OutputDebugStringA(("Serving static file: " + filename).c_str());
+    
     // Try to read the file from the current directory
     std::ifstream file(filename, std::ios::binary);
+    std::string tried_path = filename;
+    
     if (!file.is_open()) {
         // Also try with executable directory (in case we're in a different working directory)
         wchar_t exe_path[MAX_PATH];
@@ -294,12 +311,23 @@ void HttpStreamServer::ServeStaticFile(SOCKET client_socket, const std::string& 
             exe_dir = exe_dir.substr(0, last_slash + 1);
             std::wstring full_path = exe_dir + std::wstring(filename.begin(), filename.end());
             std::string full_path_str(full_path.begin(), full_path.end());
+            tried_path = full_path_str;
             file.open(full_path_str, std::ios::binary);
+            
+            OutputDebugStringA(("Tried executable directory path: " + full_path_str).c_str());
         }
         
         if (!file.is_open()) {
-            // File not found
-            std::string not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+            // File not found - log the error
+            OutputDebugStringA(("File not found: " + tried_path).c_str());
+            
+            // Send 404 response
+            std::string not_found = "HTTP/1.1 404 Not Found\r\n"
+                                  "Content-Type: text/plain\r\n"
+                                  "Content-Length: 13\r\n"
+                                  "Access-Control-Allow-Origin: *\r\n"
+                                  "\r\n"
+                                  "File not found";
             send(client_socket, not_found.c_str(), not_found.length(), 0);
             return;
         }
@@ -310,9 +338,182 @@ void HttpStreamServer::ServeStaticFile(SOCKET client_socket, const std::string& 
                                    std::istreambuf_iterator<char>());
     file.close();
     
+    OutputDebugStringA(("Successfully loaded file, size: " + std::to_string(file_data.size()) + " bytes").c_str());
+    
     // Send HTTP response
     std::string content_type = GetMimeType(filename);
     SendHttpResponse(client_socket, content_type, file_data);
+}
+
+void HttpStreamServer::ServePlayerJs(SOCKET client_socket) {
+    // Embedded player.js content - this ensures it's always available regardless of working directory
+    const std::string player_js_content = R"(// Tardsplaya Browser Player - MediaSource API Implementation
+let mediaSource = null;
+let sourceBuffer = null;
+let isPlaying = false;
+let segmentQueue = [];
+let isUpdating = false;
+
+function updateStatus(message) {
+    document.getElementById('status').textContent = 'Status: ' + message;
+}
+
+function startPlayback() {
+    if (!('MediaSource' in window)) {
+        updateStatus('MediaSource API not supported in this browser');
+        return;
+    }
+    
+    const videoElement = document.getElementById('videoPlayer');
+    
+    // Create MediaSource
+    mediaSource = new MediaSource();
+    videoElement.src = URL.createObjectURL(mediaSource);
+    
+    mediaSource.addEventListener('sourceopen', function() {
+        updateStatus('MediaSource opened, setting up buffer...');
+        
+        try {
+            // Use MP2T format for MPEG-TS streams
+            sourceBuffer = mediaSource.addSourceBuffer('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
+            
+            sourceBuffer.addEventListener('updateend', function() {
+                isUpdating = false;
+                // Process next segment in queue
+                processSegmentQueue();
+            });
+            
+            sourceBuffer.addEventListener('error', function(e) {
+                console.error('SourceBuffer error:', e);
+                updateStatus('SourceBuffer error - check console');
+            });
+            
+            updateStatus('Buffer ready, starting stream fetch...');
+            fetchSegments();
+            
+        } catch (e) {
+            console.error('Failed to create SourceBuffer:', e);
+            updateStatus('Failed to create SourceBuffer: ' + e.message);
+        }
+    });
+    
+    mediaSource.addEventListener('error', function(e) {
+        console.error('MediaSource error:', e);
+        updateStatus('MediaSource error - check console');
+    });
+    
+    isPlaying = true;
+}
+
+function fetchSegments() {
+    if (!isPlaying || !sourceBuffer) return;
+    
+    fetch('/stream.ts', { 
+        method: 'GET',
+        cache: 'no-cache'
+    })
+    .then(response => {
+        if (response.status === 204) {
+            // No content available, retry after delay
+            updateStatus('No data available, retrying...');
+            if (isPlaying) {
+                setTimeout(fetchSegments, 1000);
+            }
+            return null;
+        } else if (!response.ok) {
+            throw new Error('Network response was not ok: ' + response.status);
+        }
+        return response.arrayBuffer();
+    })
+    .then(data => {
+        if (data && data.byteLength > 0) {
+            segmentQueue.push(new Uint8Array(data));
+            processSegmentQueue();
+            updateStatus('Received segment (' + data.byteLength + ' bytes)');
+        }
+        
+        // Continue fetching segments with appropriate delay
+        if (isPlaying) {
+            // Use shorter delay when data is available, longer when no data
+            const delay = (data && data.byteLength > 0) ? 500 : 1500;
+            setTimeout(fetchSegments, delay);
+        }
+    })
+    .catch(error => {
+        console.error('Fetch error:', error);
+        updateStatus('Fetch error: ' + error.message);
+        
+        // Retry after error with longer delay
+        if (isPlaying) {
+            setTimeout(fetchSegments, 3000);
+        }
+    });
+}
+
+function processSegmentQueue() {
+    if (isUpdating || segmentQueue.length === 0 || !sourceBuffer) {
+        return;
+    }
+    
+    const segment = segmentQueue.shift();
+    isUpdating = true;
+    
+    try {
+        sourceBuffer.appendBuffer(segment);
+        updateStatus('Processing segment (' + segment.length + ' bytes)');
+    } catch (e) {
+        console.error('Failed to append buffer:', e);
+        updateStatus('Failed to append buffer: ' + e.message);
+        isUpdating = false;
+    }
+}
+
+function stopPlayback() {
+    isPlaying = false;
+    
+    if (mediaSource && mediaSource.readyState === 'open') {
+        try {
+            mediaSource.endOfStream();
+        } catch (e) {
+            console.warn('Error ending stream:', e);
+        }
+    }
+    
+    const videoElement = document.getElementById('videoPlayer');
+    videoElement.src = '';
+    
+    mediaSource = null;
+    sourceBuffer = null;
+    segmentQueue = [];
+    isUpdating = false;
+    
+    updateStatus('Playback stopped');
+}
+
+function toggleFullscreen() {
+    const video = document.getElementById('videoPlayer');
+    if (video.requestFullscreen) {
+        video.requestFullscreen();
+    } else if (video.webkitRequestFullscreen) {
+        video.webkitRequestFullscreen();
+    } else if (video.msRequestFullscreen) {
+        video.msRequestFullscreen();
+    }
+}
+
+// Auto-start playback when page loads
+window.addEventListener('load', function() {
+    updateStatus('Page loaded, ready to start');
+    setTimeout(startPlayback, 1000);
+});
+
+// Handle page unload
+window.addEventListener('beforeunload', function() {
+    stopPlayback();
+});)";
+
+    std::vector<uint8_t> js_data(player_js_content.begin(), player_js_content.end());
+    SendHttpResponse(client_socket, "application/javascript", js_data);
 }
 
 } // namespace tardsplaya
