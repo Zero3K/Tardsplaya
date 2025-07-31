@@ -187,6 +187,7 @@ void HttpStreamServer::SendHttpResponse(SOCKET client_socket, const std::string&
 }
 
 void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
+    // Split HTML into smaller chunks to avoid C2015 "too many characters in constant" error
     std::string html = R"(<!DOCTYPE html>
 <html>
 <head>
@@ -273,8 +274,9 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
             mediaSource.addEventListener('sourceopen', function() {
                 updateStatus('MediaSource opened, setting up buffer...');
                 
-                try {
-                    // Use MP2T format for MPEG-TS streams
+                try {)";
+    
+    html += R"(                    // Use MP2T format for MPEG-TS streams
                     sourceBuffer = mediaSource.addSourceBuffer('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
                     
                     sourceBuffer.addEventListener('updateend', function() {
@@ -318,8 +320,9 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
                 }
                 return response.arrayBuffer();
             })
-            .then(data => {
-                if (data.byteLength > 0) {
+            .then(data => {)";
+    
+    html += R"(                if (data.byteLength > 0) {
                     segmentQueue.push(new Uint8Array(data));
                     processSegmentQueue();
                     updateStatus('Received segment (' + data.byteLength + ' bytes)');
@@ -359,8 +362,9 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
                 updateStatus('Failed to append buffer: ' + e.message);
                 isUpdating = false;
             }
-        }
-        
+        })";
+    
+    html += R"(        
         function stopPlayback() {
             isPlaying = false;
             
