@@ -4,7 +4,6 @@ let sourceBuffer = null;
 let isPlaying = false;
 let segmentQueue = [];
 let isUpdating = false;
-let segmentIndex = 0;
 
 function updateStatus(message) {
     document.getElementById('status').textContent = 'Status: ' + message;
@@ -60,38 +59,44 @@ function startPlayback() {
 function fetchSegments() {
     if (!isPlaying || !sourceBuffer) return;
     
-    fetch('/stream.ts?segment=' + segmentIndex, { 
+    fetch('/stream.ts', { 
         method: 'GET',
         cache: 'no-cache'
     })
     .then(response => {
-        if (!response.ok) {
-            throw new Error('Network response was not ok');
+        if (response.status === 204) {
+            // No content available, retry after delay
+            updateStatus('No data available, retrying...');
+            if (isPlaying) {
+                setTimeout(fetchSegments, 1000);
+            }
+            return null;
+        } else if (!response.ok) {
+            throw new Error('Network response was not ok: ' + response.status);
         }
         return response.arrayBuffer();
     })
     .then(data => {
-        if (data.byteLength > 0) {
+        if (data && data.byteLength > 0) {
             segmentQueue.push(new Uint8Array(data));
             processSegmentQueue();
-            updateStatus('Received segment ' + segmentIndex + ' (' + data.byteLength + ' bytes)');
-            segmentIndex++;
-        } else {
-            updateStatus('No data available, retrying...');
+            updateStatus('Received segment (' + data.byteLength + ' bytes)');
         }
         
-        // Continue fetching segments
+        // Continue fetching segments with appropriate delay
         if (isPlaying) {
-            setTimeout(fetchSegments, 1000); // Fetch every second
+            // Use shorter delay when data is available, longer when no data
+            const delay = (data && data.byteLength > 0) ? 500 : 1500;
+            setTimeout(fetchSegments, delay);
         }
     })
     .catch(error => {
         console.error('Fetch error:', error);
         updateStatus('Fetch error: ' + error.message);
         
-        // Retry after error
+        // Retry after error with longer delay
         if (isPlaying) {
-            setTimeout(fetchSegments, 2000);
+            setTimeout(fetchSegments, 3000);
         }
     });
 }
@@ -132,7 +137,6 @@ function stopPlayback() {
     sourceBuffer = null;
     segmentQueue = [];
     isUpdating = false;
-    segmentIndex = 0;
     
     updateStatus('Playback stopped');
 }
