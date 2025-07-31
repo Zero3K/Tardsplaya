@@ -16,7 +16,8 @@ void AddDebugLog(const std::wstring& msg);
 enum class StreamingMode {
     HLS_SEGMENTS,      // Traditional HLS segment-based streaming (fallback)
     TRANSPORT_STREAM,  // TSDuck-inspired transport stream routing 
-    TX_QUEUE_IPC      // NEW: TX-Queue based IPC streaming (high-performance)
+    TX_QUEUE_IPC,     // NEW: TX-Queue based IPC streaming (high-performance)  
+    BROWSER_PLAYBACK   // NEW: Browser-based playback using mpegts.js
 };
 
 // Launches a thread to buffer and pipe the stream.

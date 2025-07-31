@@ -3,6 +3,8 @@
 #include "tsduck_transport_router.h"
 #include "stream_resource_manager.h"
 #include "tx_queue_ipc.h"
+#include "http_server.h"
+#include <shellapi.h>
 
 std::thread StartStreamThread(
     const std::wstring& player_path,
@@ -19,6 +21,107 @@ std::thread StartStreamThread(
     StreamingMode mode,
     HANDLE* player_process_handle
 ) {
+    // Check for Browser Playback mode (new mpegts.js browser streaming)
+    if (mode == StreamingMode::BROWSER_PLAYBACK) {
+        return std::thread([=, &cancel_token]() mutable {
+            if (log_callback)
+                log_callback(L"Starting Browser Playback streaming thread for " + channel_name);
+            
+            AddDebugLog(L"StartStreamThread: Browser Playback mode - Channel=" + channel_name + 
+                       L", Tab=" + std::to_wstring(tab_index) + 
+                       L", BufferSegs=" + std::to_wstring(buffer_segments));
+            
+            try {
+                // Create HTTP server for serving stream data
+                auto http_server = std::make_unique<tardsplaya::HttpStreamServer>();
+                
+                // Start HTTP server on a random available port (8080 + tab_index to avoid conflicts)
+                int port = 8080 + static_cast<int>(tab_index);
+                if (!http_server->StartServer(port)) {
+                    // Try alternative ports if the preferred one is in use
+                    for (int retry_port = 8090; retry_port < 8100; ++retry_port) {
+                        if (http_server->StartServer(retry_port)) {
+                            port = retry_port;
+                            break;
+                        }
+                    }
+                    
+                    if (!http_server->IsRunning()) {
+                        if (log_callback) {
+                            log_callback(L"[BROWSER] Failed to start HTTP server on any port");
+                        }
+                        return;
+                    }
+                }
+                
+                std::wstring stream_url = http_server->GetStreamUrl();
+                if (log_callback) {
+                    log_callback(L"[BROWSER] HTTP server started on port " + std::to_wstring(port));
+                    log_callback(L"[BROWSER] Player URL: " + stream_url);
+                }
+                
+                // Give the server thread a moment to fully start listening
+                Sleep(500);
+                
+                // Launch browser to view the stream
+                ShellExecuteW(nullptr, L"open", stream_url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                
+                // Simulate player process for compatibility (browser window)
+                if (player_process_handle) {
+                    // We can't easily track browser process, so use a dummy handle
+                    *player_process_handle = GetCurrentProcess(); // Placeholder
+                }
+                
+                // Start downloading and serving stream segments
+                if (log_callback) {
+                    log_callback(L"[BROWSER] Starting stream download and HTTP serving");
+                }
+                
+                // Use browser buffering and serving function
+                bool stream_success = BufferAndServeStreamToBrowser(
+                    http_server.get(), playlist_url, cancel_token, buffer_segments, 
+                    channel_name, chunk_count, selected_quality
+                );
+                
+                // Stop HTTP server
+                http_server->StopServer();
+                
+                if (log_callback) {
+                    log_callback(L"[BROWSER] Browser streaming completed for " + channel_name);
+                }
+                
+                // Handle stream end
+                if (log_callback) {
+                    bool user_stopped = user_requested_stop && user_requested_stop->load();
+                    
+                    if (user_stopped) {
+                        log_callback(L"[BROWSER] Browser streaming stopped by user.");
+                    } else if (stream_success) {
+                        log_callback(L"[BROWSER] Browser stream ended normally.");
+                        // Post auto-stop message for this specific tab
+                        if (main_window && tab_index != SIZE_MAX) {
+                            AddDebugLog(L"StartStreamThread: Posting auto-stop for browser tab " + std::to_wstring(tab_index));
+                            PostMessage(main_window, WM_USER + 2, (WPARAM)tab_index, 0);
+                        }
+                    } else {
+                        log_callback(L"[BROWSER] Browser streaming failed or was interrupted.");
+                    }
+                }
+                
+            } catch (const std::exception& e) {
+                std::string error_msg = e.what();
+                if (log_callback) {
+                    log_callback(L"[BROWSER] Error: " + std::wstring(error_msg.begin(), error_msg.end()));
+                }
+                AddDebugLog(L"StartStreamThread: Browser mode exception: " + 
+                           std::wstring(error_msg.begin(), error_msg.end()));
+            }
+            
+            AddDebugLog(L"StartStreamThread: Browser stream finished, Channel=" + channel_name + 
+                       L", Tab=" + std::to_wstring(tab_index));
+        });
+    }
+    
     // Check for TX-Queue IPC mode (new high-performance mode)
     if (mode == StreamingMode::TX_QUEUE_IPC) {
         return std::thread([=, &cancel_token]() mutable {
