@@ -147,17 +147,12 @@ void HttpStreamServer::HandleClient(SOCKET client_socket) {
         if (method == "GET") {
             if (path == "/" || path == "/player.html") {
                 SendPlayerHtml(client_socket);
-            } else if (path == "/stream.ts") {
-                // Send latest stream data - for mpegts.js we need to serve MPEG-TS formatted data
-                // For now, return a placeholder response
-                std::string response = "HTTP/1.1 200 OK\r\n"
-                                     "Content-Type: video/mp2t\r\n"
-                                     "Access-Control-Allow-Origin: *\r\n"
-                                     "Cache-Control: no-cache\r\n"
-                                     "Connection: close\r\n"
-                                     "\r\n";
-                send(client_socket, response.c_str(), response.length(), 0);
-                // Note: Real stream data would be sent here by the streaming thread
+            } else if (path.find("/stream.ts") == 0) {
+                // Serve actual buffered stream data
+                ServeStreamData(client_socket);
+            } else if (path == "/player.js") {
+                // Serve the JavaScript file
+                ServeStaticFile(client_socket, "player.js");
             } else {
                 // 404 Not Found
                 std::string not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
@@ -187,7 +182,6 @@ void HttpStreamServer::SendHttpResponse(SOCKET client_socket, const std::string&
 }
 
 void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
-    // Split HTML into smaller chunks to avoid C2015 "too many characters in constant" error
     std::string html = R"(<!DOCTYPE html>
 <html>
 <head>
@@ -248,164 +242,7 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
     </div>
     <div id="status">Status: Initializing browser player...</div>
 
-    <script>
-        let mediaSource = null;
-        let sourceBuffer = null;
-        let isPlaying = false;
-        let segmentQueue = [];
-        let isUpdating = false;
-        
-        function updateStatus(message) {
-            document.getElementById('status').textContent = 'Status: ' + message;
-        }
-        
-        function startPlayback() {
-            if (!('MediaSource' in window)) {
-                updateStatus('MediaSource API not supported in this browser');
-                return;
-            }
-            
-            const videoElement = document.getElementById('videoPlayer');
-            
-            // Create MediaSource
-            mediaSource = new MediaSource();
-            videoElement.src = URL.createObjectURL(mediaSource);
-            
-            mediaSource.addEventListener('sourceopen', function() {
-                updateStatus('MediaSource opened, setting up buffer...');
-                
-                try {
-                    // Use MP2T format for MPEG-TS streams
-                    sourceBuffer = mediaSource.addSourceBuffer('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
-                    
-                    sourceBuffer.addEventListener('updateend', function() {
-                        isUpdating = false;
-                        // Process next segment in queue
-                        processSegmentQueue();
-                    });
-                    
-                    sourceBuffer.addEventListener('error', function(e) {
-                        console.error('SourceBuffer error:', e);
-                        updateStatus('SourceBuffer error - check console');
-                    });
-                    
-                    updateStatus('Buffer ready, starting stream fetch...');
-                    fetchSegments();
-                    
-                } catch (e) {
-                    console.error('Failed to create SourceBuffer:', e);
-                    updateStatus('Failed to create SourceBuffer: ' + e.message);
-                }
-            });
-            
-            mediaSource.addEventListener('error', function(e) {
-                console.error('MediaSource error:', e);
-                updateStatus('MediaSource error - check console');
-            });
-            
-            isPlaying = true;
-        }
-        
-        function fetchSegments() {
-            if (!isPlaying || !sourceBuffer) return;
-            
-            fetch('/stream.ts', { 
-                method: 'GET',
-                cache: 'no-cache'
-            })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Network response was not ok');
-                }
-                return response.arrayBuffer();
-            })
-            .then(data => {
-                if (data.byteLength > 0) {
-                    segmentQueue.push(new Uint8Array(data));
-                    processSegmentQueue();
-                    updateStatus('Received segment (' + data.byteLength + ' bytes)');
-                } else {
-                    updateStatus('No data available, retrying...');
-                }
-                
-                // Continue fetching segments
-                if (isPlaying) {
-                    setTimeout(fetchSegments, 1000); // Fetch every second
-                }
-            })
-            .catch(error => {
-                console.error('Fetch error:', error);
-                updateStatus('Fetch error: ' + error.message);
-                
-                // Retry after error
-                if (isPlaying) {
-                    setTimeout(fetchSegments, 2000);
-                }
-            });
-        }
-        
-        function processSegmentQueue() {
-            if (isUpdating || segmentQueue.length === 0 || !sourceBuffer) {
-                return;
-            }
-            
-            const segment = segmentQueue.shift();
-            isUpdating = true;
-            
-            try {
-                sourceBuffer.appendBuffer(segment);
-                updateStatus('Processing segment (' + segment.length + ' bytes)');
-            } catch (e) {
-                console.error('Failed to append buffer:', e);
-                updateStatus('Failed to append buffer: ' + e.message);
-                isUpdating = false;
-            }
-        }
-        
-        function stopPlayback() {
-            isPlaying = false;
-            
-            if (mediaSource && mediaSource.readyState === 'open') {
-                try {
-                    mediaSource.endOfStream();
-                } catch (e) {
-                    console.warn('Error ending stream:', e);
-                }
-            }
-            
-            const videoElement = document.getElementById('videoPlayer');
-            videoElement.src = '';
-            
-            mediaSource = null;
-            sourceBuffer = null;
-            segmentQueue = [];
-            isUpdating = false;
-            
-            updateStatus('Playback stopped');
-        }
-        
-        function toggleFullscreen() {
-            const video = document.getElementById('videoPlayer');
-            if (video.requestFullscreen) {
-                video.requestFullscreen();
-            } else if (video.webkitRequestFullscreen) {
-                video.webkitRequestFullscreen();
-            } else if (video.msRequestFullscreen) {
-                video.msRequestFullscreen();
-            }
-        }
-        
-        // Auto-start playback when page loads
-        window.addEventListener('load', function() {
-            updateStatus('Page loaded, ready to start');
-            setTimeout(startPlayback, 1000);
-        });
-        
-        // Handle page unload
-        window.addEventListener('beforeunload', function() {
-            stopPlayback();
-        });
-    </script>
+    <script src="/player.js"></script>
 </body>
 </html>)";
     
@@ -418,6 +255,64 @@ std::string HttpStreamServer::GetMimeType(const std::string& path) {
     if (path.size() >= 4 && path.substr(path.size() - 4) == ".css") return "text/css";
     if (path.size() >= 3 && path.substr(path.size() - 3) == ".ts") return "video/mp2t";
     return "application/octet-stream";
+}
+
+void HttpStreamServer::ServeStreamData(SOCKET client_socket) {
+    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    
+    // Get the oldest buffered segment if available
+    if (!stream_buffer_.empty()) {
+        std::vector<uint8_t> segment_data = stream_buffer_.front();
+        stream_buffer_.pop();
+        
+        // Send HTTP response with the segment data
+        SendHttpResponse(client_socket, "video/mp2t", segment_data);
+        
+        // Update bytes served counter
+        total_bytes_served_ += segment_data.size();
+    } else {
+        // No data available, send empty response
+        std::string response = "HTTP/1.1 204 No Content\r\n"
+                             "Access-Control-Allow-Origin: *\r\n"
+                             "Cache-Control: no-cache\r\n"
+                             "Connection: close\r\n"
+                             "\r\n";
+        send(client_socket, response.c_str(), response.length(), 0);
+    }
+}
+
+void HttpStreamServer::ServeStaticFile(SOCKET client_socket, const std::string& filename) {
+    // Try to read the file from the current directory
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        // Also try with executable directory (in case we're in a different working directory)
+        wchar_t exe_path[MAX_PATH];
+        GetModuleFileNameW(NULL, exe_path, MAX_PATH);
+        std::wstring exe_dir(exe_path);
+        size_t last_slash = exe_dir.find_last_of(L"\\/");
+        if (last_slash != std::wstring::npos) {
+            exe_dir = exe_dir.substr(0, last_slash + 1);
+            std::wstring full_path = exe_dir + std::wstring(filename.begin(), filename.end());
+            std::string full_path_str(full_path.begin(), full_path.end());
+            file.open(full_path_str, std::ios::binary);
+        }
+        
+        if (!file.is_open()) {
+            // File not found
+            std::string not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+            send(client_socket, not_found.c_str(), not_found.length(), 0);
+            return;
+        }
+    }
+    
+    // Read file contents
+    std::vector<uint8_t> file_data((std::istreambuf_iterator<char>(file)),
+                                   std::istreambuf_iterator<char>());
+    file.close();
+    
+    // Send HTTP response
+    std::string content_type = GetMimeType(filename);
+    SendHttpResponse(client_socket, content_type, file_data);
 }
 
 } // namespace tardsplaya
