@@ -927,6 +927,13 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     tab.cancelToken = false;
     tab.userRequestedStop = false;
     
+    // Determine streaming mode based on settings
+    StreamingMode mode = StreamingMode::TX_QUEUE_IPC; // Default
+    
+    if (g_useBrowserPlayback) {
+        mode = StreamingMode::BROWSER_PLAYBACK;
+    }
+    
     AddDebugLog(L"WatchStream: Creating stream thread for tab " + std::to_wstring(tabIndex) + 
                L", Mode=" + (mode == StreamingMode::BROWSER_PLAYBACK ? L"BROWSER" : L"TX_QUEUE") +
                L", PlayerPath=" + g_playerPath + L", URL=" + url);
@@ -981,11 +988,8 @@ void WatchStream(StreamTab& tab, size_t tabIndex) {
     
     // Don't detach the thread - keep it joinable for proper synchronization
 
-    // Determine streaming mode based on settings
-    StreamingMode mode = StreamingMode::TX_QUEUE_IPC; // Default
-    
-    if (g_useBrowserPlayback) {
-        mode = StreamingMode::BROWSER_PLAYBACK;
+    // Add appropriate log message based on mode
+    if (mode == StreamingMode::BROWSER_PLAYBACK) {
         AddLog(L"[BROWSER] Starting Browser Playback streaming for " + tab.channel + L" (" + standardQuality + L")");
     } else {
         // TX-Queue IPC Mode is the default streaming mode for media players

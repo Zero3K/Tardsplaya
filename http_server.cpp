@@ -274,7 +274,8 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
             mediaSource.addEventListener('sourceopen', function() {
                 updateStatus('MediaSource opened, setting up buffer...');
                 
-                try {)";
+                try {
+)";
     
     html += R"(                    // Use MP2T format for MPEG-TS streams
                     sourceBuffer = mediaSource.addSourceBuffer('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
@@ -320,7 +321,8 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
                 }
                 return response.arrayBuffer();
             })
-            .then(data => {)";
+            .then(data => {
+)";
     
     html += R"(                if (data.byteLength > 0) {
                     segmentQueue.push(new Uint8Array(data));
@@ -362,7 +364,8 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
                 updateStatus('Failed to append buffer: ' + e.message);
                 isUpdating = false;
             }
-        })";
+        }
+)";
     
     html += R"(        
         function stopPlayback() {
