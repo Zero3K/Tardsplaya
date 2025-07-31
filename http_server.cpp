@@ -12,7 +12,9 @@ HttpStreamServer::HttpStreamServer() {
     WSADATA wsaData;
     int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (result != 0) {
-        OutputDebugStringA("WSAStartup failed\n");
+        OutputDebugStringA(("WSAStartup failed with error: " + std::to_string(result)).c_str());
+    } else {
+        OutputDebugStringA("WSAStartup successful");
     }
 }
 
@@ -29,25 +31,32 @@ bool HttpStreamServer::StartServer(int port) {
     
     port_ = port;
     
+    OutputDebugStringA(("Starting HTTP server on port " + std::to_string(port)).c_str());
+    
     // Create socket
     server_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (server_socket_ == INVALID_SOCKET) {
-        OutputDebugStringA("Failed to create server socket");
+        int error = WSAGetLastError();
+        OutputDebugStringA(("Failed to create server socket, error: " + std::to_string(error)).c_str());
         return false;
     }
     
     // Allow socket reuse
     int opt = 1;
-    setsockopt(server_socket_, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
+    if (setsockopt(server_socket_, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt)) == SOCKET_ERROR) {
+        int error = WSAGetLastError();
+        OutputDebugStringA(("Failed to set SO_REUSEADDR, error: " + std::to_string(error)).c_str());
+    }
     
     // Bind socket
     sockaddr_in server_addr = {};
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_addr.s_addr = inet_addr("127.0.0.1"); // Bind specifically to localhost
     server_addr.sin_port = htons(port_);
     
     if (bind(server_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        OutputDebugStringA(("Failed to bind to port " + std::to_string(port_)).c_str());
+        int error = WSAGetLastError();
+        OutputDebugStringA(("Failed to bind to port " + std::to_string(port_) + ", error: " + std::to_string(error)).c_str());
         closesocket(server_socket_);
         server_socket_ = INVALID_SOCKET;
         return false;
@@ -55,13 +64,14 @@ bool HttpStreamServer::StartServer(int port) {
     
     // Start listening
     if (listen(server_socket_, SOMAXCONN) == SOCKET_ERROR) {
-        OutputDebugStringA("Failed to start listening on socket");
+        int error = WSAGetLastError();
+        OutputDebugStringA(("Failed to start listening on socket, error: " + std::to_string(error)).c_str());
         closesocket(server_socket_);
         server_socket_ = INVALID_SOCKET;
         return false;
     }
     
-    OutputDebugStringA(("HTTP server listening on port " + std::to_string(port_)).c_str());
+    OutputDebugStringA(("HTTP server listening on 127.0.0.1:" + std::to_string(port_)).c_str());
     
     server_running_ = true;
     server_thread_ = std::thread(&HttpStreamServer::ServerThread, this);
@@ -123,6 +133,8 @@ std::wstring HttpStreamServer::GetStreamUrl() const {
 }
 
 void HttpStreamServer::ServerThread() {
+    OutputDebugStringA("HTTP Server thread started, entering main loop");
+    
     while (server_running_.load()) {
         fd_set read_fds;
         FD_ZERO(&read_fds);
@@ -132,21 +144,36 @@ void HttpStreamServer::ServerThread() {
         int result = select(0, &read_fds, nullptr, nullptr, &timeout);
         
         if (result > 0 && FD_ISSET(server_socket_, &read_fds)) {
-            SOCKET client_socket = accept(server_socket_, nullptr, nullptr);
+            sockaddr_in client_addr;
+            int addr_len = sizeof(client_addr);
+            SOCKET client_socket = accept(server_socket_, (sockaddr*)&client_addr, &addr_len);
             if (client_socket != INVALID_SOCKET) {
+                OutputDebugStringA("Accepted new client connection");
                 std::thread(&HttpStreamServer::HandleClient, this, client_socket).detach();
+            } else {
+                int error = WSAGetLastError();
+                OutputDebugStringA(("Accept failed with error: " + std::to_string(error)).c_str());
             }
+        } else if (result == SOCKET_ERROR) {
+            int error = WSAGetLastError();
+            OutputDebugStringA(("Select failed with error: " + std::to_string(error)).c_str());
         }
     }
+    
+    OutputDebugStringA("HTTP Server thread exiting");
 }
 
 void HttpStreamServer::HandleClient(SOCKET client_socket) {
+    OutputDebugStringA("HandleClient: Starting to handle new client");
+    
     char buffer[4096];
     int bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
     
     if (bytes_received > 0) {
         buffer[bytes_received] = '\0';
         std::string request(buffer);
+        
+        OutputDebugStringA(("HandleClient: Received " + std::to_string(bytes_received) + " bytes").c_str());
         
         // Parse HTTP request
         std::istringstream iss(request);
@@ -175,9 +202,11 @@ void HttpStreamServer::HandleClient(SOCKET client_socket) {
                                           "Content-Type: text/plain\r\n"
                                           "Content-Length: 4\r\n"
                                           "Access-Control-Allow-Origin: *\r\n"
+                                          "Connection: close\r\n"
                                           "\r\n"
                                           "pong";
-                send(client_socket, ping_response.c_str(), ping_response.length(), 0);
+                int bytes_sent = send(client_socket, ping_response.c_str(), ping_response.length(), 0);
+                OutputDebugStringA(("Ping response sent: " + std::to_string(bytes_sent) + " bytes").c_str());
             } else {
                 // 404 Not Found
                 OutputDebugStringA(("404 Not Found: " + path).c_str());
@@ -185,6 +214,7 @@ void HttpStreamServer::HandleClient(SOCKET client_socket) {
                                       "Content-Type: text/plain\r\n"
                                       "Content-Length: 13\r\n"
                                       "Access-Control-Allow-Origin: *\r\n"
+                                      "Connection: close\r\n"
                                       "\r\n"
                                       "File not found";
                 send(client_socket, not_found.c_str(), not_found.length(), 0);
@@ -198,11 +228,18 @@ void HttpStreamServer::HandleClient(SOCKET client_socket) {
                                       "Access-Control-Allow-Headers: Content-Type\r\n"
                                       "Access-Control-Max-Age: 86400\r\n"
                                       "Content-Length: 0\r\n"
+                                      "Connection: close\r\n"
                                       "\r\n";
             send(client_socket, cors_response.c_str(), cors_response.length(), 0);
         }
+    } else if (bytes_received == 0) {
+        OutputDebugStringA("HandleClient: Client closed connection gracefully");
+    } else {
+        int error = WSAGetLastError();
+        OutputDebugStringA(("HandleClient: recv failed with error: " + std::to_string(error)).c_str());
     }
     
+    OutputDebugStringA("HandleClient: Closing client socket");
     closesocket(client_socket);
 }
 
@@ -213,13 +250,16 @@ void HttpStreamServer::SendHttpResponse(SOCKET client_socket, const std::string&
     response << "Content-Length: " << data.size() << "\r\n";
     response << "Access-Control-Allow-Origin: *\r\n";
     response << "Cache-Control: no-cache\r\n";
+    response << "Connection: close\r\n";
     response << "\r\n";
     
     std::string header = response.str();
-    send(client_socket, header.c_str(), header.length(), 0);
+    int header_sent = send(client_socket, header.c_str(), header.length(), 0);
+    OutputDebugStringA(("SendHttpResponse: Header sent: " + std::to_string(header_sent) + " bytes").c_str());
     
     if (!data.empty()) {
-        send(client_socket, (char*)data.data(), data.size(), 0);
+        int data_sent = send(client_socket, (char*)data.data(), data.size(), 0);
+        OutputDebugStringA(("SendHttpResponse: Data sent: " + std::to_string(data_sent) + " bytes").c_str());
     }
 }
 
@@ -302,6 +342,8 @@ std::string HttpStreamServer::GetMimeType(const std::string& path) {
 void HttpStreamServer::ServeStreamData(SOCKET client_socket) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
     
+    OutputDebugStringA(("ServeStreamData: Buffer has " + std::to_string(stream_buffer_.size()) + " segments").c_str());
+    
     // Get the oldest buffered segment if available
     if (!stream_buffer_.empty()) {
         std::vector<uint8_t> segment_data = stream_buffer_.front();
@@ -315,6 +357,7 @@ void HttpStreamServer::ServeStreamData(SOCKET client_socket) {
         
         // Update bytes served counter
         total_bytes_served_ += segment_data.size();
+        OutputDebugStringA(("Total bytes served: " + std::to_string(total_bytes_served_.load())).c_str());
     } else {
         // No data available, send empty response
         OutputDebugStringA("No stream data available, sending 204 No Content");
@@ -323,7 +366,8 @@ void HttpStreamServer::ServeStreamData(SOCKET client_socket) {
                              "Cache-Control: no-cache\r\n"
                              "Connection: close\r\n"
                              "\r\n";
-        send(client_socket, response.c_str(), response.length(), 0);
+        int bytes_sent = send(client_socket, response.c_str(), response.length(), 0);
+        OutputDebugStringA(("204 response sent: " + std::to_string(bytes_sent) + " bytes").c_str());
     }
 }
 
@@ -440,38 +484,71 @@ function startPlayback() {
 }
 
 function testConnectivity() {
+    updateStatus('Testing server connectivity...');
+    
     fetch('/ping', { 
         method: 'GET',
-        cache: 'no-cache'
+        cache: 'no-cache',
+        headers: {
+            'Accept': 'text/plain'
+        }
     })
     .then(response => {
+        console.log('Ping response status:', response.status, 'statusText:', response.statusText);
+        console.log('Ping response headers:', Array.from(response.headers.entries()));
+        
         if (response.ok) {
-            updateStatus('Server connectivity OK, starting stream fetch...');
-            fetchSegments();
+            return response.text();
         } else {
-            throw new Error('Server responded with status: ' + response.status);
+            throw new Error('Server responded with status: ' + response.status + ' ' + response.statusText);
         }
+    })
+    .then(text => {
+        console.log('Ping response text:', text);
+        updateStatus('Server connectivity OK (received: ' + text + '), starting stream fetch...');
+        fetchSegments();
     })
     .catch(error => {
         console.error('Connectivity test failed:', error);
-        updateStatus('Server connectivity failed: ' + error.message);
+        console.error('Error details:', {
+            name: error.name,
+            message: error.message,
+            stack: error.stack
+        });
+        updateStatus('Server connectivity failed: ' + error.message + ' (type: ' + error.constructor.name + ')');
         // Still try to fetch segments after delay
-        setTimeout(fetchSegments, 2000);
+        setTimeout(() => {
+            updateStatus('Retrying stream fetch despite connectivity test failure...');
+            fetchSegments();
+        }, 2000);
     });
 }
 
 function fetchSegments() {
-    if (!isPlaying || !sourceBuffer) return;
+    if (!isPlaying || !sourceBuffer) {
+        console.log('fetchSegments: Aborted - isPlaying:', isPlaying, 'sourceBuffer:', !!sourceBuffer);
+        return;
+    }
+    
+    console.log('fetchSegments: Starting fetch request to /stream.ts');
+    updateStatus('Requesting stream data...');
     
     fetch('/stream.ts', { 
         method: 'GET',
-        cache: 'no-cache'
+        cache: 'no-cache',
+        headers: {
+            'Accept': 'video/mp2t'
+        }
     })
     .then(response => {
         console.log('Fetch response status:', response.status, 'statusText:', response.statusText);
+        console.log('Fetch response headers:', Array.from(response.headers.entries()));
+        console.log('Fetch response type:', response.type);
+        console.log('Fetch response url:', response.url);
+        
         if (response.status === 204) {
             // No content available, retry after delay
-            updateStatus('No data available, retrying...');
+            updateStatus('No data available (status 204), retrying...');
             if (isPlaying) {
                 setTimeout(fetchSegments, 1000);
             }
@@ -479,13 +556,18 @@ function fetchSegments() {
         } else if (!response.ok) {
             throw new Error('Network response was not ok: ' + response.status + ' ' + response.statusText);
         }
+        
+        updateStatus('Received response (status ' + response.status + '), processing data...');
         return response.arrayBuffer();
     })
     .then(data => {
         if (data && data.byteLength > 0) {
+            console.log('Received segment data:', data.byteLength, 'bytes');
             segmentQueue.push(new Uint8Array(data));
             processSegmentQueue();
-            updateStatus('Received segment (' + data.byteLength + ' bytes)');
+            updateStatus('Received segment (' + data.byteLength + ' bytes), queue length: ' + segmentQueue.length);
+        } else {
+            console.log('No data received or empty response');
         }
         
         // Continue fetching segments with appropriate delay
@@ -499,10 +581,21 @@ function fetchSegments() {
         console.error('Fetch error details:', error);
         console.error('Error type:', error.constructor.name);
         console.error('Error message:', error.message);
-        updateStatus('Fetch error: ' + error.message + ' (type: ' + error.constructor.name + ')');
+        console.error('Error stack:', error.stack);
+        
+        // Check for specific error types
+        let errorDetail = '';
+        if (error instanceof TypeError) {
+            errorDetail = ' (likely network/connectivity issue)';
+        } else if (error.name === 'AbortError') {
+            errorDetail = ' (request was aborted)';
+        }
+        
+        updateStatus('Fetch error: ' + error.message + ' (type: ' + error.constructor.name + ')' + errorDetail);
         
         // Retry after error with longer delay
         if (isPlaying) {
+            console.log('Scheduling retry in 3 seconds...');
             setTimeout(fetchSegments, 3000);
         }
     });
