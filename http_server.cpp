@@ -276,9 +276,7 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
                 
                 try {
                     // Use MP2T format for MPEG-TS streams
-)";
-    
-    html += R"(                    sourceBuffer = mediaSource.addSourceBuffer('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
+                    sourceBuffer = mediaSource.addSourceBuffer('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
                     
                     sourceBuffer.addEventListener('updateend', function() {
                         isUpdating = false;
@@ -323,9 +321,7 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
             })
             .then(data => {
                 if (data.byteLength > 0) {
-)";
-    
-    html += R"(                    segmentQueue.push(new Uint8Array(data));
+                    segmentQueue.push(new Uint8Array(data));
                     processSegmentQueue();
                     updateStatus('Received segment (' + data.byteLength + ' bytes)');
                 } else {
@@ -367,9 +363,7 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
         }
         
         function stopPlayback() {
-)";
-    
-    html += R"(            isPlaying = false;
+            isPlaying = false;
             
             if (mediaSource && mediaSource.readyState === 'open') {
                 try {
