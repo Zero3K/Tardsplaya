@@ -1389,3 +1389,179 @@ bool BufferAndPipeStreamToPlayer(
     // was terminated (which could be user closing the player), consider it successful
     return normal_end || user_cancel || !ProcessStillRunning(pi.hProcess, channel_name + L" final_return_check", pi.dwProcessId);
 }
+
+// Browser version: Downloads HLS stream and serves to HTTP server for browser playback
+bool BufferAndServeStreamToBrowser(
+    tardsplaya::HttpStreamServer* http_server,
+    const std::wstring& playlist_url,
+    std::atomic<bool>& cancel_token,
+    int buffer_segments,
+    const std::wstring& channel_name,
+    std::atomic<int>* chunk_count,
+    const std::wstring& selected_quality
+) {
+    if (!http_server) {
+        AddDebugLog(L"BufferAndServeStreamToBrowser: HTTP server is null for " + channel_name);
+        return false;
+    }
+
+    AddDebugLog(L"BufferAndServeStreamToBrowser: Starting browser streaming for " + channel_name + L", URL=" + playlist_url);
+    
+    // Track active streams
+    int current_stream_count;
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        current_stream_count = ++g_active_streams;
+    }
+
+    AddDebugLog(L"[BROWSER] This is stream #" + std::to_wstring(current_stream_count) + L" concurrently active");
+
+    // 1. Download the master playlist and pick the first media playlist
+    std::string master;
+    if (cancel_token.load()) return false;
+    if (!HttpGetText(playlist_url, master, &cancel_token)) {
+        AddDebugLog(L"BufferAndServeStreamToBrowser: Failed to download master playlist for " + channel_name);
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        --g_active_streams;
+        return false;
+    }
+
+    // If this is a master playlist, pick the first stream URL
+    std::wstring media_playlist_url = playlist_url;
+    bool is_master = false;
+    std::istringstream ss(master);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.find("#EXT-X-STREAM-INF:") == 0) is_master = true;
+        if (is_master && !line.empty() && line[0] != '#') {
+            media_playlist_url = JoinUrl(playlist_url, std::wstring(line.begin(), line.end()));
+            break;
+        }
+    }
+    AddDebugLog(L"BufferAndServeStreamToBrowser: Using media playlist URL=" + media_playlist_url + L" for " + channel_name);
+
+    // 2. Setup streaming variables
+    std::set<std::wstring> seen_urls;
+    std::atomic<bool> download_running(true);
+    std::atomic<bool> stream_ended_normally(false);
+    
+    AddDebugLog(L"BufferAndServeStreamToBrowser: Starting segment download loop for " + channel_name);
+
+    // 3. Main download and serving loop
+    int consecutive_errors = 0;
+    const int max_consecutive_errors = 15;
+    int segments_served = 0;
+    
+    while (download_running.load() && !cancel_token.load() && consecutive_errors < max_consecutive_errors) {
+        AddDebugLog(L"[BROWSER] Download loop iteration for " + channel_name + 
+                   L", consecutive_errors=" + std::to_wstring(consecutive_errors));
+        
+        // Download current playlist
+        std::string playlist;
+        if (!HttpGetText(media_playlist_url, playlist, &cancel_token)) {
+            consecutive_errors++;
+            AddDebugLog(L"[BROWSER] Playlist fetch FAILED for " + channel_name + 
+                       L", error " + std::to_wstring(consecutive_errors) + L"/" + 
+                       std::to_wstring(max_consecutive_errors));
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            continue;
+        }
+        consecutive_errors = 0;
+        AddDebugLog(L"[BROWSER] Playlist fetch SUCCESS for " + channel_name);
+
+        // Check for stream end
+        if (playlist.find("#EXT-X-ENDLIST") != std::string::npos) {
+            AddDebugLog(L"[BROWSER] Found #EXT-X-ENDLIST - stream ended for " + channel_name);
+            stream_ended_normally = true;
+            break;
+        }
+
+        // Parse segments
+        auto parse_result = ParseSegments(playlist);
+        auto segments = parse_result.first;
+        
+        AddDebugLog(L"[BROWSER] Parsed " + std::to_wstring(segments.size()) + 
+                   L" segments from playlist for " + channel_name);
+        
+        // Download new segments and serve them to HTTP server
+        int new_segments_downloaded = 0;
+        for (auto& seg : segments) {
+            if (!download_running || cancel_token.load()) {
+                AddDebugLog(L"[BROWSER] Breaking segment loop - download_running=" + 
+                           std::to_wstring(download_running.load()) + L", cancel=" + 
+                           std::to_wstring(cancel_token.load()) + L" for " + channel_name);
+                break;
+            }
+            
+            // Skip segments that aren't regular .ts/.aac files
+            if (seg.find(L"http") != 0) {
+                AddDebugLog(L"[BROWSER] Skipping non-HTTP segment: " + seg.substr(0, 50) + L"...");
+                continue;
+            }
+            
+            // Check if this is a regular segment we've already seen
+            if (seen_urls.count(seg)) continue;
+            
+            seen_urls.insert(seg);
+            std::wstring seg_url = JoinUrl(media_playlist_url, seg);
+            std::vector<char> seg_data;
+            
+            // Download with retries
+            bool download_ok = false;
+            for (int retry = 0; retry < 3; ++retry) {
+                if (HttpGetBinary(seg_url, seg_data, 1, &cancel_token)) {
+                    download_ok = true;
+                    break;
+                }
+                if (!download_running || cancel_token.load()) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            }
+
+            if (download_ok && !seg_data.empty()) {
+                // Convert to uint8_t vector for HTTP server
+                std::vector<uint8_t> server_data(seg_data.begin(), seg_data.end());
+                http_server->AddStreamData(server_data);
+                
+                new_segments_downloaded++;
+                segments_served++;
+                
+                // Update chunk count for status display
+                if (chunk_count) {
+                    *chunk_count = segments_served;
+                }
+                
+                AddDebugLog(L"[BROWSER] Downloaded and served segment " + std::to_wstring(new_segments_downloaded) + 
+                           L" (total: " + std::to_wstring(segments_served) + L") for " + channel_name);
+            } else {
+                AddDebugLog(L"[BROWSER] FAILED to download segment after retries for " + channel_name);
+            }
+        }
+        
+        AddDebugLog(L"[BROWSER] Segment batch complete - downloaded " + std::to_wstring(new_segments_downloaded) + 
+                   L" new segments for " + channel_name);
+
+        // Sleep before next playlist fetch
+        for (int i = 0; i < 15 && download_running.load() && !cancel_token.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Total 1.5 seconds
+        }
+    }
+    
+    // Cleanup
+    download_running = false;
+    
+    // Decrement active stream counter
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        --g_active_streams;
+    }
+    
+    bool normal_end = stream_ended_normally.load();
+    bool user_cancel = cancel_token.load();
+    
+    AddDebugLog(L"BufferAndServeStreamToBrowser: Cleanup complete for " + channel_name + 
+               L", served " + std::to_wstring(segments_served) + L" segments");
+    AddDebugLog(L"[BROWSER] Exit reason: normal_end=" + std::to_wstring(normal_end) + 
+               L", user_cancel=" + std::to_wstring(user_cancel) + L" for " + channel_name);
+    
+    return normal_end || user_cancel;
+}

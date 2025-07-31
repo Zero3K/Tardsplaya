@@ -148,24 +148,16 @@ void HttpStreamServer::HandleClient(SOCKET client_socket) {
             if (path == "/" || path == "/player.html") {
                 SendPlayerHtml(client_socket);
             } else if (path == "/stream.ts") {
-                // Send stream data
-                std::vector<uint8_t> data;
-                {
-                    std::unique_lock<std::mutex> lock(buffer_mutex_);
-                    if (!stream_buffer_.empty()) {
-                        data = stream_buffer_.front();
-                        stream_buffer_.pop();
-                    }
-                }
-                
-                if (!data.empty()) {
-                    SendHttpResponse(client_socket, "video/mp2t", data);
-                    total_bytes_served_ += data.size();
-                } else {
-                    // Send empty response if no data available
-                    std::vector<uint8_t> empty_data;
-                    SendHttpResponse(client_socket, "video/mp2t", empty_data);
-                }
+                // Send latest stream data - for mpegts.js we need to serve MPEG-TS formatted data
+                // For now, return a placeholder response
+                std::string response = "HTTP/1.1 200 OK\r\n"
+                                     "Content-Type: video/mp2t\r\n"
+                                     "Access-Control-Allow-Origin: *\r\n"
+                                     "Cache-Control: no-cache\r\n"
+                                     "Connection: close\r\n"
+                                     "\r\n";
+                send(client_socket, response.c_str(), response.length(), 0);
+                // Note: Real stream data would be sent here by the streaming thread
             } else {
                 // 404 Not Found
                 std::string not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
@@ -253,68 +245,142 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
         <button onclick="stopPlayback()">Stop</button>
         <button onclick="toggleFullscreen()">Fullscreen</button>
     </div>
-    <div id="status">Status: Waiting for stream...</div>
+    <div id="status">Status: Initializing browser player...</div>
 
-    <script src="https://cdn.jsdelivr.net/npm/mpegts.js@latest/dist/mpegts.js"></script>
     <script>
-        let player = null;
+        let mediaSource = null;
+        let sourceBuffer = null;
         let isPlaying = false;
+        let segmentQueue = [];
+        let isUpdating = false;
         
         function updateStatus(message) {
             document.getElementById('status').textContent = 'Status: ' + message;
         }
         
         function startPlayback() {
-            if (player) {
-                player.destroy();
+            if (!('MediaSource' in window)) {
+                updateStatus('MediaSource API not supported in this browser');
+                return;
             }
             
-            if (mpegts.getFeatureList().mseLivePlayback) {
-                const videoElement = document.getElementById('videoPlayer');
-                
-                player = mpegts.createPlayer({
-                    type: 'mpegts',
-                    isLive: true,
-                    url: '/stream.ts'
-                });
-                
-                player.attachMediaElement(videoElement);
-                
-                player.on(mpegts.Events.ERROR, function(type, info) {
-                    console.error('Player error:', type, info);
-                    updateStatus('Error: ' + info.details);
-                });
-                
-                player.on(mpegts.Events.LOADING_COMPLETE, function() {
-                    updateStatus('Stream loaded successfully');
-                });
-                
-                player.on(mpegts.Events.MEDIA_INFO, function(mediaInfo) {
-                    console.log('Media info:', mediaInfo);
-                    updateStatus('Playing: ' + mediaInfo.width + 'x' + mediaInfo.height);
-                });
+            const videoElement = document.getElementById('videoPlayer');
+            
+            // Create MediaSource
+            mediaSource = new MediaSource();
+            videoElement.src = URL.createObjectURL(mediaSource);
+            
+            mediaSource.addEventListener('sourceopen', function() {
+                updateStatus('MediaSource opened, setting up buffer...');
                 
                 try {
-                    player.load();
-                    player.play();
-                    isPlaying = true;
-                    updateStatus('Starting playback...');
+                    // Use MP2T format for MPEG-TS streams
+                    sourceBuffer = mediaSource.addSourceBuffer('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"');
+                    
+                    sourceBuffer.addEventListener('updateend', function() {
+                        isUpdating = false;
+                        // Process next segment in queue
+                        processSegmentQueue();
+                    });
+                    
+                    sourceBuffer.addEventListener('error', function(e) {
+                        console.error('SourceBuffer error:', e);
+                        updateStatus('SourceBuffer error - check console');
+                    });
+                    
+                    updateStatus('Buffer ready, starting stream fetch...');
+                    fetchSegments();
+                    
                 } catch (e) {
-                    console.error('Failed to start playback:', e);
-                    updateStatus('Failed to start playback: ' + e.message);
+                    console.error('Failed to create SourceBuffer:', e);
+                    updateStatus('Failed to create SourceBuffer: ' + e.message);
                 }
-            } else {
-                updateStatus('MSE Live Playback not supported in this browser');
+            });
+            
+            mediaSource.addEventListener('error', function(e) {
+                console.error('MediaSource error:', e);
+                updateStatus('MediaSource error - check console');
+            });
+            
+            isPlaying = true;
+        }
+        
+        function fetchSegments() {
+            if (!isPlaying || !sourceBuffer) return;
+            
+            fetch('/stream.ts', { 
+                method: 'GET',
+                cache: 'no-cache'
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+                return response.arrayBuffer();
+            })
+            .then(data => {
+                if (data.byteLength > 0) {
+                    segmentQueue.push(new Uint8Array(data));
+                    processSegmentQueue();
+                    updateStatus('Received segment (' + data.byteLength + ' bytes)');
+                } else {
+                    updateStatus('No data available, retrying...');
+                }
+                
+                // Continue fetching segments
+                if (isPlaying) {
+                    setTimeout(fetchSegments, 1000); // Fetch every second
+                }
+            })
+            .catch(error => {
+                console.error('Fetch error:', error);
+                updateStatus('Fetch error: ' + error.message);
+                
+                // Retry after error
+                if (isPlaying) {
+                    setTimeout(fetchSegments, 2000);
+                }
+            });
+        }
+        
+        function processSegmentQueue() {
+            if (isUpdating || segmentQueue.length === 0 || !sourceBuffer) {
+                return;
+            }
+            
+            const segment = segmentQueue.shift();
+            isUpdating = true;
+            
+            try {
+                sourceBuffer.appendBuffer(segment);
+                updateStatus('Processing segment (' + segment.length + ' bytes)');
+            } catch (e) {
+                console.error('Failed to append buffer:', e);
+                updateStatus('Failed to append buffer: ' + e.message);
+                isUpdating = false;
             }
         }
         
         function stopPlayback() {
-            if (player) {
-                player.destroy();
-                player = null;
-                isPlaying = false;
-                updateStatus('Playback stopped');
+            isPlaying = false;
+            
+            if (mediaSource && mediaSource.readyState === 'open') {
+                try {
+                    mediaSource.endOfStream();
+                } catch (e) {
+                    console.warn('Error ending stream:', e);
+                }
             }
+            
+            const videoElement = document.getElementById('videoPlayer');
+            videoElement.src = '';
+            
+            mediaSource = null;
+            sourceBuffer = null;
+            segmentQueue = [];
+            isUpdating = false;
+            
+            updateStatus('Playback stopped');
         }
         
         function toggleFullscreen() {
@@ -330,6 +396,7 @@ void HttpStreamServer::SendPlayerHtml(SOCKET client_socket) {
         
         // Auto-start playback when page loads
         window.addEventListener('load', function() {
+            updateStatus('Page loaded, ready to start');
             setTimeout(startPlayback, 1000);
         });
         

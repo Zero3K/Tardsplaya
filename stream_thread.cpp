@@ -73,48 +73,11 @@ std::thread StartStreamThread(
                     log_callback(L"[BROWSER] Starting stream download and HTTP serving");
                 }
                 
-                // Use traditional HLS streaming logic but pipe to HTTP server instead of media player
-                bool stream_success = false;
-                try {
-                    // For now, use a simplified approach - we'll need to implement
-                    // BrowserBufferAndServeStream function similar to BufferAndPipeStreamToPlayer
-                    // but serving data to HTTP server instead of piping to stdin
-                    
-                    // TODO: Implement proper segment downloading and HTTP serving
-                    // For now, use a placeholder that demonstrates the concept
-                    
-                    if (log_callback) {
-                        log_callback(L"[BROWSER] Stream serving active - browser should connect automatically");
-                    }
-                    
-                    // Keep the server running while not cancelled
-                    int segments_served = 0;
-                    while (!cancel_token.load() && http_server->IsRunning()) {
-                        std::this_thread::sleep_for(std::chrono::seconds(1));
-                        
-                        // Update chunk count for status display
-                        if (chunk_count) {
-                            *chunk_count = segments_served;
-                        }
-                        
-                        segments_served++;
-                        
-                        // Periodically log status
-                        if (segments_served % 10 == 0 && log_callback) {
-                            log_callback(L"[BROWSER] HTTP server active, " + 
-                                        std::to_wstring(segments_served) + L" status updates");
-                        }
-                    }
-                    
-                    stream_success = true;
-                    
-                } catch (const std::exception& e) {
-                    std::string error_msg = e.what();
-                    if (log_callback) {
-                        log_callback(L"[BROWSER] Stream serving error: " + 
-                                   std::wstring(error_msg.begin(), error_msg.end()));
-                    }
-                }
+                // Use browser buffering and serving function
+                bool stream_success = BufferAndServeStreamToBrowser(
+                    http_server.get(), playlist_url, cancel_token, buffer_segments, 
+                    channel_name, chunk_count, selected_quality
+                );
                 
                 // Stop HTTP server
                 http_server->StopServer();
